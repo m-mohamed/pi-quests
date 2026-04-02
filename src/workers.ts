@@ -146,7 +146,7 @@ Project learned workflows:
 ${learnedWorkflowSection(workflows)}`;
 }
 
-function featurePrompt(quest: QuestState, feature: QuestFeature, milestone: QuestMilestone, workflows: LearnedWorkflow[]): string {
+export function buildFeaturePrompt(quest: QuestState, feature: QuestFeature, milestone: QuestMilestone, workflows: LearnedWorkflow[]): string {
 	const criteria = feature.acceptanceCriteria.length
 		? feature.acceptanceCriteria.map((item) => `- ${item}`).join("\n")
 		: "- Complete the feature cleanly.";
@@ -198,7 +198,7 @@ At the end, output:
 `;
 }
 
-function workerSystemPrompt(): string {
+export function buildWorkerSystemPrompt(): string {
 	return `You are a quest worker executing a single feature within a larger Pi quest.
 
 Rules:
@@ -211,7 +211,7 @@ Rules:
 - End with the required JSON block.`;
 }
 
-function validatorPrompt(quest: QuestState, milestone: QuestMilestone, features: QuestFeature[], workflows: LearnedWorkflow[]): string {
+export function buildValidatorPrompt(quest: QuestState, milestone: QuestMilestone, features: QuestFeature[], workflows: LearnedWorkflow[]): string {
 	const featureList = features.map((feature) => `- ${feature.title}: ${feature.lastRunSummary ?? feature.summary}`).join("\n");
 	const criteria = milestone.successCriteria.length
 		? milestone.successCriteria.map((item) => `- ${item}`).join("\n")
@@ -263,7 +263,7 @@ At the end, output:
 `;
 }
 
-function validatorSystemPrompt(): string {
+export function buildValidatorSystemPrompt(): string {
 	return `You are a read-only quest validator.
 
 Rules:
@@ -273,7 +273,7 @@ Rules:
 - End with the required JSON block.`;
 }
 
-function planRevisionSystemPrompt(): string {
+export function buildPlanRevisionSystemPrompt(): string {
 	return `You are the quest orchestrator revising only the remaining plan for an existing Pi quest.
 
 Rules:
@@ -413,8 +413,8 @@ export async function executeFeatureWorker(
 		role: "worker",
 		featureId: feature.id,
 		milestoneId: milestone.id,
-		systemPrompt: workerSystemPrompt(),
-		prompt: featurePrompt(quest, feature, milestone, workflows),
+		systemPrompt: buildWorkerSystemPrompt(),
+		prompt: buildFeaturePrompt(quest, feature, milestone, workflows),
 		onSnapshot,
 	});
 
@@ -461,8 +461,8 @@ export async function executeValidator(
 		tools: ["read", "bash"],
 		role: "validator",
 		milestoneId: milestone.id,
-		systemPrompt: validatorSystemPrompt(),
-		prompt: validatorPrompt(quest, milestone, features, workflows),
+		systemPrompt: buildValidatorSystemPrompt(),
+		prompt: buildValidatorPrompt(quest, milestone, features, workflows),
 		onSnapshot,
 	});
 
@@ -508,7 +508,7 @@ export async function executePlanRevision(
 		modelChoice,
 		tools: ["read", "bash"],
 		role: "orchestrator",
-		systemPrompt: planRevisionSystemPrompt(),
+		systemPrompt: buildPlanRevisionSystemPrompt(),
 		prompt: revisionInstructions(quest, requests, workflows),
 		onSnapshot,
 	});

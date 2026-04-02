@@ -1,6 +1,6 @@
 {
   "name": "pi-quests",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "Private personal Pi extension for validation-first quest orchestration",
   "type": "module",
@@ -15,8 +15,11 @@
   },
   "scripts": {
     "test": "bun test",
+    "evals": "bun run scripts/evals.ts",
+    "evals:regression": "bun run scripts/evals.ts --suite regression",
+    "evals:capability": "bun run scripts/evals.ts --suite capability",
     "smoke": "bun run scripts/smoke.ts",
-    "verify": "bun test && bun run scripts/smoke.ts"
+    "verify": "bun test && bun run scripts/evals.ts --suite regression && bun run scripts/smoke.ts"
   },
   "pi": {
     "extensions": [

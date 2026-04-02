@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0
+
+- added deterministic regression and capability eval suites for quest orchestration
+- made `verify` gate on regression evals before smoke validation
+- documented an eval-first development loop for improving the extension safely
+- exported prompt builders so prompt and validator behavior can be regression-tested directly
+
 ## 0.5.0
 
 - finalized the quest-only command and storage surface

@@ -105,17 +105,45 @@ The extension is structured like a small standalone project even though the depl
 Included support files:
 
 - `CHANGELOG.md`
+- `evals/README.md`
 - `LICENSE`
 - `tests/`
+- `scripts/evals.ts`
 - `scripts/smoke.ts`
 
 Local verification:
 
 ```bash
 bun test
+bun run evals
+bun run evals:regression
+bun run evals:capability
 bun run scripts/smoke.ts
 bun run verify
 ```
+
+## Eval-First Development
+
+Quest improvements should be driven by evals, not intuition.
+
+The repo now carries two deterministic suites:
+
+- regression evals: release-gating checks for quest invariants that must not regress
+- capability evals: prompt/orchestration checks for validation-first quest behavior
+
+The current eval harness is intentionally Pi-native:
+
+- code-graded and deterministic
+- separate from live model judging
+- separate from human QA
+- narrow enough to run on every local iteration
+
+Human interactive review still matters for:
+
+- proposal-review quality in the TUI
+- Quest Control ergonomics
+- live worker and validator behavior
+- final QA judgment before `/quest approve`
 
 Interactive verification checklist:
 

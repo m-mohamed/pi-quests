@@ -1,0 +1,26 @@
+{
+  "name": "pi-quests",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Private personal Pi extension for validation-first quest orchestration",
+  "type": "module",
+  "keywords": [
+    "pi-extension",
+    "quests",
+    "pi-coding-agent"
+  ],
+  "license": "UNLICENSED",
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "scripts": {
+    "test": "bun test",
+    "smoke": "bun run scripts/smoke.ts",
+    "verify": "bun test && bun run scripts/smoke.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

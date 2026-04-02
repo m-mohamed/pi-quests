@@ -15,9 +15,7 @@ import type {
 
 const ACTIVE_FILE = "active.json";
 const QUESTS_ROOT_DIR = "quests";
-const LEGACY_QUESTS_ROOT_DIR = "missions";
 const QUEST_FILE = "quest.json";
-const LEGACY_QUEST_FILE = "mission.json";
 const EVENTS_FILE = "events.jsonl";
 const WORKERS_DIR = "workers";
 const PROJECTS_METADATA_DIR = "projects";
@@ -60,19 +58,8 @@ export function getQuestPathsFromAgentDir(agentDir: string, cwd: string, questId
 	return storagePathsFor(agentDir, cwd, questId, QUESTS_ROOT_DIR, QUEST_FILE);
 }
 
-function getLegacyQuestPathsFromAgentDir(agentDir: string, cwd: string, questId: string): QuestStoragePaths {
-	return storagePathsFor(agentDir, cwd, questId, LEGACY_QUESTS_ROOT_DIR, LEGACY_QUEST_FILE);
-}
-
-function getProjectPathsFromAgentDir(agentDir: string, cwd: string) {
-	return {
-		canonical: getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__"),
-		legacy: getLegacyQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__"),
-	};
-}
-
 async function ensureProjectDir(agentDir: string, cwd: string): Promise<QuestStoragePaths> {
-	const { canonical: paths } = getProjectPathsFromAgentDir(agentDir, cwd);
+	const paths = getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
 	await mkdir(paths.projectDir, { recursive: true });
 	await mkdir(paths.projectWorkflowsDir, { recursive: true });
 	return paths;
@@ -88,31 +75,25 @@ async function ensureQuestDir(agentDir: string, cwd: string, questId: string): P
 }
 
 export async function setActiveQuestId(agentDir: string, cwd: string, questId: string | null): Promise<void> {
-	const { canonical: paths, legacy: legacyPaths } = getProjectPathsFromAgentDir(agentDir, cwd);
+	const paths = getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
 	if (!questId) {
 		if (existsSync(paths.activeFile)) await unlink(paths.activeFile);
-		if (existsSync(legacyPaths.activeFile)) await unlink(legacyPaths.activeFile);
 		return;
 	}
 	await mkdir(paths.projectDir, { recursive: true });
 	await writeFile(paths.activeFile, `${JSON.stringify({ questId })}\n`, "utf-8");
-	if (existsSync(legacyPaths.activeFile)) await unlink(legacyPaths.activeFile);
 }
 
 export async function getActiveQuestId(agentDir: string, cwd: string): Promise<string | null> {
-	const { canonical: paths, legacy: legacyPaths } = getProjectPathsFromAgentDir(agentDir, cwd);
-	for (const candidate of [paths.activeFile, legacyPaths.activeFile]) {
-		if (!existsSync(candidate)) continue;
-		try {
-			const raw = await readFile(candidate, "utf-8");
-			const parsed = JSON.parse(raw) as { questId?: string; missionId?: string };
-			const id = parsed.questId ?? parsed.missionId ?? null;
-			if (id) return id;
-		} catch {
-			continue;
-		}
+	const paths = getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
+	if (!existsSync(paths.activeFile)) return null;
+	try {
+		const raw = await readFile(paths.activeFile, "utf-8");
+		const parsed = JSON.parse(raw) as { questId?: string };
+		return parsed.questId ?? null;
+	} catch {
+		return null;
 	}
-	return null;
 }
 
 export async function saveQuest(agentDir: string, quest: QuestState): Promise<void> {
@@ -133,16 +114,14 @@ export async function writeWorkerRun(agentDir: string, cwd: string, questId: str
 }
 
 export async function loadQuest(agentDir: string, cwd: string, questId: string): Promise<QuestState | null> {
-	for (const paths of [getQuestPathsFromAgentDir(agentDir, cwd, questId), getLegacyQuestPathsFromAgentDir(agentDir, cwd, questId)]) {
-		if (!existsSync(paths.questFile)) continue;
-		try {
-			const raw = await readFile(paths.questFile, "utf-8");
-			return JSON.parse(raw) as QuestState;
-		} catch {
-			continue;
-		}
+	const paths = getQuestPathsFromAgentDir(agentDir, cwd, questId);
+	if (!existsSync(paths.questFile)) return null;
+	try {
+		const raw = await readFile(paths.questFile, "utf-8");
+		return JSON.parse(raw) as QuestState;
+	} catch {
+		return null;
 	}
-	return null;
 }
 
 export async function loadActiveQuest(agentDir: string, cwd: string): Promise<QuestState | null> {
@@ -209,41 +188,37 @@ export async function pruneQuestStorage(agentDir: string, now = Date.now()): Pro
 	let prunedLogs = 0;
 	let deletedRuns = 0;
 
-	for (const [rootDir, questFileName] of [
-		[join(agentDir, QUESTS_ROOT_DIR), QUEST_FILE] as const,
-		[join(agentDir, LEGACY_QUESTS_ROOT_DIR), LEGACY_QUEST_FILE] as const,
-	]) {
-		for (const projectDir of await listProjectDirs(rootDir)) {
-			for (const questDir of await listQuestDirs(projectDir)) {
-				const questFile = join(questDir, questFileName);
-				if (!existsSync(questFile)) continue;
+	const rootDir = join(agentDir, QUESTS_ROOT_DIR);
+	for (const projectDir of await listProjectDirs(rootDir)) {
+		for (const questDir of await listQuestDirs(projectDir)) {
+			const questFile = join(questDir, QUEST_FILE);
+			if (!existsSync(questFile)) continue;
 
-				let quest: QuestState | null = null;
-				try {
-					quest = JSON.parse(await readFile(questFile, "utf-8")) as QuestState;
-				} catch {
-					continue;
-				}
-				if (!quest || !TERMINAL_STATUSES.has(quest.status) || quest.prunedAt) continue;
-				if (now - quest.updatedAt < PRUNE_LOG_AGE_MS) continue;
-
-				const eventsFile = join(questDir, EVENTS_FILE);
-				if (existsSync(eventsFile)) {
-					await unlink(eventsFile);
-					prunedLogs++;
-				}
-
-				const workersDir = join(questDir, WORKERS_DIR);
-				if (existsSync(workersDir)) {
-					const entries = await readdir(workersDir);
-					deletedRuns += entries.length;
-					await rm(workersDir, { recursive: true, force: true });
-				}
-
-				quest.prunedAt = now;
-				quest.updatedAt = now;
-				await writeFile(questFile, `${JSON.stringify(quest, null, 2)}\n`, "utf-8");
+			let quest: QuestState | null = null;
+			try {
+				quest = JSON.parse(await readFile(questFile, "utf-8")) as QuestState;
+			} catch {
+				continue;
 			}
+			if (!quest || !TERMINAL_STATUSES.has(quest.status) || quest.prunedAt) continue;
+			if (now - quest.updatedAt < PRUNE_LOG_AGE_MS) continue;
+
+			const eventsFile = join(questDir, EVENTS_FILE);
+			if (existsSync(eventsFile)) {
+				await unlink(eventsFile);
+				prunedLogs++;
+			}
+
+			const workersDir = join(questDir, WORKERS_DIR);
+			if (existsSync(workersDir)) {
+				const entries = await readdir(workersDir);
+				deletedRuns += entries.length;
+				await rm(workersDir, { recursive: true, force: true });
+			}
+
+			quest.prunedAt = now;
+			quest.updatedAt = now;
+			await writeFile(questFile, `${JSON.stringify(quest, null, 2)}\n`, "utf-8");
 		}
 	}
 
@@ -255,16 +230,14 @@ export function trimRecentRuns<T extends { startedAt: number }>(runs: T[], max =
 }
 
 export async function loadLearnedWorkflows(agentDir: string, cwd: string): Promise<LearnedWorkflow[]> {
-	const { canonical: paths, legacy: legacyPaths } = getProjectPathsFromAgentDir(agentDir, cwd);
-	for (const file of [paths.projectWorkflowsFile, legacyPaths.projectWorkflowsFile]) {
-		if (!existsSync(file)) continue;
-		try {
-			const raw = await readFile(file, "utf-8");
-			const parsed = JSON.parse(raw);
-			if (Array.isArray(parsed)) return parsed as LearnedWorkflow[];
-		} catch {
-			continue;
-		}
+	const paths = getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
+	if (!existsSync(paths.projectWorkflowsFile)) return [];
+	try {
+		const raw = await readFile(paths.projectWorkflowsFile, "utf-8");
+		const parsed = JSON.parse(raw);
+		if (Array.isArray(parsed)) return parsed as LearnedWorkflow[];
+	} catch {
+		return [];
 	}
 	return [];
 }
@@ -275,21 +248,17 @@ export async function saveLearnedWorkflows(agentDir: string, cwd: string, workfl
 }
 
 export async function questDirStats(agentDir: string, cwd: string, questId: string): Promise<{ hasEvents: boolean; runFiles: number }> {
-	for (const paths of [getQuestPathsFromAgentDir(agentDir, cwd, questId), getLegacyQuestPathsFromAgentDir(agentDir, cwd, questId)]) {
-		if (!existsSync(paths.questFile)) continue;
-		const hasEvents = existsSync(paths.eventsFile);
-		let runFiles = 0;
-		if (existsSync(paths.workersDir)) runFiles = (await readdir(paths.workersDir)).length;
-		return { hasEvents, runFiles };
-	}
-	return { hasEvents: false, runFiles: 0 };
+	const paths = getQuestPathsFromAgentDir(agentDir, cwd, questId);
+	if (!existsSync(paths.questFile)) return { hasEvents: false, runFiles: 0 };
+	const hasEvents = existsSync(paths.eventsFile);
+	let runFiles = 0;
+	if (existsSync(paths.workersDir)) runFiles = (await readdir(paths.workersDir)).length;
+	return { hasEvents, runFiles };
 }
 
 export async function questAgeMs(agentDir: string, cwd: string, questId: string): Promise<number | null> {
-	for (const paths of [getQuestPathsFromAgentDir(agentDir, cwd, questId), getLegacyQuestPathsFromAgentDir(agentDir, cwd, questId)]) {
-		if (!existsSync(paths.questFile)) continue;
-		const stats = await stat(paths.questFile);
-		return Date.now() - stats.mtimeMs;
-	}
-	return null;
+	const paths = getQuestPathsFromAgentDir(agentDir, cwd, questId);
+	if (!existsSync(paths.questFile)) return null;
+	const stats = await stat(paths.questFile);
+	return Date.now() - stats.mtimeMs;
 }

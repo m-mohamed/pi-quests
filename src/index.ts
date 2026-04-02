@@ -791,16 +791,6 @@ export default function questExtension(pi: ExtensionAPI) {
 		handler: handleQuestCommand,
 	});
 
-	pi.registerCommand("mission", {
-		description: "Compatibility alias for /quest",
-		handler: handleQuestCommand,
-	});
-
-	pi.registerCommand("missions", {
-		description: "Compatibility alias for /quests",
-		handler: handleQuestCommand,
-	});
-
 	pi.on("session_start", async (_event, ctx) => {
 		await pruneQuestStorage();
 		await loadQuestForContext(ctx);

@@ -83,10 +83,6 @@ async function main() {
 		assert(status.stdout.includes("No active quest"), "extension did not respond to /quest status");
 		assert(!existsSync(join(agentDir, "quests")), "status should not create quest storage before a quest exists");
 
-		const legacyStatus = await runPi(agentDir, resolvedRepoDir, "/mission status");
-		assert(legacyStatus.exitCode === 0, `legacy mission status command failed: ${legacyStatus.stderr}`);
-		assert(legacyStatus.stdout.includes("No active quest"), "legacy /mission alias did not route to the quest status surface");
-
 		const approvedQuest = await createQuest(agentDir, resolvedRepoDir, "finish the qa loop", MODEL);
 		approvedQuest.status = "completed";
 		approvedQuest.shipReadiness = "validated_waiting_for_human_qa";

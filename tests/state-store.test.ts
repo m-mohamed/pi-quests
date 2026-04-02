@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -62,34 +62,11 @@ describe("quest state store", () => {
 		expect(workflows[0]?.title).toBe("Start Docker before quest checks");
 	});
 
-	test("loads legacy mission storage from the old missions root", async () => {
-		const quest = await createQuest(agentDir, cwd, "Migrate legacy mission storage", {
-			provider: "openai-codex",
-			model: "gpt-5.4",
-			thinkingLevel: "high",
-		});
-
-		const projectId = quest.projectId;
-		const legacyProjectDir = join(agentDir, "missions", projectId);
-		const legacyQuestDir = join(legacyProjectDir, quest.id);
-		await mkdir(legacyQuestDir, { recursive: true });
-		await writeFile(join(legacyProjectDir, "active.json"), `${JSON.stringify({ missionId: quest.id })}\n`, "utf-8");
-		await writeFile(join(legacyQuestDir, "mission.json"), `${JSON.stringify(quest, null, 2)}\n`, "utf-8");
-		await rm(join(agentDir, "quests"), { recursive: true, force: true });
-
-		const loadedQuest = await loadQuest(agentDir, cwd, quest.id);
-		const activeQuest = await loadActiveQuest(agentDir, cwd);
-
-		expect(loadedQuest?.goal).toBe("Migrate legacy mission storage");
-		expect(activeQuest?.id).toBe(quest.id);
-	});
-
 	test("read-only workflow loads do not create quest state directories", async () => {
 		const workflows = await loadLearnedWorkflows(agentDir, cwd);
 
 		expect(workflows).toHaveLength(0);
 		expect(existsSync(join(agentDir, "quests"))).toBe(false);
-		expect(existsSync(join(agentDir, "missions"))).toBe(false);
 	});
 
 	test("prunes terminal quest runtime files but keeps quest metadata", async () => {

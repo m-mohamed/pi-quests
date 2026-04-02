@@ -13,7 +13,6 @@ Live deployed extension path:
 ## What It Does
 
 - `/quest <goal>` starts quest planning in the current repo
-- `/mission <goal>` remains available as a compatibility alias, but `quest` is now the canonical surface
 - planning stays in the main Pi session
 - the approved quest proposal now includes:
   - quest summary
@@ -77,12 +76,6 @@ Passive inspection stays read-only:
 
 - `/quest status` and other read paths do not create `~/.pi/agent/quests/` state until a quest or learned workflow is actually written
 - quest storage is created only when a quest starts persisting state or when learned workflows are saved
-
-Legacy compatibility:
-
-- old `~/.pi/agent/missions/.../mission.json` state is still read automatically
-- old `/mission` and `/missions` commands forward to the new quest surface
-- new writes go to the canonical `~/.pi/agent/quests/` root
 
 ## Validation Contract
 

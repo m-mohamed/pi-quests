@@ -81,6 +81,7 @@ async function main() {
 		const status = await runPi(agentDir, resolvedRepoDir, "/quest status");
 		assert(status.exitCode === 0, `status command failed: ${status.stderr}`);
 		assert(status.stdout.includes("No active quest"), "extension did not respond to /quest status");
+		assert(!existsSync(join(agentDir, "quests")), "status should not create quest storage before a quest exists");
 
 		const legacyStatus = await runPi(agentDir, resolvedRepoDir, "/mission status");
 		assert(legacyStatus.exitCode === 0, `legacy mission status command failed: ${legacyStatus.stderr}`);

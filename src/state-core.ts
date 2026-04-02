@@ -64,8 +64,15 @@ function getLegacyQuestPathsFromAgentDir(agentDir: string, cwd: string, questId:
 	return storagePathsFor(agentDir, cwd, questId, LEGACY_QUESTS_ROOT_DIR, LEGACY_QUEST_FILE);
 }
 
+function getProjectPathsFromAgentDir(agentDir: string, cwd: string) {
+	return {
+		canonical: getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__"),
+		legacy: getLegacyQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__"),
+	};
+}
+
 async function ensureProjectDir(agentDir: string, cwd: string): Promise<QuestStoragePaths> {
-	const paths = getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
+	const { canonical: paths } = getProjectPathsFromAgentDir(agentDir, cwd);
 	await mkdir(paths.projectDir, { recursive: true });
 	await mkdir(paths.projectWorkflowsDir, { recursive: true });
 	return paths;
@@ -81,20 +88,19 @@ async function ensureQuestDir(agentDir: string, cwd: string, questId: string): P
 }
 
 export async function setActiveQuestId(agentDir: string, cwd: string, questId: string | null): Promise<void> {
-	const paths = await ensureProjectDir(agentDir, cwd);
-	const legacyPaths = getLegacyQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
+	const { canonical: paths, legacy: legacyPaths } = getProjectPathsFromAgentDir(agentDir, cwd);
 	if (!questId) {
 		if (existsSync(paths.activeFile)) await unlink(paths.activeFile);
 		if (existsSync(legacyPaths.activeFile)) await unlink(legacyPaths.activeFile);
 		return;
 	}
+	await mkdir(paths.projectDir, { recursive: true });
 	await writeFile(paths.activeFile, `${JSON.stringify({ questId })}\n`, "utf-8");
 	if (existsSync(legacyPaths.activeFile)) await unlink(legacyPaths.activeFile);
 }
 
 export async function getActiveQuestId(agentDir: string, cwd: string): Promise<string | null> {
-	const paths = getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
-	const legacyPaths = getLegacyQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
+	const { canonical: paths, legacy: legacyPaths } = getProjectPathsFromAgentDir(agentDir, cwd);
 	for (const candidate of [paths.activeFile, legacyPaths.activeFile]) {
 		if (!existsSync(candidate)) continue;
 		try {
@@ -249,8 +255,7 @@ export function trimRecentRuns<T extends { startedAt: number }>(runs: T[], max =
 }
 
 export async function loadLearnedWorkflows(agentDir: string, cwd: string): Promise<LearnedWorkflow[]> {
-	const paths = await ensureProjectDir(agentDir, cwd);
-	const legacyPaths = getLegacyQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
+	const { canonical: paths, legacy: legacyPaths } = getProjectPathsFromAgentDir(agentDir, cwd);
 	for (const file of [paths.projectWorkflowsFile, legacyPaths.projectWorkflowsFile]) {
 		if (!existsSync(file)) continue;
 		try {

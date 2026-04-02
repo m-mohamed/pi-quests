@@ -73,6 +73,11 @@ Project-scoped learned workflows live under:
 
 Learned workflows are private by default and never written into the target repo automatically.
 
+Passive inspection stays read-only:
+
+- `/quest status` and other read paths do not create `~/.pi/agent/quests/` state until a quest or learned workflow is actually written
+- quest storage is created only when a quest starts persisting state or when learned workflows are saved
+
 Legacy compatibility:
 
 - old `~/.pi/agent/missions/.../mission.json` state is still read automatically

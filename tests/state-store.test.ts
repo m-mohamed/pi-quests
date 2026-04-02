@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -81,6 +82,14 @@ describe("quest state store", () => {
 
 		expect(loadedQuest?.goal).toBe("Migrate legacy mission storage");
 		expect(activeQuest?.id).toBe(quest.id);
+	});
+
+	test("read-only workflow loads do not create quest state directories", async () => {
+		const workflows = await loadLearnedWorkflows(agentDir, cwd);
+
+		expect(workflows).toHaveLength(0);
+		expect(existsSync(join(agentDir, "quests"))).toBe(false);
+		expect(existsSync(join(agentDir, "missions"))).toBe(false);
 	});
 
 	test("prunes terminal quest runtime files but keeps quest metadata", async () => {

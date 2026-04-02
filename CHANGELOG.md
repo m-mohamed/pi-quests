@@ -6,6 +6,7 @@
 - renamed the canonical storage root from `~/.pi/agent/missions/` to `~/.pi/agent/quests/`
 - added legacy command aliases for `/mission` and `/missions`
 - added legacy state compatibility for existing `mission.json` data under the old root
+- kept passive quest reads read-only so status checks do not create empty quest state directories
 - renamed the canonical source repo and deployed extension path to `pi-quests`
 
 ## 0.3.0

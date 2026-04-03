@@ -171,6 +171,25 @@ export async function switchActiveQuest(agentDir: string, cwd: string, questId: 
 	return quest;
 }
 
+export async function listProjectQuests(agentDir: string, cwd: string): Promise<QuestState[]> {
+	const paths = getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
+	if (!existsSync(paths.projectDir)) return [];
+
+	const quests: QuestState[] = [];
+	for (const questDir of await listQuestDirs(paths.projectDir)) {
+		const questFile = join(questDir, QUEST_FILE);
+		if (!existsSync(questFile)) continue;
+		try {
+			const raw = await readFile(questFile, "utf-8");
+			quests.push(JSON.parse(raw) as QuestState);
+		} catch {
+			continue;
+		}
+	}
+
+	return quests.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
 async function listProjectDirs(rootDir: string): Promise<string[]> {
 	if (!existsSync(rootDir)) return [];
 	const entries = await readdir(rootDir, { withFileTypes: true });

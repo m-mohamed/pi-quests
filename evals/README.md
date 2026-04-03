@@ -20,12 +20,19 @@ The eval posture is intentionally split into three layers:
    - still required
    - covers TUI feel, Quest Control ergonomics, proposal-review flow, and final QA handoff
 
+4. Scenario evals
+   - slower
+   - exercise live Pi subprocesses and fixture repos
+   - cover compatibility, proposal capture, weak validation warnings, abort/recovery, and validator-triggered replans
+
 ## Commands
 
 ```bash
 bun run evals
 bun run evals:regression
 bun run evals:capability
+bun run evals:scenario
+tsc -p tsconfig.typecheck.json
 ```
 
 `bun run verify` gates on:
@@ -33,6 +40,12 @@ bun run evals:capability
 - `bun test`
 - regression evals
 - smoke validation against the installed Pi binary
+
+`bun run verify:full` adds:
+
+- capability evals
+- scenario evals
+- typecheck
 
 ## Current Suites
 
@@ -50,6 +63,15 @@ Capability suite:
 - revision prompt only edits unfinished work
 - worker prompt remains single-feature and validation-aware
 - validator prompt remains read-only and explicit about weak validation
+
+Scenario suite:
+
+- Pi child JSON compatibility
+- readonly proposal capture without repo pollution
+- weak-validation warning capture
+- explicit human QA gate
+- abort and recovery
+- validator-triggered replan
 
 ## What These Evals Do Not Cover
 

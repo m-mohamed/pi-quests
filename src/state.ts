@@ -12,6 +12,7 @@ import {
 	getQuestPathsFromAgentDir,
 	loadActiveQuest as loadActiveQuestCore,
 	loadLearnedWorkflows as loadLearnedWorkflowsCore,
+	listProjectQuests as listProjectQuestsCore,
 	loadQuest as loadQuestCore,
 	questAgeMs as questAgeMsCore,
 	questDirStats as questDirStatsCore,
@@ -56,6 +57,10 @@ export async function loadQuest(cwd: string, questId: string): Promise<QuestStat
 
 export async function loadActiveQuest(cwd: string): Promise<QuestState | null> {
 	return loadActiveQuestCore(agentDir(), cwd);
+}
+
+export async function listProjectQuests(cwd: string): Promise<QuestState[]> {
+	return listProjectQuestsCore(agentDir(), cwd);
 }
 
 export async function createQuest(cwd: string, goal: string, defaultModel: ModelChoice): Promise<QuestState> {

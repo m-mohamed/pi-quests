@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseQuestPlanText, planningInstructions, revisionInstructions, synthesizeValidationContract } from "./plan-core.js";
+import { markQuestAborted, prepareQuestForResume } from "./runtime-core.js";
 import { loadActiveQuest, loadLearnedWorkflows, projectIdFor, saveLearnedWorkflows } from "./state-core.js";
 import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
 import type {
@@ -237,6 +238,23 @@ function sampleQuest(cwd = "/tmp/arrow"): QuestState {
 	};
 }
 
+function sampleRunningQuest(cwd = "/tmp/arrow"): QuestState {
+	const quest = sampleQuest(cwd);
+	quest.status = "running";
+	quest.plan!.milestones[1]!.status = "running";
+	quest.plan!.features[1]!.status = "running";
+	quest.activeRun = {
+		role: "worker",
+		kind: "feature",
+		featureId: "f2",
+		milestoneId: "m2",
+		phase: "streaming",
+		startedAt: Date.now() - 1000,
+		pid: process.pid,
+	};
+	return quest;
+}
+
 function sampleWorkflows(): LearnedWorkflow[] {
 	return [
 		{
@@ -264,6 +282,58 @@ function sampleRevisionRequests(): QuestPlanRevisionRequest[] {
 }
 
 const evalCases: EvalCaseDefinition[] = [
+	{
+		id: "abort-state-transition",
+		title: "Operator abort blocks only the active work and preserves resumability",
+		suite: "regression",
+		run: async () => {
+			const quest = sampleRunningQuest();
+			const summary = markQuestAborted(quest, 123456);
+			const passed =
+				quest.status === "aborted" &&
+				quest.plan?.features.find((feature) => feature.id === "f2")?.status === "blocked" &&
+				quest.plan?.features.find((feature) => feature.id === "f1")?.status === "completed" &&
+				quest.lastInterruption?.interruptedAt === 123456;
+			return result(
+				"regression",
+				"abort-state-transition",
+				"Operator abort blocks only the active work and preserves resumability",
+				passed,
+				passed ? "Abort state transition preserved completed work and blocked only the interrupted feature." : "Abort state transition regressed.",
+				{
+					summary,
+					status: quest.status,
+				},
+			);
+		},
+	},
+	{
+		id: "resume-after-abort",
+		title: "Resume reopens only the interrupted unfinished work",
+		suite: "regression",
+		run: async () => {
+			const quest = sampleRunningQuest();
+			markQuestAborted(quest, 123456);
+			const changed = prepareQuestForResume(quest);
+			const passed =
+				changed &&
+				quest.status === "paused" &&
+				quest.plan?.features.find((feature) => feature.id === "f2")?.status === "pending" &&
+				quest.plan?.features.find((feature) => feature.id === "f1")?.status === "completed" &&
+				quest.activeRun === undefined;
+			return result(
+				"regression",
+				"resume-after-abort",
+				"Resume reopens only the interrupted unfinished work",
+				passed,
+				passed ? "Resume preserved completed work and reopened only the interrupted feature." : "Resume-after-abort behavior regressed.",
+				{
+					changed,
+					status: quest.status,
+				},
+			);
+		},
+	},
 	{
 		id: "validation-contract-synthesis",
 		title: "Synthesizes explicit validation contracts with weak-path warnings",
@@ -373,7 +443,7 @@ ${JSON.stringify(samplePlan(), null, 2)}
 			const passed =
 				snapshot.phase === "streaming" &&
 				snapshot.latestToolName === "bash" &&
-				snapshot.latestToolSummary?.includes("1 passed") &&
+				Boolean(snapshot.latestToolSummary?.includes("1 passed")) &&
 				events.length === 4;
 			return result(
 				"regression",

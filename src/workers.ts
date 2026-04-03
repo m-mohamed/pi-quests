@@ -40,6 +40,7 @@ interface RunPiTaskOptions {
 	systemPrompt?: string;
 	prompt: string;
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>;
+	onProcessStart?: (pid: number) => void | Promise<void>;
 }
 
 interface RunPiTaskResult {
@@ -54,6 +55,8 @@ interface RunPiTaskResult {
 	latestToolName?: string;
 	latestToolSummary?: string;
 	latestAssistantText?: string;
+	signal?: string;
+	aborted: boolean;
 }
 
 const DEFAULT_USAGE: UsageStats = {
@@ -299,6 +302,7 @@ async function runPiTask(options: RunPiTaskOptions): Promise<RunPiTaskResult> {
 		usage: { ...DEFAULT_USAGE },
 		events: [],
 		phase: "starting",
+		aborted: false,
 	};
 
 	let liveSnapshot = createLiveRunSnapshot(options.role, {
@@ -314,7 +318,11 @@ async function runPiTask(options: RunPiTaskOptions): Promise<RunPiTaskResult> {
 				cwd: options.cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				detached: process.platform !== "win32",
 			});
+			if (typeof proc.pid === "number" && options.onProcessStart) {
+				void Promise.resolve(options.onProcessStart(proc.pid));
+			}
 
 			let buffer = "";
 
@@ -378,9 +386,11 @@ async function runPiTask(options: RunPiTaskOptions): Promise<RunPiTaskResult> {
 				result.stderr += data.toString();
 			});
 
-			proc.on("close", (code) => {
+			proc.on("close", (code, signal) => {
 				if (buffer.trim()) processLine(buffer);
 				result.exitCode = code ?? 0;
+				result.signal = signal ?? undefined;
+				result.aborted = signal === "SIGTERM" || signal === "SIGKILL";
 				resolve();
 			});
 
@@ -404,6 +414,7 @@ export async function executeFeatureWorker(
 	modelChoice: ModelChoice,
 	workflows: LearnedWorkflow[],
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
+	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<WorkerRunRecord> {
 	const startedAt = Date.now();
 	const result = await runPiTask({
@@ -416,6 +427,7 @@ export async function executeFeatureWorker(
 		systemPrompt: buildWorkerSystemPrompt(),
 		prompt: buildFeaturePrompt(quest, feature, milestone, workflows),
 		onSnapshot,
+		onProcessStart,
 	});
 
 	const text = getFinalAssistantText(result.messages);
@@ -437,6 +449,8 @@ export async function executeFeatureWorker(
 		summary: parsed?.summary || text || "No worker summary returned.",
 		stopReason: result.stopReason,
 		stderr: result.stderr || undefined,
+		aborted: result.aborted,
+		signal: result.signal,
 		phase: result.phase,
 		latestToolName: result.latestToolName,
 		latestToolSummary: result.latestToolSummary,
@@ -453,6 +467,7 @@ export async function executeValidator(
 	modelChoice: ModelChoice,
 	workflows: LearnedWorkflow[],
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
+	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<WorkerRunRecord> {
 	const startedAt = Date.now();
 	const result = await runPiTask({
@@ -464,6 +479,7 @@ export async function executeValidator(
 		systemPrompt: buildValidatorSystemPrompt(),
 		prompt: buildValidatorPrompt(quest, milestone, features, workflows),
 		onSnapshot,
+		onProcessStart,
 	});
 
 	const text = getFinalAssistantText(result.messages);
@@ -486,6 +502,8 @@ export async function executeValidator(
 		stopReason: result.stopReason,
 		stderr: result.stderr || undefined,
 		issues,
+		aborted: result.aborted,
+		signal: result.signal,
 		phase: result.phase,
 		latestToolName: result.latestToolName,
 		latestToolSummary: result.latestToolSummary,
@@ -501,6 +519,7 @@ export async function executePlanRevision(
 	modelChoice: ModelChoice,
 	workflows: LearnedWorkflow[],
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
+	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<{ run: WorkerRunRecord; revisedPlan: QuestPlan | null }> {
 	const startedAt = Date.now();
 	const result = await runPiTask({
@@ -511,6 +530,7 @@ export async function executePlanRevision(
 		systemPrompt: buildPlanRevisionSystemPrompt(),
 		prompt: revisionInstructions(quest, requests, workflows),
 		onSnapshot,
+		onProcessStart,
 	});
 
 	const text = getFinalAssistantText(result.messages);
@@ -532,6 +552,8 @@ export async function executePlanRevision(
 			summary: revisedPlan ? "Revised remaining quest plan." : text || "No plan revision returned.",
 			stopReason: result.stopReason,
 			stderr: result.stderr || undefined,
+			aborted: result.aborted,
+			signal: result.signal,
 			phase: result.phase,
 			latestToolName: result.latestToolName,
 			latestToolSummary: result.latestToolSummary,

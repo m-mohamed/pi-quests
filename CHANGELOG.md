@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.0
+
+- split the quest UX into `/enter-quest`, `/quest`, `/quests`, and `/exit-quest`
+- removed implicit quest creation from `/quest` and replaced `/quest start` with `/quest accept`
+- added session-scoped quest mode via Pi's documented `input` event and persisted mode state
+- expanded smoke and scenario coverage for the new Quest Control and quest list surfaces
+
+## 0.7.0
+
+- added real `/quest abort` semantics with persisted active-run metadata and resumable operator interruptions
+- tightened `start`, `resume`, `pause`, and `approve` command boundaries
+- added scenario evals against fixture repos plus a Pi child-stream compatibility check
+- added a repo-local typecheck gate and `verify:full` for slower release validation
+
 ## 0.6.0
 
 - added deterministic regression and capability eval suites for quest orchestration

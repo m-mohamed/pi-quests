@@ -127,8 +127,8 @@ function normalizeValidationContract(payload: any, milestones: QuestMilestone[],
 	const fallback = synthesizeValidationContract(milestones, features, successCriteria);
 	const criteria = Array.isArray(payload.criteria)
 		? payload.criteria
-				.filter((item) => item && typeof item === "object")
-				.map((item, index) => ({
+				.filter((item: any) => item && typeof item === "object")
+				.map((item: any, index: number) => ({
 					id: String(item.id || `criterion-${index + 1}`),
 					title: String(item.title || truncate(String(item.expectedBehavior || `Criterion ${index + 1}`), 72)),
 					milestoneId: String(item.milestoneId || features[0]?.milestoneId || milestones[0]?.id || "m1"),
@@ -147,8 +147,8 @@ function normalizeValidationContract(payload: any, milestones: QuestMilestone[],
 		summary: String(payload.summary || fallback.summary),
 		milestoneExpectations: Array.isArray(payload.milestoneExpectations)
 			? payload.milestoneExpectations
-					.filter((item) => item && typeof item === "object")
-					.map((item) => ({
+					.filter((item: any) => item && typeof item === "object")
+					.map((item: any) => ({
 						milestoneId: String(item.milestoneId || milestones[0]?.id || "m1"),
 						title: String(item.title || milestones.find((milestone) => milestone.id === item.milestoneId)?.title || "Milestone"),
 						expectedBehaviors: Array.isArray(item.expectedBehaviors) ? item.expectedBehaviors.map(String) : [],
@@ -156,8 +156,8 @@ function normalizeValidationContract(payload: any, milestones: QuestMilestone[],
 			: fallback.milestoneExpectations,
 		featureChecks: Array.isArray(payload.featureChecks)
 			? payload.featureChecks
-					.filter((item) => item && typeof item === "object")
-					.map((item) => ({
+					.filter((item: any) => item && typeof item === "object")
+					.map((item: any) => ({
 						featureId: String(item.featureId || features[0]?.id || "f1"),
 						title: String(item.title || features.find((feature) => feature.id === item.featureId)?.title || "Feature"),
 						criterionIds: Array.isArray(item.criterionIds) ? item.criterionIds.map(String) : [],
@@ -273,6 +273,11 @@ Requirements:
 - Favor the smallest workable decomposition.
 - Do not execute the plan yet.
 - Build an explicit validation contract that maps milestone outcomes, feature checks, and proof strategies.
+- Only use "browser" when the repo truly has a browser-visible surface that Pi can verify.
+- Only use "command" when there is an explicit repo command or executable proof path; include the actual commands when you choose it.
+- Use "read_only" for static README/config/code inspection when no runtime or browser proof exists.
+- Use "manual" when human QA is the only credible proof path.
+- Never invent browser validation for repos with no browser surface.
 - If validation is weak, say so explicitly in weakValidationWarnings.
 - Do not assume deploy-and-monitor behavior.
 - When the plan is ready, end your response with a machine-readable JSON block.
@@ -325,7 +330,7 @@ Use this JSON shape exactly:
         "milestoneId": "m1",
         "featureIds": ["f1"],
         "expectedBehavior": "behavior to prove",
-        "proofStrategy": "browser",
+        "proofStrategy": "read_only",
         "proofDetails": "how Pi should prove it",
         "commands": [],
         "confidence": "high"

@@ -10,6 +10,7 @@ import {
 	loadActiveQuest,
 	loadLearnedWorkflows,
 	loadQuest,
+	listProjectQuests,
 	pruneQuestStorage,
 	saveLearnedWorkflows,
 	saveQuest,
@@ -67,6 +68,28 @@ describe("quest state store", () => {
 
 		expect(workflows).toHaveLength(0);
 		expect(existsSync(join(agentDir, "quests"))).toBe(false);
+	});
+
+	test("lists project quests newest first", async () => {
+		const first = await createQuest(agentDir, cwd, "First quest", {
+			provider: "openai-codex",
+			model: "gpt-5.4",
+			thinkingLevel: "high",
+		});
+		first.updatedAt = Date.now() - 1000;
+		await saveQuest(agentDir, first);
+
+		const second = await createQuest(agentDir, cwd, "Second quest", {
+			provider: "openai-codex",
+			model: "gpt-5.4",
+			thinkingLevel: "high",
+		});
+		await saveQuest(agentDir, second);
+
+		const quests = await listProjectQuests(agentDir, cwd);
+
+		expect(quests.map((quest) => quest.id)).toEqual([second.id, first.id]);
+		expect(quests.map((quest) => quest.title)).toEqual(["Second quest", "First quest"]);
 	});
 
 	test("prunes terminal quest runtime files but keeps quest metadata", async () => {

@@ -1,0 +1,10 @@
+{
+  "name": "command-only-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "echo command-only-test-ok",
+    "lint": "echo command-only-lint-ok",
+    "typecheck": "echo command-only-typecheck-ok"
+  }
+}

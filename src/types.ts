@@ -8,6 +8,7 @@ export type HumanQaStatus = "pending" | "approved";
 export type ShipReadiness = "not_ready" | "validated_waiting_for_human_qa" | "human_qa_complete";
 export type ValidationProofStrategy = "browser" | "command" | "read_only" | "manual" | "mixed";
 export type ValidationConfidence = "high" | "medium" | "low";
+export type ActiveRunKind = "feature" | "validator" | "replan";
 
 export interface ModelChoice {
 	provider: string;
@@ -116,6 +117,29 @@ export interface LiveRunSnapshot {
 	updatedAt: number;
 }
 
+export interface QuestActiveRun {
+	role: QuestRole;
+	kind: ActiveRunKind;
+	pid?: number;
+	featureId?: string;
+	milestoneId?: string;
+	phase: string;
+	startedAt: number;
+	abortRequestedAt?: number;
+}
+
+export interface QuestInterruption {
+	reason: "operator_abort";
+	role: QuestRole;
+	kind: ActiveRunKind;
+	featureId?: string;
+	milestoneId?: string;
+	pid?: number;
+	startedAt: number;
+	interruptedAt: number;
+	summary: string;
+}
+
 export interface WorkerRunRecord {
 	id: string;
 	role: QuestRole;
@@ -132,6 +156,8 @@ export interface WorkerRunRecord {
 	stopReason?: string;
 	stderr?: string;
 	issues?: string[];
+	aborted?: boolean;
+	signal?: string;
 	phase: string;
 	latestToolName?: string;
 	latestToolSummary?: string;
@@ -181,6 +207,8 @@ export interface QuestState {
 	startedAt?: number;
 	completedAt?: number;
 	prunedAt?: number;
+	activeRun?: QuestActiveRun;
+	lastInterruption?: QuestInterruption;
 	recentRuns: WorkerRunRecord[];
 }
 

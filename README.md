@@ -12,7 +12,11 @@ Live deployed extension path:
 
 ## What It Does
 
-- `/quest <goal>` starts quest planning in the current repo
+- `/enter-quest` enters quest mode for conversational planning and steering
+- `/exit-quest` leaves quest mode and restores normal Pi input handling
+- `/quest` opens Quest Control for the active quest
+- `/quests` lists and selects quests for the current repo
+- `/quest new <goal>` is the explicit non-interactive quest creation path
 - planning stays in the main Pi session
 - the approved quest proposal now includes:
   - quest summary
@@ -20,23 +24,26 @@ Live deployed extension path:
   - features
   - a first-class validation contract
   - explicit role/model assignments from quest state
-- `/quest start` and `/quest resume` execute one milestone at a time
-- `/quest approve` records the final human QA acknowledgment after validation passes
+ - `/quest accept` and `/quest resume` execute one milestone at a time
+ - `/quest abort` explicitly interrupts an active worker, validator, or replan run
+ - `/quest approve` records the final human QA acknowledgment after validation passes
 - worker and validator runs happen in isolated `pi --mode json --no-session` subprocesses
 - Quest Control now streams child worker telemetry into the widget/status surface
 - `/quest steer <instruction>` queues a remaining-plan revision instead of silently changing scope
 - `/quest model` and `/quest role-model <role>` keep model choice explicit
 - `/quest prune` prunes old quest runtime logs
+- `/quest pause` is only a checkpoint hold for idle or already-paused quests
 
 ## Lifecycle
 
-1. `/quest <goal>` creates a quest proposal in the current Pi session.
-2. Pi collaborates on the proposal and emits machine-readable JSON.
+1. `/enter-quest` enables conversational quest mode in the current Pi session.
+2. Plain-text input creates or refines the active quest proposal.
 3. The proposal is stored privately and marked `ready`.
-4. `/quest start` is the approval boundary.
+4. `/quest accept` is the approval boundary.
 5. `/quest resume` continues milestone-by-milestone.
-6. Completion means the quest has been validated and is ready for human QA.
-7. `/quest approve` is the explicit human QA acknowledgment step.
+6. `/quest abort` is the active interruption path while a child run is in flight.
+7. Completion means the quest has been validated and is ready for human QA.
+8. `/quest approve` is the explicit human QA acknowledgment step.
 
 Quest completion does not mean "safe to ship blindly."
 
@@ -74,7 +81,7 @@ Learned workflows are private by default and never written into the target repo 
 
 Passive inspection stays read-only:
 
-- `/quest status` and other read paths do not create `~/.pi/agent/quests/` state until a quest or learned workflow is actually written
+- `/quest`, `/quests`, and other read paths do not create `~/.pi/agent/quests/` state until a quest or learned workflow is actually written
 - quest storage is created only when a quest starts persisting state or when learned workflows are saved
 
 ## Validation Contract
@@ -115,21 +122,25 @@ Local verification:
 
 ```bash
 bun test
+tsc -p tsconfig.typecheck.json
 bun run evals
 bun run evals:regression
 bun run evals:capability
+bun run evals:scenario
 bun run scripts/smoke.ts
 bun run verify
+bun run verify:full
 ```
 
 ## Eval-First Development
 
 Quest improvements should be driven by evals, not intuition.
 
-The repo now carries two deterministic suites:
+The repo now carries three eval layers:
 
 - regression evals: release-gating checks for quest invariants that must not regress
 - capability evals: prompt/orchestration checks for validation-first quest behavior
+- scenario evals: slower end-to-end checks against fixture repos and live Pi subprocesses
 
 The current eval harness is intentionally Pi-native:
 
@@ -148,16 +159,27 @@ Human interactive review still matters for:
 Interactive verification checklist:
 
 - `/reload`
-- `/quest status`
+- `/enter-quest`
+- `/exit-quest`
+- `/quest`
+- `/quests`
 - `/quest model`
 - `/quest role-model worker`
 - `/quest role-model validator`
 - `/quest approve`
-- create a quest, review the proposal, then `/quest start`
+- create a quest, review the proposal, then `/quest accept`
 - verify Quest Control updates live while a worker or validator is running
 
 ## Compatibility
 
 Targeted against Pi `0.64.x`.
 
-The smoke script checks the installed `pi --version` and fails if it is not on the `0.64.x` line, so compatibility drift is visible immediately.
+Compatibility matrix:
+
+| Surface | Contract |
+|---------|----------|
+| Pi version | `0.64.x` |
+| Extension hooks | `registerCommand`, `pi.on(...)`, `ctx.ui.setStatus`, `ctx.ui.setWidget` |
+| Worker streams | `message_update`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end`, `turn_end`, `agent_end` |
+
+The smoke script checks the installed `pi --version`, and the scenario suite now includes a compatibility eval that fails if the child JSON event stream no longer exposes the event types quests depend on.

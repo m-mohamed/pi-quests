@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
+import { promptSurfaceText } from "./trials-core.js";
 import type {
 	LearnedWorkflow,
 	ParsedQuestPlan,
 	QuestFeature,
 	QuestMilestone,
 	QuestPlan,
+	QuestProfile,
 	QuestPlanRevisionRequest,
 	QuestState,
 	ValidationAssertion,
@@ -156,7 +158,7 @@ function learnedWorkflowSection(workflows: LearnedWorkflow[]): string {
 	return workflows.map((workflow) => `- ${workflow.title}: ${workflow.note}`).join("\n");
 }
 
-export function planningInstructions(quest: QuestState, workflows: LearnedWorkflow[]): string {
+export function planningInstructions(quest: QuestState, workflows: LearnedWorkflow[], profile?: QuestProfile): string {
 	const readinessSummary = quest.validationReadiness?.summary ?? "No dry-run validation readiness summary captured yet.";
 	const readinessLines =
 		quest.validationReadiness?.checks.length
@@ -169,6 +171,7 @@ export function planningInstructions(quest: QuestState, workflows: LearnedWorkfl
 					)
 					.join("\n")
 			: "- No validation checks captured yet.";
+	const policyLines = profile ? promptSurfaceText(profile, "planning") : "- Build the smallest viable implementation first.";
 
 	return `[QUEST PLANNING ACTIVE]
 You are acting as the quest orchestrator inside Pi.
@@ -183,6 +186,9 @@ Dry-run validation readiness:
 ${readinessSummary}
 
 ${readinessLines}
+
+Profile surface policy:
+${policyLines}
 
 Use the structured quest tools instead of editing quest control files manually:
 - quest_set_proposal
@@ -238,7 +244,8 @@ export function summarizeRevisionRequests(requests: QuestPlanRevisionRequest[]):
 	return requests.map((request) => `- [${request.source}] ${request.note}`).join("\n");
 }
 
-export function revisionInstructions(quest: QuestState, requests: QuestPlanRevisionRequest[], workflows: LearnedWorkflow[]): string {
+export function revisionInstructions(quest: QuestState, requests: QuestPlanRevisionRequest[], workflows: LearnedWorkflow[], profile?: QuestProfile): string {
+	const policyLines = profile ? promptSurfaceText(profile, "plan-revision") : "- Preserve completed work.\n- Keep the quest serial by default.";
 	return `Revise only the remaining quest plan.
 
 Rules:
@@ -247,6 +254,9 @@ Rules:
 - Keep the quest serial by default.
 - Do not edit repository files.
 - Return the full updated quest plan as JSON.
+
+Profile surface policy:
+${policyLines}
 
 Current quest title: ${quest.plan?.title ?? quest.title}
 

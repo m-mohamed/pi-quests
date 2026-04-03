@@ -5,6 +5,8 @@ import { Type } from "@sinclair/typebox";
 import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Key, Text, matchesKey } from "@mariozechner/pi-tui";
+import { applyQuestProfilePatch, defaultQuestProfile, summarizeExperimentScores, traceBundleFromPlanningSession, traceBundleFromWorkerRun } from "./trials-core.js";
+import { loadQuestTrialsSnapshot, replayQuestRunIntoTrialDataset, runQuestTrialsLoop } from "./trials-runtime.js";
 import { defaultHumanQaChecklist, mergeRemainingPlan, parseQuestPlanText, planningInstructions, synthesizeValidationAssertions } from "./plan-core.js";
 import { describeActiveRun, markQuestAborted, prepareQuestForResume, terminateQuestProcess } from "./runtime-core.js";
 import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
@@ -14,13 +16,22 @@ import {
 	getQuestPaths,
 	listProjectQuests,
 	loadActiveQuest,
+	loadQuestExperiment,
+	loadQuestTrialState,
 	loadLearnedWorkflows,
+	loadQuestProfile,
 	loadQuest,
 	pruneQuestStorage,
+	projectIdFor,
+	saveQuestEvalDataset,
+	saveQuestExperiment,
+	saveQuestTrialState,
+	saveQuestProfile,
 	saveLearnedWorkflows,
 	saveQuest,
 	switchActiveQuest,
 	trimRecentRuns,
+	writeQuestTraceBundle,
 	writeWorkerRun,
 } from "./state.js";
 import { executeFeatureWorker, executePlanRevision, executeValidationReadinessProbe, executeValidator } from "./workers.js";
@@ -29,8 +40,11 @@ import type {
 	LearnedWorkflow,
 	LiveRunSnapshot,
 	ModelChoice,
+	QuestExperiment,
 	QuestFeature,
+	QuestTrialState,
 	QuestMilestone,
+	QuestProfile,
 	QuestRole,
 	QuestState,
 	QuestActiveRun,
@@ -50,6 +64,58 @@ const ROLE_NAMES: QuestRole[] = ["orchestrator", "worker", "validator"];
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const DASHBOARD_TABS = ["summary", "features", "runs", "detail"] as const;
 type DashboardTab = (typeof DASHBOARD_TABS)[number];
+
+const questExperimentScoreSchema = Type.Object({
+	datasetId: Type.String(),
+	caseIds: Type.Array(Type.String()),
+	passed: Type.Number(),
+	failed: Type.Number(),
+	score: Type.Number(),
+	maxScore: Type.Number(),
+	findings: Type.Array(Type.String()),
+});
+
+const questPromptSurfacesPatchSchema = Type.Object({
+	planningPolicy: Type.Optional(Type.String()),
+	workerPolicy: Type.Optional(Type.String()),
+	validatorCodeReviewPolicy: Type.Optional(Type.String()),
+	validatorUserSurfacePolicy: Type.Optional(Type.String()),
+	readinessPolicy: Type.Optional(Type.String()),
+	revisionPolicy: Type.Optional(Type.String()),
+});
+
+const questModelPolicyPatchSchema = Type.Object({
+	preferSameModelFamily: Type.Optional(Type.Boolean()),
+	preferValidatorDivergence: Type.Optional(Type.Boolean()),
+});
+
+const questVerificationBudgetPatchSchema = Type.Object({
+	workerAttempts: Type.Optional(Type.Number()),
+	validatorAttempts: Type.Optional(Type.Number()),
+	correctiveFeatureBudget: Type.Optional(Type.Number()),
+});
+
+const questContextPolicyPatchSchema = Type.Object({
+	spillThresholdChars: Type.Optional(Type.Number()),
+	spillLongOutputsToReports: Type.Optional(Type.Boolean()),
+	maxInlineEvidenceLines: Type.Optional(Type.Number()),
+});
+
+const questWorkflowHintPolicyPatchSchema = Type.Object({
+	maxSharedHints: Type.Optional(Type.Number()),
+	promotePrerequisiteHints: Type.Optional(Type.Boolean()),
+	promoteFailureHints: Type.Optional(Type.Boolean()),
+});
+
+const questTraceGradingPatchSchema = Type.Object({
+	toolHeavyCount: Type.Optional(Type.Number()),
+	longRunMs: Type.Optional(Type.Number()),
+	repeatedCorrectiveThreshold: Type.Optional(Type.Number()),
+	weakValidationPenalty: Type.Optional(Type.Number()),
+	blockedPenalty: Type.Optional(Type.Number()),
+	overflowPenalty: Type.Optional(Type.Number()),
+	abortPenalty: Type.Optional(Type.Number()),
+});
 
 function createDefaultModelChoice(model: Model<any> | null, thinkingLevel: ThinkingLevel): ModelChoice {
 	return {
@@ -77,6 +143,10 @@ function roleFromArg(arg: string): QuestRole | null {
 
 function currentOrDefaultModel(quest: QuestState, role: QuestRole): ModelChoice {
 	return quest.roleModels[role] ?? quest.defaultModel;
+}
+
+function activeProfileFor(cwd: string, profile: QuestProfile | null, target: QuestTrialState["target"] = "repo"): QuestProfile {
+	return profile ?? defaultQuestProfile(projectIdFor(cwd), target);
 }
 
 function syncQuestConfig(quest: QuestState) {
@@ -318,11 +388,16 @@ function proposalReady(quest: QuestState): boolean {
 export default function questExtension(pi: ExtensionAPI) {
 	let currentQuest: QuestState | null = null;
 	let currentWorkflows: LearnedWorkflow[] = [];
+	let currentProfile: QuestProfile | null = null;
+	let currentTrialState: QuestTrialState | null = null;
 	let liveRun: LiveRunSnapshot | null = null;
+	let trialLiveRun: LiveRunSnapshot | null = null;
 	let planningEvents: WorkerEventRecord[] = [];
+	let planningStartedAt = 0;
 	let questModeEnabled = false;
 	let planningTurnActive = false;
 	let dashboardTab: DashboardTab = "summary";
+	let activeTrialPid: number | undefined;
 
 	function persistQuestMode() {
 		pi.appendEntry(QUEST_MODE_ENTRY, { enabled: questModeEnabled });
@@ -338,6 +413,14 @@ export default function questExtension(pi: ExtensionAPI) {
 			if (questModeEnabled) {
 				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", "quest:mode"));
 				ctx.ui.setWidget(WIDGET_KEY, ["quest-mode:on", "active:none"]);
+			} else if (currentTrialState?.status === "running") {
+				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `trials:${currentTrialState.status}`));
+				ctx.ui.setWidget(WIDGET_KEY, [
+					`trials:${currentTrialState.target}`,
+					`profile:${currentTrialState.activeProfileId}`,
+					`status:${currentTrialState.status}`,
+					`run:${trialLiveRun ? `${trialLiveRun.role}/${trialLiveRun.phase}` : "idle"}`,
+				]);
 			} else {
 				ctx.ui.setStatus(STATUS_KEY, undefined);
 				ctx.ui.setWidget(WIDGET_KEY, undefined);
@@ -371,6 +454,8 @@ export default function questExtension(pi: ExtensionAPI) {
 	async function loadQuestForContext(ctx: ExtensionContext) {
 		currentQuest = await loadActiveQuest(ctx.cwd);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
+		currentTrialState = await loadQuestTrialState(ctx.cwd);
+		currentProfile = await loadQuestProfile(ctx.cwd, currentTrialState.activeProfileId, { target: currentTrialState.target });
 		if (!currentQuest || currentQuest.status !== "planning") {
 			liveRun = null;
 			planningEvents = [];
@@ -388,6 +473,8 @@ export default function questExtension(pi: ExtensionAPI) {
 	async function ensureCurrentQuest(ctx: ExtensionContext): Promise<QuestState | null> {
 		currentQuest = await loadActiveQuest(ctx.cwd);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
+		currentTrialState = await loadQuestTrialState(ctx.cwd);
+		currentProfile = await loadQuestProfile(ctx.cwd, currentTrialState.activeProfileId, { target: currentTrialState.target });
 		if (!currentQuest) {
 			await emitNote(pi, ctx, "No active quest in this repo. Use `/quest new <goal>` first.", "warning");
 			return null;
@@ -399,6 +486,9 @@ export default function questExtension(pi: ExtensionAPI) {
 		const modelChoice = createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
 		currentQuest = await createQuest(ctx.cwd, goal, modelChoice);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
+		currentTrialState = await loadQuestTrialState(ctx.cwd, { ensure: true });
+		currentProfile = await loadQuestProfile(ctx.cwd, currentTrialState.activeProfileId, { ensure: true, target: currentTrialState.target });
+		await saveQuestProfile(ctx.cwd, currentProfile);
 		await pruneQuestStorage(ctx.cwd);
 		await setQuestMode(ctx, true);
 		await emitNote(pi, ctx, `Quest created: ${goal}`);
@@ -414,6 +504,8 @@ export default function questExtension(pi: ExtensionAPI) {
 		const probe = await executeValidationReadinessProbe(
 			ctx.cwd,
 			currentOrDefaultModel(currentQuest, "validator"),
+			currentProfile,
+			undefined,
 			async (snapshot) => {
 				liveRun = snapshot;
 				if (currentQuest?.activeRun && currentQuest.activeRun.phase !== snapshot.phase) {
@@ -439,6 +531,7 @@ export default function questExtension(pi: ExtensionAPI) {
 			: "Dry-run validation readiness probe could not capture structured results.";
 		await saveQuest(currentQuest);
 		await writeWorkerRun(currentQuest.cwd, currentQuest.id, probe.run);
+		await writeQuestTraceBundle(currentQuest.cwd, traceBundleFromWorkerRun(currentQuest, probe.run, currentProfile));
 		await applyQuestUi(ctx, currentQuest);
 		return currentQuest;
 	}
@@ -623,6 +716,195 @@ export default function questExtension(pi: ExtensionAPI) {
 		await emitNote(pi, ctx, `Active quest set to "${selectedQuest.title}".`);
 	}
 
+	function summarizeTrials(snapshot: Awaited<ReturnType<typeof loadQuestTrialsSnapshot>>): string {
+		const latestExperiment = snapshot.experiments[0];
+		const latestScores = latestExperiment ? summarizeExperimentScores(latestExperiment.candidateScores) : "No experiments yet.";
+		return `# Trials
+
+- Status: ${snapshot.state.status}
+- Target: ${snapshot.state.target}
+- Active profile: ${snapshot.profile.id}
+- Adopted changes: ${snapshot.profile.adoptedChanges.length}
+- Trace bundles: ${snapshot.traces.length}
+- Datasets: ${snapshot.datasets.length}
+- Experiments: ${snapshot.experiments.length}
+- Active trial run: ${
+		trialLiveRun
+			? `${trialLiveRun.phase}${trialLiveRun.latestToolName ? ` · ${trialLiveRun.latestToolName}` : ""}${trialLiveRun.latestMessage ? ` · ${truncate(trialLiveRun.latestMessage, 80)}` : ""}`
+			: "idle"
+	}
+${snapshot.state.lastSummary ? `- Last summary: ${snapshot.state.lastSummary}` : ""}
+
+Latest experiment:
+${latestExperiment ? `- ${latestExperiment.summary}` : "- none"}
+- Scores: ${latestScores}
+
+Recent trace tags:
+${snapshot.traces.slice(0, 6).map((trace) => `- [${trace.role}] ${trace.tags.join(", ") || "none"} · ${trace.summary}`).join("\n") || "- none"}
+`;
+	}
+
+	async function openQuestTrialsControl(ctx: ExtensionContext) {
+		const snapshot = await loadQuestTrialsSnapshot(ctx.cwd, true);
+		currentTrialState = snapshot.state;
+		currentProfile = snapshot.profile;
+		if (!ctx.hasUI || !ctx.ui.custom) {
+			await emitNote(pi, ctx, summarizeTrials(snapshot));
+			return;
+		}
+
+		await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+			let closed = false;
+			const cleanup = () => {
+				if (closed) return;
+				closed = true;
+				done(undefined);
+			};
+
+			const component = {
+				render(width: number) {
+					const lines = summarizeTrials(snapshot)
+						.split("\n")
+						.map((line, index) => (index === 0 ? theme.bold(theme.fg("accent", line.replace(/^# /, ""))) : line));
+					lines.splice(1, 0, theme.fg("muted", "q close · r run · s stop · p profile"));
+					return new Text(lines.join("\n"), 0, 0).render(width);
+				},
+				invalidate() {},
+				handleInput(data: string) {
+					if (matchesKey(data, Key.escape) || data === "q") {
+						cleanup();
+						return true;
+					}
+					if (data === "r") {
+						void handleQuestTrialsCommand("run", ctx).then(() => tui.requestRender());
+						return true;
+					}
+					if (data === "s") {
+						void handleQuestTrialsCommand("stop", ctx).then(() => tui.requestRender());
+						return true;
+					}
+					if (data === "p") {
+						void handleQuestTrialsCommand("profile", ctx).then(() => tui.requestRender());
+						return true;
+					}
+					return false;
+				},
+			};
+			return component;
+		});
+	}
+
+	async function handleQuestTrialsCommand(args: string, ctx: ExtensionContext) {
+		const trimmed = args.trim();
+		const snapshot = await loadQuestTrialsSnapshot(ctx.cwd, true);
+		currentTrialState = snapshot.state;
+		currentProfile = snapshot.profile;
+
+		if (!trimmed) {
+			await openQuestTrialsControl(ctx);
+			return;
+		}
+
+		const [subcommand, ...rest] = trimmed.split(/\s+/);
+		const remainder = rest.join(" ").trim();
+
+		switch (subcommand) {
+			case "run": {
+				if (currentTrialState.status === "running") {
+					await emitNote(pi, ctx, "Trials are already running.", "warning");
+					return;
+				}
+				const modelChoice =
+					currentQuest && currentQuest.status !== "completed" && currentQuest.status !== "aborted"
+						? currentOrDefaultModel(currentQuest, "orchestrator")
+						: createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
+				const result = await runQuestTrialsLoop(
+					ctx.cwd,
+					modelChoice,
+					async (snapshotUpdate) => {
+						trialLiveRun = snapshotUpdate;
+						await applyQuestUi(ctx, currentQuest);
+					},
+					async (pid) => {
+						activeTrialPid = pid;
+					},
+				);
+				activeTrialPid = undefined;
+				trialLiveRun = null;
+				currentTrialState = result.snapshot.state;
+				currentProfile = result.snapshot.profile;
+				await applyQuestUi(ctx, currentQuest);
+				await emitNote(pi, ctx, result.summary);
+				return;
+			}
+
+			case "stop": {
+				if (typeof activeTrialPid === "number") {
+					await terminateQuestProcess(activeTrialPid);
+				}
+				activeTrialPid = undefined;
+				trialLiveRun = null;
+				currentTrialState.status = "stopped";
+				currentTrialState.activeExperimentId = undefined;
+				currentTrialState.lastSummary = "Trials stopped by operator.";
+				await saveQuestTrialState(ctx.cwd, currentTrialState);
+				await emitNote(pi, ctx, "Trials stopped.", "warning");
+				return;
+			}
+
+			case "replay": {
+				if (!remainder) {
+					await emitNote(pi, ctx, "Usage: /quest trials replay <run-id>", "warning");
+					return;
+				}
+				const dataset = await replayQuestRunIntoTrialDataset(ctx.cwd, remainder);
+				if (!dataset) {
+					await emitNote(pi, ctx, `No Quest trace matched run id "${remainder}".`, "warning");
+					return;
+				}
+				await emitNote(pi, ctx, `Added replay cases to ${dataset.id}.`);
+				return;
+			}
+
+			case "target": {
+				if (remainder !== "repo" && remainder !== "quest-core") {
+					await emitNote(pi, ctx, "Usage: /quest trials target <repo|quest-core>", "warning");
+					return;
+				}
+				if (remainder === "quest-core" && !ctx.cwd.endsWith("/pi-quests")) {
+					await emitNote(pi, ctx, "quest-core target is only available inside the pi-quests package repo.", "warning");
+					return;
+				}
+				currentTrialState.target = remainder;
+				currentTrialState.activeProfileId = `${remainder}-${currentTrialState.projectId}`;
+				await saveQuestTrialState(ctx.cwd, currentTrialState);
+				currentProfile = await loadQuestProfile(ctx.cwd, currentTrialState.activeProfileId, { ensure: true, target: remainder });
+				await saveQuestProfile(ctx.cwd, currentProfile);
+				await emitNote(pi, ctx, `Trials target set to ${remainder}.`);
+				return;
+			}
+
+			case "profile": {
+				const latestExperiment = snapshot.experiments[0];
+				await emitNote(
+					pi,
+					ctx,
+					`Trials profile ${snapshot.profile.id}\n- target: ${snapshot.profile.target}\n- adopted changes: ${snapshot.profile.adoptedChanges.length}\n- same-model bias: ${snapshot.profile.modelPolicy.preferSameModelFamily}\n- spill-to-reports: ${snapshot.profile.contextPolicy.spillLongOutputsToReports}\n- latest scores: ${latestExperiment ? summarizeExperimentScores(latestExperiment.candidateScores) : "none"}`,
+				);
+				return;
+			}
+
+			default: {
+				await emitNote(
+					pi,
+					ctx,
+					"Unknown /quest trials subcommand. Use /quest trials, /quest trials run, /quest trials stop, /quest trials replay <run-id>, /quest trials target <repo|quest-core>, or /quest trials profile.",
+					"warning",
+				);
+			}
+		}
+	}
+
 	async function queueSteeringNote(ctx: ExtensionContext, quest: QuestState, note: string, source: "command" | "quest-mode"): Promise<QuestState> {
 		const originalStatus = quest.status;
 		quest.steeringNotes.push(note);
@@ -692,6 +974,8 @@ export default function questExtension(pi: ExtensionAPI) {
 			requests,
 			currentOrDefaultModel(quest, "orchestrator"),
 			currentWorkflows,
+			activeProfileFor(quest.cwd, currentProfile, currentTrialState?.target),
+			undefined,
 			async (snapshot) => {
 				liveRun = snapshot;
 				if (quest.activeRun && quest.activeRun.phase !== snapshot.phase) {
@@ -708,6 +992,7 @@ export default function questExtension(pi: ExtensionAPI) {
 			},
 		);
 		await writeWorkerRun(quest.cwd, quest.id, run);
+		await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, run, activeProfileFor(quest.cwd, currentProfile, currentTrialState?.target)));
 		quest.recentRuns = trimRecentRuns([run, ...quest.recentRuns]);
 		liveRun = null;
 		await persistLearnedWorkflows(run);
@@ -767,6 +1052,8 @@ export default function questExtension(pi: ExtensionAPI) {
 			currentOrDefaultModel(quest, "validator"),
 			currentWorkflows,
 			pass,
+			activeProfileFor(quest.cwd, currentProfile, currentTrialState?.target),
+			undefined,
 			async (snapshot) => {
 				liveRun = snapshot;
 				if (quest.activeRun && quest.activeRun.phase !== snapshot.phase) {
@@ -784,6 +1071,7 @@ export default function questExtension(pi: ExtensionAPI) {
 		);
 		liveRun = null;
 		await writeWorkerRun(quest.cwd, quest.id, validator);
+		await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, validator, activeProfileFor(quest.cwd, currentProfile, currentTrialState?.target)));
 		quest.recentRuns = trimRecentRuns([validator, ...quest.recentRuns]);
 		await persistLearnedWorkflows(validator);
 		quest.activeRun = undefined;
@@ -838,6 +1126,8 @@ export default function questExtension(pi: ExtensionAPI) {
 					milestone,
 					currentOrDefaultModel(quest, "worker"),
 					currentWorkflows,
+					activeProfileFor(quest.cwd, currentProfile, currentTrialState?.target),
+					undefined,
 					async (snapshot) => {
 						liveRun = snapshot;
 						if (quest.activeRun && quest.activeRun.phase !== snapshot.phase) {
@@ -855,6 +1145,7 @@ export default function questExtension(pi: ExtensionAPI) {
 				);
 				liveRun = null;
 				await writeWorkerRun(quest.cwd, quest.id, run);
+				await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, run, activeProfileFor(quest.cwd, currentProfile, currentTrialState?.target)));
 				quest.recentRuns = trimRecentRuns([run, ...quest.recentRuns]);
 				await persistLearnedWorkflows(run);
 				quest.activeRun = undefined;
@@ -967,6 +1258,11 @@ export default function questExtension(pi: ExtensionAPI) {
 		const remainder = rest.join(" ").trim();
 
 		switch (subcommand) {
+			case "trials": {
+				await handleQuestTrialsCommand(remainder, ctx);
+				return;
+			}
+
 			case "new": {
 				if (!remainder) {
 					await emitNote(pi, ctx, "Usage: /quest new <goal>", "warning");
@@ -1118,7 +1414,7 @@ export default function questExtension(pi: ExtensionAPI) {
 				await emitNote(
 					pi,
 					ctx,
-					"Unknown /quest subcommand. Use /quest, /quest new <goal>, /quest enter, /quest exit, /quest accept, /quest pause, /quest resume, /quest abort, or /quest model <role> <provider/model[:thinking]>.",
+					"Unknown /quest subcommand. Use /quest, /quest new <goal>, /quest enter, /quest exit, /quest accept, /quest pause, /quest resume, /quest abort, /quest trials, or /quest model <role> <provider/model[:thinking]>.",
 					"warning",
 				);
 			}
@@ -1452,10 +1748,235 @@ export default function questExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerTool({
+		name: "quest_trials_set_profile",
+		label: "quest_trials_set_profile",
+		description: "Persist the active Trials profile and its editable surfaces.",
+		promptSnippet: "Persist a Trials profile surface update",
+		parameters: Type.Object({
+			profileId: Type.Optional(Type.String()),
+			target: Type.Optional(Type.Union([Type.Literal("repo"), Type.Literal("quest-core")])),
+			title: Type.Optional(Type.String()),
+			adoptedChange: Type.Optional(Type.String()),
+			promptSurfaces: Type.Optional(
+				Type.Object({
+					planningPolicy: Type.Optional(Type.String()),
+					workerPolicy: Type.Optional(Type.String()),
+					validatorCodeReviewPolicy: Type.Optional(Type.String()),
+					validatorUserSurfacePolicy: Type.Optional(Type.String()),
+					readinessPolicy: Type.Optional(Type.String()),
+					revisionPolicy: Type.Optional(Type.String()),
+				}),
+			),
+			modelPolicy: Type.Optional(
+				Type.Object({
+					preferSameModelFamily: Type.Optional(Type.Boolean()),
+					preferValidatorDivergence: Type.Optional(Type.Boolean()),
+				}),
+			),
+			verificationBudget: Type.Optional(
+				Type.Object({
+					workerAttempts: Type.Optional(Type.Number()),
+					validatorAttempts: Type.Optional(Type.Number()),
+					correctiveFeatureBudget: Type.Optional(Type.Number()),
+				}),
+			),
+			contextPolicy: Type.Optional(
+				Type.Object({
+					spillThresholdChars: Type.Optional(Type.Number()),
+					spillLongOutputsToReports: Type.Optional(Type.Boolean()),
+					maxInlineEvidenceLines: Type.Optional(Type.Number()),
+				}),
+			),
+			workflowHintPolicy: Type.Optional(
+				Type.Object({
+					maxSharedHints: Type.Optional(Type.Number()),
+					promotePrerequisiteHints: Type.Optional(Type.Boolean()),
+					promoteFailureHints: Type.Optional(Type.Boolean()),
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const trialState = await loadQuestTrialState(ctx.cwd, { ensure: true });
+			const profile = await loadQuestProfile(ctx.cwd, params.profileId ?? trialState.activeProfileId, {
+				ensure: true,
+				target: params.target ?? trialState.target,
+			});
+			const next = applyQuestProfilePatch(profile, {
+				promptSurfaces: params.promptSurfaces,
+				modelPolicy: params.modelPolicy,
+				verificationBudget: params.verificationBudget,
+				contextPolicy: params.contextPolicy,
+				workflowHintPolicy: params.workflowHintPolicy,
+				adoptedChange: params.adoptedChange,
+			});
+			if (params.title) next.title = params.title;
+			if (params.target) next.target = params.target;
+			await saveQuestProfile(ctx.cwd, next);
+			currentProfile = next;
+			return {
+				content: [{ type: "text", text: `Updated Trials profile ${next.id}.` }],
+				details: { profileId: next.id, target: next.target },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "quest_trials_record_trace_case",
+		label: "quest_trials_record_trace_case",
+		description: "Add a Quest trace replay case to the trace-replays dataset.",
+		promptSnippet: "Persist a Quest trace replay case",
+		parameters: Type.Object({
+			runId: Type.String(),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const dataset = await replayQuestRunIntoTrialDataset(ctx.cwd, params.runId);
+			if (!dataset) {
+				return { content: [{ type: "text", text: `No Quest trace matched ${params.runId}.` }] };
+			}
+			return {
+				content: [{ type: "text", text: `Updated ${dataset.id} with replay cases for ${params.runId}.` }],
+				details: { datasetId: dataset.id, caseCount: dataset.cases.length },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "quest_trials_record_experiment",
+		label: "quest_trials_record_experiment",
+		description: "Persist a Trials experiment record.",
+		promptSnippet: "Persist a Trials experiment record",
+		parameters: Type.Object({
+			id: Type.String(),
+			target: Type.Union([Type.Literal("repo"), Type.Literal("quest-core")]),
+			profileId: Type.String(),
+			state: Type.Union([
+				Type.Literal("planned"),
+				Type.Literal("running"),
+				Type.Literal("rejected"),
+				Type.Literal("applied"),
+				Type.Literal("failed"),
+				Type.Literal("stopped"),
+			]),
+			summary: Type.String(),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const state = await loadQuestTrialState(ctx.cwd, { ensure: true });
+			const experiment: QuestExperiment = {
+				id: params.id,
+				projectId: state.projectId,
+				target: params.target,
+				profileId: params.profileId,
+				state: params.state,
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				baselineScores: [],
+				candidateScores: [],
+				spotCheckCaseIds: [],
+				heldOutCaseIds: [],
+				tracesAnalyzed: [],
+				summary: params.summary,
+			};
+			await saveQuestExperiment(ctx.cwd, experiment);
+			return {
+				content: [{ type: "text", text: `Recorded Trials experiment ${params.id}.` }],
+				details: { experimentId: params.id },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "quest_trials_set_scores",
+		label: "quest_trials_set_scores",
+		description: "Update baseline and candidate score summaries for a Trials experiment.",
+		promptSnippet: "Persist Trials experiment scores",
+		parameters: Type.Object({
+			experimentId: Type.String(),
+			baselineScores: Type.Array(questExperimentScoreSchema),
+			candidateScores: Type.Array(questExperimentScoreSchema),
+			summary: Type.Optional(Type.String()),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const experiment = await loadQuestExperiment(ctx.cwd, params.experimentId);
+			if (!experiment) return { content: [{ type: "text", text: "Experiment not found." }] };
+			experiment.baselineScores = params.baselineScores as QuestExperiment["baselineScores"];
+			experiment.candidateScores = params.candidateScores as QuestExperiment["candidateScores"];
+			if (params.summary) experiment.summary = params.summary;
+			await saveQuestExperiment(ctx.cwd, experiment);
+			return {
+				content: [{ type: "text", text: `Updated scores for experiment ${params.experimentId}.` }],
+				details: { experimentId: params.experimentId },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "quest_trials_apply_candidate",
+		label: "quest_trials_apply_candidate",
+		description: "Apply a Trials candidate patch to the active profile.",
+		promptSnippet: "Apply a Trials candidate patch",
+		parameters: Type.Object({
+			adoptedChange: Type.String(),
+			promptSurfaces: Type.Optional(questPromptSurfacesPatchSchema),
+			modelPolicy: Type.Optional(questModelPolicyPatchSchema),
+			verificationBudget: Type.Optional(questVerificationBudgetPatchSchema),
+			contextPolicy: Type.Optional(questContextPolicyPatchSchema),
+			workflowHintPolicy: Type.Optional(questWorkflowHintPolicyPatchSchema),
+			traceGrading: Type.Optional(questTraceGradingPatchSchema),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const trialState = await loadQuestTrialState(ctx.cwd, { ensure: true });
+			const profile = await loadQuestProfile(ctx.cwd, trialState.activeProfileId, { ensure: true, target: trialState.target });
+			const next = applyQuestProfilePatch(profile, {
+				adoptedChange: params.adoptedChange,
+				promptSurfaces: params.promptSurfaces,
+				modelPolicy: params.modelPolicy,
+				verificationBudget: params.verificationBudget,
+				contextPolicy: params.contextPolicy,
+				workflowHintPolicy: params.workflowHintPolicy,
+				traceGrading: params.traceGrading,
+			});
+			await saveQuestProfile(ctx.cwd, next);
+			currentProfile = next;
+			return {
+				content: [{ type: "text", text: `Applied candidate patch to ${next.id}.` }],
+				details: { profileId: next.id, adoptedChanges: next.adoptedChanges.length },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "quest_trials_update_state",
+		label: "quest_trials_update_state",
+		description: "Update high-level Trials state such as target, active experiment, or summary.",
+		promptSnippet: "Update Trials state",
+		parameters: Type.Object({
+			target: Type.Optional(Type.Union([Type.Literal("repo"), Type.Literal("quest-core")])),
+			activeProfileId: Type.Optional(Type.String()),
+			activeExperimentId: Type.Optional(Type.String()),
+			status: Type.Optional(Type.Union([Type.Literal("idle"), Type.Literal("running"), Type.Literal("stopped"), Type.Literal("blocked")])),
+			lastSummary: Type.Optional(Type.String()),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const state = await loadQuestTrialState(ctx.cwd, { ensure: true });
+			if (params.target) state.target = params.target;
+			if (params.activeProfileId) state.activeProfileId = params.activeProfileId;
+			if (params.activeExperimentId !== undefined) state.activeExperimentId = params.activeExperimentId || undefined;
+			if (params.status) state.status = params.status;
+			if (params.lastSummary !== undefined) state.lastSummary = params.lastSummary || undefined;
+			await saveQuestTrialState(ctx.cwd, state);
+			currentTrialState = state;
+			return {
+				content: [{ type: "text", text: `Trials state updated to ${state.status}.` }],
+				details: { target: state.target, profileId: state.activeProfileId, experimentId: state.activeExperimentId },
+			};
+		},
+	});
+
 	pi.registerCommand("quest", {
 		description: "Open Quest Control or operate on the active quest",
 		getArgumentCompletions: (prefix) => {
-			const options = ["new", "enter", "exit", "accept", "pause", "resume", "abort", "model"];
+			const options = ["new", "enter", "exit", "accept", "pause", "resume", "abort", "model", "trials"];
 			return options.filter((item) => item.startsWith(prefix)).map((item) => ({ value: item, label: item }));
 		},
 		handler: handleQuestCommand,
@@ -1529,12 +2050,13 @@ export default function questExtension(pi: ExtensionAPI) {
 		const planningAllowed = planningTurnActive || !ctx.hasUI;
 		if (!planningAllowed || !currentQuest || (currentQuest.status !== "planning" && currentQuest.status !== "proposal_ready")) return;
 		planningEvents = [];
+		planningStartedAt = Date.now();
 		liveRun = createLiveRunSnapshot("orchestrator", {}, "planning");
 		await applyQuestUi(ctx, currentQuest);
 		return {
 			message: {
 				customType: "pi-quest-planning",
-				content: planningInstructions(currentQuest, currentWorkflows),
+				content: planningInstructions(currentQuest, currentWorkflows, activeProfileFor(ctx.cwd, currentProfile, currentTrialState?.target)),
 				display: false,
 			},
 		};
@@ -1570,8 +2092,24 @@ export default function questExtension(pi: ExtensionAPI) {
 		if (text && currentQuest.status === "planning") {
 			await markPlanReadyFromText(ctx, currentQuest, text);
 		}
+		const planningProfile = activeProfileFor(ctx.cwd, currentProfile, currentTrialState?.target);
+		await writeQuestTraceBundle(
+			ctx.cwd,
+			traceBundleFromPlanningSession(
+				currentQuest,
+				planningEvents,
+				currentOrDefaultModel(currentQuest, "orchestrator"),
+				planningProfile,
+				currentQuest.lastSummary ?? truncate(text, 240),
+				currentQuest.status === "proposal_ready",
+				planningStartedAt || Date.now(),
+				Date.now(),
+				liveRun?.latestMessage,
+			),
+		);
 		liveRun = null;
 		planningTurnActive = false;
+		planningStartedAt = 0;
 		await applyQuestUi(ctx, currentQuest);
 	});
 }

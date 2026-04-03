@@ -1,0 +1,28 @@
+{
+  "name": "slopcodebench-local",
+  "cases": [
+    {
+      "id": "migrate-configs",
+      "title": "Config migration CLI",
+      "cwd": "./fixtures/mini-cli",
+      "baseSpec": "Build a CLI tool with clear iterative refinement checkpoints.",
+      "checkpoints": [
+        {
+          "id": "checkpoint-1",
+          "instruction": "Plan the first checkpoint as a minimal viable CLI.",
+          "dryRun": true
+        },
+        {
+          "id": "checkpoint-2",
+          "instruction": "Refine the plan for more schema validation while keeping the human QA gate explicit.",
+          "dryRun": true
+        },
+        {
+          "id": "checkpoint-3",
+          "instruction": "Revise the plan one more time and keep validation limits honest.",
+          "dryRun": true
+        }
+      ]
+    }
+  ]
+}

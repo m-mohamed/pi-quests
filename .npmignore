@@ -1,0 +1,7 @@
+**/.pi/
+**/__pycache__/
+**/*.pyc
+benchmarks/.runs
+benchmarks/.runs/**
+benchmarks/.workdirs
+benchmarks/.workdirs/**

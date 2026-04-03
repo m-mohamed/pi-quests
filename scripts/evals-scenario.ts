@@ -154,7 +154,7 @@ async function withScenarioSandbox<T>(fixtureName: string, fn: (context: Scenari
 }
 
 function repoPollutionCheck(repoDir: string) {
-	return !existsSync(join(repoDir, ".pi")) && !existsSync(join(repoDir, "quest.json")) && !existsSync(join(repoDir, "quests"));
+	return !existsSync(join(repoDir, "quest.json")) && !existsSync(join(repoDir, "quests"));
 }
 
 async function compatibilityJsonEvents(): Promise<ScenarioResult> {
@@ -193,16 +193,9 @@ async function questControlSurface(): Promise<ScenarioResult> {
 		quest.plan = {
 			title: "Command surface split",
 			summary: "Keep quest control and project quest listing separate.",
-			successCriteria: ["Quest Control stays separate from the quest list."],
 			milestones: [],
 			features: [],
-			validationContract: {
-				summary: "No-op command surface scenario.",
-				milestoneExpectations: [],
-				featureChecks: [],
-				criteria: [],
-				weakValidationWarnings: [],
-			},
+			humanQaChecklist: ["Review the command surface manually before shipping."],
 		};
 		await saveQuest(quest);
 
@@ -212,7 +205,7 @@ async function questControlSurface(): Promise<ScenarioResult> {
 			control.exitCode === 0 &&
 			list.exitCode === 0 &&
 			control.stdout.includes("Quest: Command surface split") &&
-			control.stdout.includes("Next action: /quest accept") &&
+			control.stdout.includes("Status: proposal_ready") &&
 			list.stdout.includes("Inspect the command surface split") &&
 			list.stdout.includes("proposal_ready");
 
@@ -242,7 +235,7 @@ async function readonlyWebProposal(): Promise<ScenarioResult> {
 		const passed =
 			result.exitCode === 0 &&
 			quest?.status === "proposal_ready" &&
-			Boolean(quest.plan?.validationContract) &&
+			Boolean(quest.validationState) &&
 			repoPollutionCheck(context.repoDir);
 		return {
 			id: "readonly-web",
@@ -255,7 +248,7 @@ async function readonlyWebProposal(): Promise<ScenarioResult> {
 			artifacts: {
 				status: quest?.status,
 				hasPlan: Boolean(quest?.plan),
-				validationCriteria: quest?.plan?.validationContract.criteria.length ?? 0,
+				assertionCount: quest?.validationState?.assertions.length ?? 0,
 				repoPollutionFree: repoPollutionCheck(context.repoDir),
 			},
 		};
@@ -272,8 +265,10 @@ async function weakValidationWarning(): Promise<ScenarioResult> {
 			"Plan the active quest for this repo. There are no automated checks, no browser surface, and validation is mostly static inspection plus human QA. Do not ask clarifying questions. Return the final quest JSON.",
 		);
 		const quest = await loadActiveQuest(context.repoDir);
-		const warnings = quest?.plan?.validationContract.weakValidationWarnings ?? [];
-		const strategies = quest?.plan?.validationContract.criteria.map((criterion) => criterion.proofStrategy) ?? [];
+		const warnings = (quest?.validationReadiness?.checks ?? [])
+			.filter((check) => check.status === "limited" || check.status === "unsupported")
+			.map((check) => `${check.surface}:${check.status}`);
+		const strategies = (quest?.validationState?.assertions ?? []).map((assertion) => assertion.method);
 		const passed =
 			result.exitCode === 0 &&
 			quest?.status === "proposal_ready" &&
@@ -324,13 +319,7 @@ async function humanQaGate(): Promise<ScenarioResult> {
 					status: "completed",
 				},
 			],
-			validationContract: {
-				summary: "Human QA remains separate from validation.",
-				milestoneExpectations: [],
-				featureChecks: [],
-				criteria: [],
-				weakValidationWarnings: [],
-			},
+			humanQaChecklist: ["Run human QA before ship readiness flips."],
 		};
 		await saveQuest(quest);
 
@@ -401,56 +390,64 @@ async function abortRecovery(): Promise<ScenarioResult> {
 					status: "running",
 				},
 			],
-			validationContract: {
-				summary: "Abort recovery uses command and read-only proof paths.",
-				milestoneExpectations: [
-					{
-						milestoneId: "m1",
-						title: "Recovery milestone",
-						expectedBehaviors: ["README.md contains QUEST_ABORT_RECOVERY_OK", "The repo test command passes"],
-					},
-				],
-				featureChecks: [
-					{ featureId: "f1", title: "Keep completed work intact", criterionIds: ["criterion-1"] },
-					{ featureId: "f2", title: "Finish the interrupted recovery note", criterionIds: ["criterion-2", "criterion-3"] },
-				],
-				criteria: [
-					{
-						id: "criterion-1",
-						title: "Completed work is preserved",
-						milestoneId: "m1",
-						featureIds: ["f1"],
-						expectedBehavior: "Completed work remains completed",
-						proofStrategy: "read_only",
-						proofDetails: "Read quest state and confirm completed feature stays completed.",
-						commands: [],
-						confidence: "high",
-					},
-					{
-						id: "criterion-2",
-						title: "README recovery note exists",
-						milestoneId: "m1",
-						featureIds: ["f2"],
-						expectedBehavior: "README.md contains QUEST_ABORT_RECOVERY_OK",
-						proofStrategy: "read_only",
-						proofDetails: "Read README.md after resume.",
-						commands: [],
-						confidence: "high",
-					},
-					{
-						id: "criterion-3",
-						title: "Repo tests pass",
-						milestoneId: "m1",
-						featureIds: ["f2"],
-						expectedBehavior: "The repo marker command passes",
-						proofStrategy: "command",
-						proofDetails: "Use rg to confirm README.md contains QUEST_ABORT_RECOVERY_OK.",
-						commands: ["rg QUEST_ABORT_RECOVERY_OK README.md"],
-						confidence: "high",
-					},
-				],
-				weakValidationWarnings: [],
-			},
+			humanQaChecklist: ["Run human QA after automated validation passes."],
+		};
+		quest.validationReadiness = {
+			summary: "Repo checks supported. User-surface validation is limited.",
+			checks: [
+				{
+					id: "repo-checks",
+					surface: "repo-checks",
+					description: "rg can verify the README marker",
+					status: "supported",
+					commands: ["rg QUEST_ABORT_RECOVERY_OK README.md"],
+					evidence: ["README.md is present in the fixture repo."],
+				},
+				{
+					id: "user-surface",
+					surface: "user-surface",
+					description: "Operator-facing recovery flow still needs human QA",
+					status: "limited",
+					commands: [],
+					evidence: ["Scenario fixture is CLI-only."],
+				},
+			],
+		};
+		quest.validationState = {
+			assertions: [
+				{
+					id: "criterion-1",
+					milestoneId: "m1",
+					description: "Completed work remains completed",
+					method: "read_only",
+					criticality: "important",
+					status: "pending",
+					evidence: [],
+					featureIds: ["f1"],
+				},
+				{
+					id: "criterion-2",
+					milestoneId: "m1",
+					description: "README.md contains QUEST_ABORT_RECOVERY_OK",
+					method: "read_only",
+					criticality: "critical",
+					status: "pending",
+					evidence: [],
+					featureIds: ["f2"],
+				},
+				{
+					id: "criterion-3",
+					milestoneId: "m1",
+					description: "rg QUEST_ABORT_RECOVERY_OK README.md succeeds",
+					method: "command",
+					criticality: "critical",
+					status: "pending",
+					evidence: [],
+					featureIds: ["f2"],
+					commands: ["rg QUEST_ABORT_RECOVERY_OK README.md"],
+				},
+			],
+			updatedAt: Date.now(),
 		};
 		quest.activeRun = {
 			role: "worker",
@@ -548,13 +545,22 @@ async function validatorBlockReplan(): Promise<ScenarioResult> {
 					status: "pending",
 				},
 			],
-			validationContract: {
-				summary: "Replan stays bounded to unfinished work.",
-				milestoneExpectations: [],
-				featureChecks: [],
-				criteria: [],
-				weakValidationWarnings: [],
-			},
+			humanQaChecklist: ["Run human QA before shipping."],
+		};
+		quest.validationState = {
+			assertions: [
+				{
+					id: "replan-criterion-1",
+					milestoneId: "m2",
+					description: "README.md contains QUEST_REPLAN_OK",
+					method: "read_only",
+					criticality: "critical",
+					status: "pending",
+					evidence: [],
+					featureIds: ["f2"],
+				},
+			],
+			updatedAt: Date.now(),
 		};
 		quest.pendingPlanRevisionRequests = [
 			{

@@ -1,0 +1,10 @@
+type: quest
+binary: quest-headless
+timeout: 7200
+benchmark_dataset: slopcodebench-official
+run_mode: full
+env: {}
+cost_limits:
+  cost_limit: 0
+  step_limit: 0
+  net_cost_limit: 0

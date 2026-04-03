@@ -1,0 +1,1 @@
+# SlopCodeBench adapter package marker.

@@ -2,3 +2,7 @@ node_modules/
 .DS_Store
 .pi/
 *.tgz
+benchmarks/.runs/
+benchmarks/.workdirs/
+**/__pycache__/
+**/*.pyc

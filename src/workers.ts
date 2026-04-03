@@ -4,9 +4,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
+import { parseQuestExperimentCandidate, promptSurfaceText, toolAllowlistForRole } from "./trials-core.js";
 import { parseQuestPlanText } from "./plan-core.js";
 import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
 import type {
+	QuestBenchmarkProvenance,
+	QuestExperimentCandidate,
 	LearnedWorkflow,
 	LiveRunSnapshot,
 	ModelChoice,
@@ -14,6 +17,8 @@ import type {
 	QuestMilestone,
 	QuestPlan,
 	QuestPlanRevisionRequest,
+	QuestProfile,
+	QuestRole,
 	QuestState,
 	ValidationAssertion,
 	ValidationReadiness,
@@ -36,11 +41,12 @@ interface RunPiTaskOptions {
 	cwd: string;
 	modelChoice: ModelChoice;
 	tools: string[];
-	role: "orchestrator" | "worker" | "validator";
+	role: QuestRole;
 	featureId?: string;
 	milestoneId?: string;
 	systemPrompt?: string;
 	prompt: string;
+	benchmark?: QuestBenchmarkProvenance;
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>;
 	onProcessStart?: (pid: number) => void | Promise<void>;
 }
@@ -100,8 +106,11 @@ const DEFAULT_USAGE: UsageStats = {
 type ValidatorPass = "code_review" | "user_surface";
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
+	const explicit = process.env.PI_QUESTS_PI_BIN;
+	if (explicit) return { command: explicit, args };
 	const currentScript = process.argv[1];
-	if (currentScript) return { command: process.execPath, args: [currentScript, ...args] };
+	const currentBase = currentScript ? path.basename(currentScript).toLowerCase() : "";
+	if (currentScript && currentBase.startsWith("pi")) return { command: process.execPath, args: [currentScript, ...args] };
 	return { command: "pi", args };
 }
 
@@ -193,7 +202,13 @@ Project learned workflows:
 ${learnedWorkflowSection(workflows)}`;
 }
 
-function buildFeaturePrompt(quest: QuestState, feature: QuestFeature, milestone: QuestMilestone, workflows: LearnedWorkflow[]): string {
+export function buildFeaturePrompt(
+	quest: QuestState,
+	feature: QuestFeature,
+	milestone: QuestMilestone,
+	workflows: LearnedWorkflow[],
+	profile: QuestProfile,
+): string {
 	const preconditions = feature.preconditions.length ? feature.preconditions.map((item) => `- ${item}`).join("\n") : "- None.";
 	const assertions = validationAssertionsForFeature(quest, feature);
 	const validationLines =
@@ -205,8 +220,12 @@ function buildFeaturePrompt(quest: QuestState, feature: QuestFeature, milestone:
 								assertion.commands?.length ? `\n  Commands: ${assertion.commands.join(", ")}` : ""
 							}`,
 					)
-					.join("\n")
+			.join("\n")
 			: "- No feature-specific validation assertions were captured.";
+	const contextPolicy =
+		profile.contextPolicy.spillLongOutputsToReports
+			? `If evidence exceeds roughly ${profile.contextPolicy.spillThresholdChars} characters, summarize it inline and spill the rest to a report instead of bloating the response.`
+			: "Keep evidence compact and inline.";
 
 	return `${questContext(quest, workflows)}
 
@@ -221,6 +240,12 @@ ${preconditions}
 
 Validation assertions satisfied by this feature:
 ${validationLines}
+
+Profile surface policy:
+${promptSurfaceText(profile, "feature-worker")}
+
+Context policy:
+${contextPolicy}
 
 ${feature.handoff ? `Expected handoff:\n${feature.handoff}\n` : ""}${feature.workerPrompt ? `Feature-specific instructions:\n${feature.workerPrompt}\n` : ""}
 
@@ -243,7 +268,7 @@ At the end, output:
 `;
 }
 
-function buildWorkerSystemPrompt(): string {
+export function buildWorkerSystemPrompt(profile: QuestProfile): string {
 	return `You are a quest worker executing a single feature within a larger Pi quest.
 
 Rules:
@@ -252,15 +277,17 @@ Rules:
 - Make the smallest correct change that satisfies the feature.
 - Do not start new quests or inspect quest internals.
 - Do not rewrite unrelated parts of the codebase.
+- Budget: at most ${profile.verificationBudget.workerAttempts} worker attempt(s) before handing control back.
 - End with the required JSON block.`;
 }
 
-function buildValidatorPrompt(
+export function buildValidatorPrompt(
 	quest: QuestState,
 	milestone: QuestMilestone,
 	features: QuestFeature[],
 	workflows: LearnedWorkflow[],
 	pass: ValidatorPass,
+	profile: QuestProfile,
 ): string {
 	const featureList = features.map((feature) => `- ${feature.title}: ${feature.lastRunSummary ?? feature.description}`).join("\n");
 	const assertions = validationAssertionsForMilestone(quest, milestone, pass);
@@ -279,6 +306,7 @@ function buildValidatorPrompt(
 		pass === "code_review"
 			? "Perform a code/procedure review. Prefer repo commands, typechecks, tests, and read-only inspection."
 			: "Perform a user-surface validation pass. Prefer browser-visible flows, CLI-visible behavior, and operator-facing outcomes.";
+	const surfaceId = pass === "code_review" ? "validator-code-review" : "validator-user-surface";
 
 	return `${questContext(quest, workflows)}
 
@@ -292,6 +320,9 @@ ${passDescription}
 
 Assertions for this pass:
 ${validationLines}
+
+Profile surface policy:
+${promptSurfaceText(profile, surfaceId)}
 
 ${milestone.validationPrompt ? `Extra validation guidance:\n${milestone.validationPrompt}\n` : ""}
 
@@ -308,17 +339,18 @@ At the end, output:
 `;
 }
 
-function buildValidatorSystemPrompt(pass: ValidatorPass): string {
+export function buildValidatorSystemPrompt(pass: ValidatorPass, profile: QuestProfile): string {
 	return `You are a read-only quest validator running the ${pass} pass.
 
 Rules:
 - Verify the assigned milestone using read-only tools and commands.
 - Do not edit or write files.
 - Be explicit about issues, blockers, or limited coverage.
+- Budget: at most ${profile.verificationBudget.validatorAttempts} validator attempt(s) before handing control back.
 - End with the required JSON block.`;
 }
 
-function buildPlanRevisionSystemPrompt(): string {
+export function buildPlanRevisionSystemPrompt(profile: QuestProfile): string {
 	return `You are the quest orchestrator revising only the remaining plan for an existing Pi quest.
 
 Rules:
@@ -326,10 +358,12 @@ Rules:
 - Only change unfinished milestones, unfinished features, and validation for unfinished work.
 - Keep the quest serial by default.
 - Do not edit repository files.
+- Policy surface:
+${promptSurfaceText(profile, "plan-revision")}
 - End with the required JSON block.`;
 }
 
-function buildReadinessProbePrompt(cwd: string): string {
+function buildReadinessProbePrompt(cwd: string, profile: QuestProfile): string {
 	return `Probe validation readiness for this repository at ${cwd}.
 
 You are a dry-run validator. Do not edit files.
@@ -341,6 +375,9 @@ Consider at least:
 - dev server startup
 - local services or docker dependencies
 - API or command-line validation
+
+Profile surface policy:
+${promptSurfaceText(profile, "readiness-probe")}
 
 Return:
 \`\`\`json
@@ -368,6 +405,106 @@ Return:
   ]
 }
 \`\`\``;
+}
+
+function buildPlanningPrompt(
+	cwd: string,
+	goal: string,
+	readiness: ValidationReadiness | null,
+	profile: QuestProfile,
+	benchmark?: QuestBenchmarkProvenance,
+): string {
+	const readinessLines =
+		readiness?.checks.length
+			? readiness.checks.map((check) => `- ${check.surface} [${check.status}] ${check.description}`).join("\n")
+			: "- No readiness checks captured.";
+	const benchmarkLines = benchmark
+		? `Benchmark context:
+- benchmark: ${benchmark.benchmark}
+- dataset: ${benchmark.dataset}
+- task: ${benchmark.taskId}
+- checkpoint: ${benchmark.checkpointId ?? "none"}
+- run mode: ${benchmark.runMode}`
+		: "Benchmark context:\n- none";
+	return `Plan a headless Quest for this repository at ${cwd}.
+
+Goal:
+${goal}
+
+${benchmarkLines}
+
+Validation readiness:
+${readiness?.summary ?? "No readiness summary captured yet."}
+
+${readinessLines}
+
+Profile surface policy:
+${promptSurfaceText(profile, "planning")}
+
+Return a compact quest plan as JSON with:
+- title
+- summary
+- risks
+- environment
+- services
+- validationSummary
+- humanQaChecklist
+- milestones
+- features
+
+Requirements:
+- Keep execution serial by default.
+- Prefer 1-4 features.
+- Every feature must have explicit fulfills entries.
+- Keep the final human QA handoff explicit.
+- Be honest about limited or unsupported validation.
+
+\`\`\`json
+{
+  "title": "Quest title",
+  "summary": "Short plan summary",
+  "risks": ["optional risk"],
+  "environment": ["optional note"],
+  "services": [],
+  "validationSummary": "what is automated vs limited",
+  "humanQaChecklist": ["manual QA item"],
+  "milestones": [
+    {
+      "id": "m1",
+      "order": 1,
+      "title": "Complete benchmark task",
+      "description": "Finish the assigned benchmark task",
+      "successCriteria": ["task passes validation"],
+      "status": "pending"
+    }
+  ],
+  "features": [
+    {
+      "id": "f1",
+      "order": 1,
+      "milestoneId": "m1",
+      "title": "Implement the benchmark task",
+      "description": "Finish the required repo work",
+      "preconditions": [],
+      "fulfills": ["required validation outcome"],
+      "status": "pending",
+      "handoff": "brief handoff"
+    }
+  ]
+}
+\`\`\``;
+}
+
+export function buildPlannerSystemPrompt(profile: QuestProfile): string {
+	return `You are the quest orchestrator planning a headless Pi quest.
+
+Rules:
+- Plan the smallest serial execution path that can solve the task.
+- Keep human QA explicit at the end.
+- Be honest about limited or unsupported validation.
+- Do not emit prose outside the required JSON block.
+- Planning policy:
+${promptSurfaceText(profile, "planning")}`;
 }
 
 async function runPiTask(options: RunPiTaskOptions): Promise<RunPiTaskResult> {
@@ -498,6 +635,7 @@ function workerRunFromResult(
 	summary: string,
 	ok: boolean,
 	issues?: string[],
+	benchmark?: QuestBenchmarkProvenance,
 ): WorkerRunRecord {
 	return {
 		id: randomUUID(),
@@ -521,6 +659,7 @@ function workerRunFromResult(
 		latestAssistantText: result.latestAssistantText,
 		events: result.events,
 		usage: result.usage,
+		benchmark: benchmark ? { ...benchmark, passed: ok } : undefined,
 		...extra,
 	};
 }
@@ -528,6 +667,8 @@ function workerRunFromResult(
 export async function executeValidationReadinessProbe(
 	cwd: string,
 	modelChoice: ModelChoice,
+	profile: QuestProfile,
+	benchmark: QuestBenchmarkProvenance | undefined,
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<{ run: WorkerRunRecord; readiness: ValidationReadiness | null; servicesYaml: string | null }> {
@@ -535,10 +676,11 @@ export async function executeValidationReadinessProbe(
 	const result = await runPiTask({
 		cwd,
 		modelChoice,
-		tools: ["read", "bash", "find", "grep"],
+		tools: [...toolAllowlistForRole(profile, "validator"), "find", "grep"],
 		role: "validator",
-		systemPrompt: buildValidatorSystemPrompt("code_review"),
-		prompt: buildReadinessProbePrompt(cwd),
+		systemPrompt: buildValidatorSystemPrompt("code_review", profile),
+		prompt: buildReadinessProbePrompt(cwd, profile),
+		benchmark,
 		onSnapshot,
 		onProcessStart,
 	});
@@ -589,6 +731,49 @@ export async function executeValidationReadinessProbe(
 			{},
 			readiness?.summary || text || "No readiness summary returned.",
 			ok,
+			undefined,
+			benchmark,
+		),
+	};
+}
+
+export async function executeQuestPlanner(
+	cwd: string,
+	goal: string,
+	modelChoice: ModelChoice,
+	readiness: ValidationReadiness | null,
+	profile: QuestProfile,
+	benchmark: QuestBenchmarkProvenance | undefined,
+	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
+	onProcessStart?: (pid: number) => void | Promise<void>,
+): Promise<{ run: WorkerRunRecord; plan: QuestPlan | null }> {
+	const startedAt = Date.now();
+	const result = await runPiTask({
+		cwd,
+		modelChoice,
+		tools: toolAllowlistForRole(profile, "orchestrator"),
+		role: "orchestrator",
+		systemPrompt: buildPlannerSystemPrompt(profile),
+		prompt: buildPlanningPrompt(cwd, goal, readiness, profile, benchmark),
+		benchmark,
+		onSnapshot,
+		onProcessStart,
+	});
+	const text = getFinalAssistantText(result.messages);
+	const plan = parseQuestPlanText(text)?.plan ?? null;
+
+	return {
+		plan,
+		run: workerRunFromResult(
+			modelChoice,
+			result,
+			"orchestrator",
+			startedAt,
+			{},
+			plan ? `Planned ${plan.features.length} feature(s) for ${plan.title}.` : text || "No quest plan returned.",
+			result.exitCode === 0 && Boolean(plan),
+			undefined,
+			benchmark,
 		),
 	};
 }
@@ -599,6 +784,8 @@ export async function executeFeatureWorker(
 	milestone: QuestMilestone,
 	modelChoice: ModelChoice,
 	workflows: LearnedWorkflow[],
+	profile: QuestProfile,
+	benchmark: QuestBenchmarkProvenance | undefined,
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<WorkerRunRecord> {
@@ -606,12 +793,13 @@ export async function executeFeatureWorker(
 	const result = await runPiTask({
 		cwd: quest.cwd,
 		modelChoice,
-		tools: ["read", "bash", "edit", "write"],
+		tools: toolAllowlistForRole(profile, "worker"),
 		role: "worker",
 		featureId: feature.id,
 		milestoneId: milestone.id,
-		systemPrompt: buildWorkerSystemPrompt(),
-		prompt: buildFeaturePrompt(quest, feature, milestone, workflows),
+		systemPrompt: buildWorkerSystemPrompt(profile),
+		prompt: buildFeaturePrompt(quest, feature, milestone, workflows, profile),
+		benchmark,
 		onSnapshot,
 		onProcessStart,
 	});
@@ -627,6 +815,8 @@ export async function executeFeatureWorker(
 		{ featureId: feature.id, milestoneId: milestone.id },
 		parsed?.summary || text || "No worker summary returned.",
 		ok,
+		undefined,
+		benchmark,
 	);
 }
 
@@ -637,6 +827,8 @@ export async function executeValidator(
 	modelChoice: ModelChoice,
 	workflows: LearnedWorkflow[],
 	pass: ValidatorPass,
+	profile: QuestProfile,
+	benchmark: QuestBenchmarkProvenance | undefined,
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<WorkerRunRecord> {
@@ -644,11 +836,12 @@ export async function executeValidator(
 	const result = await runPiTask({
 		cwd: quest.cwd,
 		modelChoice,
-		tools: pass === "user_surface" ? ["read", "bash"] : ["read", "bash"],
+		tools: toolAllowlistForRole(profile, "validator"),
 		role: "validator",
 		milestoneId: milestone.id,
-		systemPrompt: buildValidatorSystemPrompt(pass),
-		prompt: buildValidatorPrompt(quest, milestone, features, workflows, pass),
+		systemPrompt: buildValidatorSystemPrompt(pass, profile),
+		prompt: buildValidatorPrompt(quest, milestone, features, workflows, pass, profile),
+		benchmark,
 		onSnapshot,
 		onProcessStart,
 	});
@@ -666,6 +859,7 @@ export async function executeValidator(
 		parsed?.summary || text || `No ${pass} summary returned.`,
 		ok,
 		issues,
+		benchmark,
 	);
 }
 
@@ -674,6 +868,8 @@ export async function executePlanRevision(
 	requests: QuestPlanRevisionRequest[],
 	modelChoice: ModelChoice,
 	workflows: LearnedWorkflow[],
+	profile: QuestProfile,
+	benchmark: QuestBenchmarkProvenance | undefined,
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<{ run: WorkerRunRecord; revisedPlan: QuestPlan | null }> {
@@ -681,10 +877,11 @@ export async function executePlanRevision(
 	const result = await runPiTask({
 		cwd: quest.cwd,
 		modelChoice,
-		tools: ["read", "bash"],
+		tools: toolAllowlistForRole(profile, "orchestrator"),
 		role: "orchestrator",
-		systemPrompt: buildPlanRevisionSystemPrompt(),
+		systemPrompt: buildPlanRevisionSystemPrompt(profile),
 		prompt: `Revise the remaining quest plan.\n\nRequests:\n${requests.map((request) => `- [${request.source}] ${request.note}`).join("\n")}\n\nCurrent plan:\n\`\`\`json\n${JSON.stringify(quest.plan, null, 2)}\n\`\`\`\n\nCurrent validation state:\n\`\`\`json\n${JSON.stringify(quest.validationState, null, 2)}\n\`\`\`\n\nLearned workflows:\n${learnedWorkflowSection(workflows)}`,
+		benchmark,
 		onSnapshot,
 		onProcessStart,
 	});
@@ -702,6 +899,84 @@ export async function executePlanRevision(
 			{},
 			revisedPlan ? "Revised remaining quest plan." : text || "No plan revision returned.",
 			ok,
+			undefined,
+			benchmark,
 		),
+	};
+}
+
+export async function executeTrialCandidateAgent(
+	cwd: string,
+	modelChoice: ModelChoice,
+	profile: QuestProfile,
+	target: QuestProfile["target"],
+	traceSummaries: string[],
+	datasetFindings: string[],
+	benchmark: QuestBenchmarkProvenance | undefined,
+	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
+	onProcessStart?: (pid: number) => void | Promise<void>,
+): Promise<{ run: WorkerRunRecord; candidate: QuestExperimentCandidate | null }> {
+	const startedAt = Date.now();
+	const result = await runPiTask({
+		cwd,
+		modelChoice,
+		tools: toolAllowlistForRole(profile, "trial"),
+		role: "trial",
+		systemPrompt: `You are Trials, a bounded optimizer for Quest profiles.
+
+Rules:
+- Only propose changes on the explicit profile edit surfaces.
+- Do not propose TypeScript control-flow changes.
+- Prefer changes that generalize across multiple traces.
+- If you are unsure, return a conservative patch.
+- End with a JSON object only.`,
+		prompt: `Target: ${target}
+
+Current profile:
+\`\`\`json
+${JSON.stringify(profile, null, 2)}
+\`\`\`
+
+Recent trace summaries:
+${traceSummaries.length > 0 ? traceSummaries.map((line) => `- ${line}`).join("\n") : "- none"}
+
+Current failing eval findings:
+${datasetFindings.length > 0 ? datasetFindings.map((line) => `- ${line}`).join("\n") : "- none"}
+
+Return:
+\`\`\`json
+{
+  "summary": "short description",
+  "rationale": "why this helps",
+  "generalizationNote": "why this is not overfitting to one trace",
+  "targetedTags": ["weak_validation"],
+  "targetedCaseIds": [],
+  "promptSurfaceIds": ["planning"],
+  "patch": {
+    "promptSurfaces": {
+      "planningPolicy": "..."
+    }
+  }
+}
+\`\`\``,
+		benchmark,
+		onSnapshot,
+		onProcessStart,
+	});
+	const text = getFinalAssistantText(result.messages);
+	const candidate = parseQuestExperimentCandidate(text);
+	return {
+		run: workerRunFromResult(
+			modelChoice,
+			result,
+			"trial",
+			startedAt,
+			{},
+			candidate?.summary ?? (text || "No Trials candidate returned."),
+			result.exitCode === 0 && Boolean(candidate),
+			undefined,
+			benchmark,
+		),
+		candidate,
 	};
 }

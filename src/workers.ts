@@ -4,18 +4,20 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
-import { parseQuestPlanText, revisionInstructions } from "./plan-core.js";
+import { parseQuestPlanText } from "./plan-core.js";
 import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
 import type {
 	LearnedWorkflow,
 	LiveRunSnapshot,
+	ModelChoice,
 	QuestFeature,
 	QuestMilestone,
 	QuestPlan,
 	QuestPlanRevisionRequest,
 	QuestState,
-	ModelChoice,
-	ThinkingLevel,
+	ValidationAssertion,
+	ValidationReadiness,
+	ValidationSurfaceStatus,
 	WorkerEventRecord,
 	WorkerRunRecord,
 } from "./types.js";
@@ -59,6 +61,32 @@ interface RunPiTaskResult {
 	aborted: boolean;
 }
 
+interface ValidatorPayload {
+	status?: string;
+	summary?: string;
+	issues?: string[];
+}
+
+interface ValidationReadinessPayload {
+	summary?: string;
+	checks?: Array<{
+		id?: string;
+		surface?: string;
+		description?: string;
+		status?: string;
+		commands?: string[];
+		evidence?: string[];
+		notes?: string;
+	}>;
+	services?: Array<{
+		name?: string;
+		purpose?: string;
+		commands?: string[];
+		ports?: number[];
+		notes?: string[];
+	}>;
+}
+
 const DEFAULT_USAGE: UsageStats = {
 	input: 0,
 	output: 0,
@@ -68,6 +96,8 @@ const DEFAULT_USAGE: UsageStats = {
 	contextTokens: 0,
 	turns: 0,
 };
+
+type ValidatorPass = "code_review" | "user_surface";
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const currentScript = process.argv[1];
@@ -118,19 +148,33 @@ function learnedWorkflowSection(workflows: LearnedWorkflow[]): string {
 	return workflows.map((workflow) => `- ${workflow.title}: ${workflow.note}`).join("\n");
 }
 
-function validationCriteriaForFeature(quest: QuestState, feature: QuestFeature) {
-	return quest.plan?.validationContract.criteria.filter((criterion) => criterion.featureIds.includes(feature.id)) ?? [];
+function validationAssertionsForFeature(quest: QuestState, feature: QuestFeature): ValidationAssertion[] {
+	const assertions = quest.validationState?.assertions ?? [];
+	if (feature.fulfills.length > 0) {
+		return assertions.filter((assertion) => feature.fulfills.includes(assertion.id));
+	}
+	return assertions.filter((assertion) => assertion.featureIds?.includes(feature.id));
 }
 
-function validationCriteriaForMilestone(quest: QuestState, milestone: QuestMilestone) {
-	return quest.plan?.validationContract.criteria.filter((criterion) => criterion.milestoneId === milestone.id) ?? [];
+function validationAssertionsForMilestone(
+	quest: QuestState,
+	milestone: QuestMilestone,
+	pass?: ValidatorPass,
+): ValidationAssertion[] {
+	const assertions = (quest.validationState?.assertions ?? []).filter((assertion) => assertion.milestoneId === milestone.id);
+	if (!pass) return assertions;
+	if (pass === "code_review") {
+		return assertions.filter((assertion) => assertion.method !== "user_surface");
+	}
+	return assertions.filter((assertion) => assertion.method === "user_surface" || assertion.method === "mixed");
 }
 
 function questContext(quest: QuestState, workflows: LearnedWorkflow[]): string {
-	const criteria = quest.plan?.successCriteria.length
-		? quest.plan.successCriteria.map((item) => `- ${item}`).join("\n")
-		: "- Deliver the requested work cleanly.";
 	const notes = quest.steeringNotes.length ? quest.steeringNotes.map((note) => `- ${note}`).join("\n") : "- None";
+	const readiness = quest.validationReadiness?.checks.length
+		? quest.validationReadiness.checks.map((check) => `- ${check.surface} [${check.status}] ${check.description}`).join("\n")
+		: "- No validation readiness checks captured.";
+
 	return `Quest: ${quest.plan?.title ?? quest.title}
 
 Goal:
@@ -139,50 +183,48 @@ ${quest.goal}
 Quest summary:
 ${quest.plan?.summary ?? quest.lastSummary ?? "No summary yet."}
 
-Success criteria:
-${criteria}
-
 Steering notes:
 ${notes}
+
+Validation readiness:
+${readiness}
 
 Project learned workflows:
 ${learnedWorkflowSection(workflows)}`;
 }
 
-export function buildFeaturePrompt(quest: QuestState, feature: QuestFeature, milestone: QuestMilestone, workflows: LearnedWorkflow[]): string {
-	const criteria = feature.acceptanceCriteria.length
-		? feature.acceptanceCriteria.map((item) => `- ${item}`).join("\n")
-		: "- Complete the feature cleanly.";
-	const validation = validationCriteriaForFeature(quest, feature);
+function buildFeaturePrompt(quest: QuestState, feature: QuestFeature, milestone: QuestMilestone, workflows: LearnedWorkflow[]): string {
+	const preconditions = feature.preconditions.length ? feature.preconditions.map((item) => `- ${item}`).join("\n") : "- None.";
+	const assertions = validationAssertionsForFeature(quest, feature);
 	const validationLines =
-		validation.length > 0
-			? validation
+		assertions.length > 0
+			? assertions
 					.map(
-						(criterion) =>
-							`- ${criterion.title} (${criterion.proofStrategy}, ${criterion.confidence})\n  Proof: ${criterion.proofDetails}${
-								criterion.commands.length > 0 ? `\n  Commands: ${criterion.commands.join(", ")}` : ""
+						(assertion) =>
+							`- ${assertion.id} · ${assertion.method} · ${assertion.criticality}\n  ${assertion.description}${
+								assertion.commands?.length ? `\n  Commands: ${assertion.commands.join(", ")}` : ""
 							}`,
 					)
 					.join("\n")
-			: "- No feature-specific validation contract was captured.";
+			: "- No feature-specific validation assertions were captured.";
 
 	return `${questContext(quest, workflows)}
 
 Current milestone: ${milestone.title}
-Milestone summary: ${milestone.summary}
+Milestone summary: ${milestone.description}
 
 Assigned feature: ${feature.title}
-Feature summary: ${feature.summary}
+Feature summary: ${feature.description}
 
-Acceptance criteria:
-${criteria}
+Preconditions:
+${preconditions}
 
-Validation contract for this feature:
+Validation assertions satisfied by this feature:
 ${validationLines}
 
-${feature.workerPrompt ? `Feature-specific instructions:\n${feature.workerPrompt}\n` : ""}
+${feature.handoff ? `Expected handoff:\n${feature.handoff}\n` : ""}${feature.workerPrompt ? `Feature-specific instructions:\n${feature.workerPrompt}\n` : ""}
 
-Execute only this feature. Keep the quest serial and scoped. Do not introduce unrelated changes. Do not start or manage quests.
+Execute only this feature. Keep the quest serial and scoped. Do not introduce unrelated changes.
 
 At the end, output:
 ## Feature Result
@@ -201,7 +243,7 @@ At the end, output:
 `;
 }
 
-export function buildWorkerSystemPrompt(): string {
+function buildWorkerSystemPrompt(): string {
 	return `You are a quest worker executing a single feature within a larger Pi quest.
 
 Rules:
@@ -210,50 +252,50 @@ Rules:
 - Make the smallest correct change that satisfies the feature.
 - Do not start new quests or inspect quest internals.
 - Do not rewrite unrelated parts of the codebase.
-- Respect the validation contract.
 - End with the required JSON block.`;
 }
 
-export function buildValidatorPrompt(quest: QuestState, milestone: QuestMilestone, features: QuestFeature[], workflows: LearnedWorkflow[]): string {
-	const featureList = features.map((feature) => `- ${feature.title}: ${feature.lastRunSummary ?? feature.summary}`).join("\n");
-	const criteria = milestone.successCriteria.length
-		? milestone.successCriteria.map((item) => `- ${item}`).join("\n")
-		: "- Confirm the milestone is stable.";
-	const validation = validationCriteriaForMilestone(quest, milestone);
+function buildValidatorPrompt(
+	quest: QuestState,
+	milestone: QuestMilestone,
+	features: QuestFeature[],
+	workflows: LearnedWorkflow[],
+	pass: ValidatorPass,
+): string {
+	const featureList = features.map((feature) => `- ${feature.title}: ${feature.lastRunSummary ?? feature.description}`).join("\n");
+	const assertions = validationAssertionsForMilestone(quest, milestone, pass);
 	const validationLines =
-		validation.length > 0
-			? validation
+		assertions.length > 0
+			? assertions
 					.map(
-						(criterion) =>
-							`- ${criterion.title} (${criterion.proofStrategy}, ${criterion.confidence})\n  Behavior: ${criterion.expectedBehavior}\n  Proof: ${criterion.proofDetails}${
-								criterion.commands.length > 0 ? `\n  Commands: ${criterion.commands.join(", ")}` : ""
+						(assertion) =>
+							`- ${assertion.id} · ${assertion.method} · ${assertion.criticality}\n  ${assertion.description}${
+								assertion.commands?.length ? `\n  Commands: ${assertion.commands.join(", ")}` : ""
 							}`,
 					)
 					.join("\n")
-			: "- No milestone-specific validation contract was captured.";
-	const weakWarnings = quest.plan?.validationContract.weakValidationWarnings.length
-		? quest.plan.validationContract.weakValidationWarnings.map((warning) => `- ${warning}`).join("\n")
-		: "- None.";
+			: "- No matching assertions were captured for this validation pass.";
+	const passDescription =
+		pass === "code_review"
+			? "Perform a code/procedure review. Prefer repo commands, typechecks, tests, and read-only inspection."
+			: "Perform a user-surface validation pass. Prefer browser-visible flows, CLI-visible behavior, and operator-facing outcomes.";
 
 	return `${questContext(quest, workflows)}
 
 Validate the milestone "${milestone.title}".
 
-Features completed in this milestone:
+Completed features in this milestone:
 ${featureList}
 
-Milestone success criteria:
-${criteria}
+Validation pass:
+${passDescription}
 
-Validation contract for this milestone:
+Assertions for this pass:
 ${validationLines}
-
-Known weak validation areas:
-${weakWarnings}
 
 ${milestone.validationPrompt ? `Extra validation guidance:\n${milestone.validationPrompt}\n` : ""}
 
-You are read-only. Verify the milestone by reading files and running checks. Do not edit code.
+You are read-only. Verify the milestone. Do not edit code.
 
 At the end, output:
 \`\`\`json
@@ -266,17 +308,17 @@ At the end, output:
 `;
 }
 
-export function buildValidatorSystemPrompt(): string {
-	return `You are a read-only quest validator.
+function buildValidatorSystemPrompt(pass: ValidatorPass): string {
+	return `You are a read-only quest validator running the ${pass} pass.
 
 Rules:
 - Verify the assigned milestone using read-only tools and commands.
 - Do not edit or write files.
-- Be explicit about any issues, blockers, or weak validation.
+- Be explicit about issues, blockers, or limited coverage.
 - End with the required JSON block.`;
 }
 
-export function buildPlanRevisionSystemPrompt(): string {
+function buildPlanRevisionSystemPrompt(): string {
 	return `You are the quest orchestrator revising only the remaining plan for an existing Pi quest.
 
 Rules:
@@ -287,10 +329,51 @@ Rules:
 - End with the required JSON block.`;
 }
 
+function buildReadinessProbePrompt(cwd: string): string {
+	return `Probe validation readiness for this repository at ${cwd}.
+
+You are a dry-run validator. Do not edit files.
+
+Inspect the repository and determine which validation surfaces are available.
+Consider at least:
+- repo checks (test, lint, typecheck, build)
+- browser or user-surface validation
+- dev server startup
+- local services or docker dependencies
+- API or command-line validation
+
+Return:
+\`\`\`json
+{
+  "summary": "short summary",
+  "checks": [
+    {
+      "id": "checks",
+      "surface": "repo-checks",
+      "description": "what can be validated",
+      "status": "supported",
+      "commands": ["npm test"],
+      "evidence": ["package.json script found"],
+      "notes": "optional caveat"
+    }
+  ],
+  "services": [
+    {
+      "name": "web",
+      "purpose": "dev server",
+      "commands": ["npm run dev"],
+      "ports": [3000],
+      "notes": ["optional caveat"]
+    }
+  ]
+}
+\`\`\``;
+}
+
 async function runPiTask(options: RunPiTaskOptions): Promise<RunPiTaskResult> {
 	const temp = await withTempPrompt(options.systemPrompt);
 	const args = ["--mode", "json", "--no-session", "--model", `${options.modelChoice.provider}/${options.modelChoice.model}`];
-	args.push("--thinking", options.modelChoice.thinkingLevel as ThinkingLevel);
+	args.push("--thinking", options.modelChoice.thinkingLevel);
 	if (options.tools.length > 0) args.push("--tools", options.tools.join(","));
 	if (temp.file) args.push("--append-system-prompt", temp.file);
 	args.push("-p", options.prompt);
@@ -328,7 +411,6 @@ async function runPiTask(options: RunPiTaskOptions): Promise<RunPiTaskResult> {
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
-
 				let event: any;
 				try {
 					event = JSON.parse(line);
@@ -407,6 +489,110 @@ async function runPiTask(options: RunPiTaskOptions): Promise<RunPiTaskResult> {
 	}
 }
 
+function workerRunFromResult(
+	modelChoice: ModelChoice,
+	result: RunPiTaskResult,
+	role: WorkerRunRecord["role"],
+	startedAt: number,
+	extra: Partial<WorkerRunRecord>,
+	summary: string,
+	ok: boolean,
+	issues?: string[],
+): WorkerRunRecord {
+	return {
+		id: randomUUID(),
+		role,
+		startedAt,
+		endedAt: Date.now(),
+		provider: modelChoice.provider,
+		model: modelChoice.model,
+		thinkingLevel: modelChoice.thinkingLevel,
+		exitCode: result.exitCode,
+		ok,
+		summary,
+		stopReason: result.stopReason,
+		stderr: result.stderr || undefined,
+		issues,
+		aborted: result.aborted,
+		signal: result.signal,
+		phase: result.phase,
+		latestToolName: result.latestToolName,
+		latestToolSummary: result.latestToolSummary,
+		latestAssistantText: result.latestAssistantText,
+		events: result.events,
+		usage: result.usage,
+		...extra,
+	};
+}
+
+export async function executeValidationReadinessProbe(
+	cwd: string,
+	modelChoice: ModelChoice,
+	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
+	onProcessStart?: (pid: number) => void | Promise<void>,
+): Promise<{ run: WorkerRunRecord; readiness: ValidationReadiness | null; servicesYaml: string | null }> {
+	const startedAt = Date.now();
+	const result = await runPiTask({
+		cwd,
+		modelChoice,
+		tools: ["read", "bash", "find", "grep"],
+		role: "validator",
+		systemPrompt: buildValidatorSystemPrompt("code_review"),
+		prompt: buildReadinessProbePrompt(cwd),
+		onSnapshot,
+		onProcessStart,
+	});
+	const text = getFinalAssistantText(result.messages);
+	const parsed = extractJsonBlock<ValidationReadinessPayload>(text);
+	const readiness: ValidationReadiness | null =
+		parsed && Array.isArray(parsed.checks)
+			? {
+					summary: parsed.summary || "Dry-run validation readiness captured.",
+					checks: parsed.checks.map((check, index) => ({
+						id: check.id || `readiness-${index + 1}`,
+						surface: check.surface || "unknown",
+						description: check.description || "No description provided.",
+						status: (check.status === "supported" || check.status === "limited" || check.status === "unsupported"
+							? check.status
+							: "limited") as ValidationSurfaceStatus,
+						commands: Array.isArray(check.commands) ? check.commands.map(String) : [],
+						evidence: Array.isArray(check.evidence) ? check.evidence.map(String) : [],
+						notes: check.notes ? String(check.notes) : undefined,
+					})),
+				}
+			: null;
+	const servicesYaml =
+		parsed?.services && Array.isArray(parsed.services)
+			? `services:\n${parsed.services
+					.map((service) => {
+						const ports = Array.isArray(service.ports) && service.ports.length > 0 ? `\n    ports: [${service.ports.join(", ")}]` : "";
+						const notes =
+							Array.isArray(service.notes) && service.notes.length > 0 ? `\n    notes:\n${service.notes.map((note) => `      - ${note}`).join("\n")}` : "";
+						return `  - name: ${service.name || "service"}\n    purpose: ${service.purpose || ""}\n    commands:\n${
+							Array.isArray(service.commands) && service.commands.length > 0
+								? service.commands.map((command) => `      - ${command}`).join("\n")
+								: "      -"
+						}${ports}${notes}`;
+					})
+					.join("\n")}`
+			: null;
+
+	const ok = result.exitCode === 0 && Boolean(readiness);
+	return {
+		readiness,
+		servicesYaml,
+		run: workerRunFromResult(
+			modelChoice,
+			result,
+			"validator",
+			startedAt,
+			{},
+			readiness?.summary || text || "No readiness summary returned.",
+			ok,
+		),
+	};
+}
+
 export async function executeFeatureWorker(
 	quest: QuestState,
 	feature: QuestFeature,
@@ -429,35 +615,19 @@ export async function executeFeatureWorker(
 		onSnapshot,
 		onProcessStart,
 	});
-
 	const text = getFinalAssistantText(result.messages);
 	const parsed = extractJsonBlock<{ status?: string; summary?: string }>(text);
 	const ok = result.exitCode === 0 && parsed?.status !== "failed" && parsed?.status !== "blocked";
 
-	return {
-		id: randomUUID(),
-		role: "worker",
-		featureId: feature.id,
-		milestoneId: milestone.id,
+	return workerRunFromResult(
+		modelChoice,
+		result,
+		"worker",
 		startedAt,
-		endedAt: Date.now(),
-		provider: modelChoice.provider,
-		model: modelChoice.model,
-		thinkingLevel: modelChoice.thinkingLevel,
-		exitCode: result.exitCode,
+		{ featureId: feature.id, milestoneId: milestone.id },
+		parsed?.summary || text || "No worker summary returned.",
 		ok,
-		summary: parsed?.summary || text || "No worker summary returned.",
-		stopReason: result.stopReason,
-		stderr: result.stderr || undefined,
-		aborted: result.aborted,
-		signal: result.signal,
-		phase: result.phase,
-		latestToolName: result.latestToolName,
-		latestToolSummary: result.latestToolSummary,
-		latestAssistantText: result.latestAssistantText,
-		events: result.events,
-		usage: result.usage,
-	};
+	);
 }
 
 export async function executeValidator(
@@ -466,6 +636,7 @@ export async function executeValidator(
 	features: QuestFeature[],
 	modelChoice: ModelChoice,
 	workflows: LearnedWorkflow[],
+	pass: ValidatorPass,
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<WorkerRunRecord> {
@@ -473,44 +644,29 @@ export async function executeValidator(
 	const result = await runPiTask({
 		cwd: quest.cwd,
 		modelChoice,
-		tools: ["read", "bash"],
+		tools: pass === "user_surface" ? ["read", "bash"] : ["read", "bash"],
 		role: "validator",
 		milestoneId: milestone.id,
-		systemPrompt: buildValidatorSystemPrompt(),
-		prompt: buildValidatorPrompt(quest, milestone, features, workflows),
+		systemPrompt: buildValidatorSystemPrompt(pass),
+		prompt: buildValidatorPrompt(quest, milestone, features, workflows, pass),
 		onSnapshot,
 		onProcessStart,
 	});
-
 	const text = getFinalAssistantText(result.messages);
-	const parsed = extractJsonBlock<{ status?: string; summary?: string; issues?: string[] }>(text);
+	const parsed = extractJsonBlock<ValidatorPayload>(text);
 	const issues = parsed?.issues ?? [];
-	const ok = result.exitCode === 0 && parsed?.status !== "fail";
+	const ok = result.exitCode === 0 && parsed?.status !== "fail" && parsed?.status !== "blocked";
 
-	return {
-		id: randomUUID(),
-		role: "validator",
-		milestoneId: milestone.id,
+	return workerRunFromResult(
+		modelChoice,
+		result,
+		"validator",
 		startedAt,
-		endedAt: Date.now(),
-		provider: modelChoice.provider,
-		model: modelChoice.model,
-		thinkingLevel: modelChoice.thinkingLevel,
-		exitCode: result.exitCode,
+		{ milestoneId: milestone.id },
+		parsed?.summary || text || `No ${pass} summary returned.`,
 		ok,
-		summary: parsed?.summary || text || "No validator summary returned.",
-		stopReason: result.stopReason,
-		stderr: result.stderr || undefined,
 		issues,
-		aborted: result.aborted,
-		signal: result.signal,
-		phase: result.phase,
-		latestToolName: result.latestToolName,
-		latestToolSummary: result.latestToolSummary,
-		latestAssistantText: result.latestAssistantText,
-		events: result.events,
-		usage: result.usage,
-	};
+	);
 }
 
 export async function executePlanRevision(
@@ -528,38 +684,24 @@ export async function executePlanRevision(
 		tools: ["read", "bash"],
 		role: "orchestrator",
 		systemPrompt: buildPlanRevisionSystemPrompt(),
-		prompt: revisionInstructions(quest, requests, workflows),
+		prompt: `Revise the remaining quest plan.\n\nRequests:\n${requests.map((request) => `- [${request.source}] ${request.note}`).join("\n")}\n\nCurrent plan:\n\`\`\`json\n${JSON.stringify(quest.plan, null, 2)}\n\`\`\`\n\nCurrent validation state:\n\`\`\`json\n${JSON.stringify(quest.validationState, null, 2)}\n\`\`\`\n\nLearned workflows:\n${learnedWorkflowSection(workflows)}`,
 		onSnapshot,
 		onProcessStart,
 	});
-
 	const text = getFinalAssistantText(result.messages);
 	const revisedPlan = parseQuestPlanText(text)?.plan ?? null;
 	const ok = result.exitCode === 0 && Boolean(revisedPlan);
 
 	return {
 		revisedPlan,
-		run: {
-			id: randomUUID(),
-			role: "orchestrator",
+		run: workerRunFromResult(
+			modelChoice,
+			result,
+			"orchestrator",
 			startedAt,
-			endedAt: Date.now(),
-			provider: modelChoice.provider,
-			model: modelChoice.model,
-			thinkingLevel: modelChoice.thinkingLevel,
-			exitCode: result.exitCode,
+			{},
+			revisedPlan ? "Revised remaining quest plan." : text || "No plan revision returned.",
 			ok,
-			summary: revisedPlan ? "Revised remaining quest plan." : text || "No plan revision returned.",
-			stopReason: result.stopReason,
-			stderr: result.stderr || undefined,
-			aborted: result.aborted,
-			signal: result.signal,
-			phase: result.phase,
-			latestToolName: result.latestToolName,
-			latestToolSummary: result.latestToolSummary,
-			latestAssistantText: result.latestAssistantText,
-			events: result.events,
-			usage: result.usage,
-		},
+		),
 	};
 }

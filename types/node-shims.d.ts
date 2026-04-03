@@ -71,6 +71,8 @@ declare const process: {
 
 declare function setTimeout(handler: (...args: any[]) => void, timeout: number): unknown;
 declare function clearTimeout(timeout: unknown): void;
+declare function setInterval(handler: (...args: any[]) => void, timeout: number): unknown;
+declare function clearInterval(timeout: unknown): void;
 
 declare const console: {
 	log(message?: unknown, ...optionalParams: unknown[]): void;

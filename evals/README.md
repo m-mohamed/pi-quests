@@ -27,25 +27,16 @@ The eval posture is intentionally split into three layers:
 
 ## Commands
 
+The publish-ready package currently gates on the standard npm checks:
+
 ```bash
-bun run evals
-bun run evals:regression
-bun run evals:capability
-bun run evals:scenario
-tsc -p tsconfig.typecheck.json
+npm run typecheck
+npm run test
+npm run check
+npm run pack:check
 ```
 
-`bun run verify` gates on:
-
-- `bun test`
-- regression evals
-- smoke validation against the installed Pi binary
-
-`bun run verify:full` adds:
-
-- capability evals
-- scenario evals
-- typecheck
+Manual scenario and smoke harnesses still live under `scripts/`, but they are not wired into the publish gate.
 
 ## Current Suites
 

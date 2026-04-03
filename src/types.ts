@@ -1,14 +1,23 @@
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
-export type QuestStatus = "planning" | "ready" | "running" | "paused" | "completed" | "failed" | "aborted";
-export type FeatureStatus = "pending" | "running" | "completed" | "failed" | "blocked" | "skipped";
-export type MilestoneStatus = "pending" | "running" | "completed" | "failed" | "blocked";
+export type QuestStatus = "planning" | "proposal_ready" | "running" | "paused" | "blocked" | "completed" | "aborted";
+export type FeatureStatus = "pending" | "running" | "completed" | "blocked" | "skipped";
+export type MilestoneStatus = "pending" | "running" | "completed" | "blocked";
 export type QuestRole = "orchestrator" | "worker" | "validator";
 export type HumanQaStatus = "pending" | "approved";
 export type ShipReadiness = "not_ready" | "validated_waiting_for_human_qa" | "human_qa_complete";
-export type ValidationProofStrategy = "browser" | "command" | "read_only" | "manual" | "mixed";
-export type ValidationConfidence = "high" | "medium" | "low";
-export type ActiveRunKind = "feature" | "validator" | "replan";
+export type ValidationSurfaceStatus = "supported" | "limited" | "unsupported";
+export type ValidationMethod =
+	| "code_review"
+	| "procedure_review"
+	| "user_surface"
+	| "command"
+	| "read_only"
+	| "manual"
+	| "mixed";
+export type ValidationCriticality = "critical" | "important" | "informational";
+export type ValidationAssertionStatus = "pending" | "passed" | "failed" | "limited";
+export type ActiveRunKind = "feature" | "validator" | "replan" | "readiness";
 
 export interface ModelChoice {
 	provider: string;
@@ -16,66 +25,95 @@ export interface ModelChoice {
 	thinkingLevel: ThinkingLevel;
 }
 
+export interface QuestConfig {
+	orchestratorModel: ModelChoice;
+	workerModel: ModelChoice;
+	validatorModel: ModelChoice;
+	validationConcurrency: number;
+	cwd: string;
+	createdAt: number;
+}
+
+export interface QuestServiceDefinition {
+	name: string;
+	purpose: string;
+	commands: string[];
+	ports?: number[];
+	notes?: string[];
+}
+
 export interface QuestFeature {
 	id: string;
-	title: string;
-	summary: string;
+	order: number;
 	milestoneId: string;
-	acceptanceCriteria: string[];
-	workerPrompt?: string;
+	title: string;
+	description: string;
+	preconditions: string[];
+	fulfills: string[];
 	status: FeatureStatus;
+	handoff?: string;
+	workerPrompt?: string;
 	lastRunSummary?: string;
 	lastError?: string;
+	summary?: string;
+	acceptanceCriteria?: string[];
 }
 
 export interface QuestMilestone {
 	id: string;
+	order: number;
 	title: string;
-	summary: string;
+	description: string;
 	successCriteria: string[];
 	validationPrompt?: string;
 	status: MilestoneStatus;
+	summary?: string;
 }
 
-export interface QuestValidationMilestoneExpectation {
-	milestoneId: string;
-	title: string;
-	expectedBehaviors: string[];
-}
-
-export interface QuestValidationFeatureCheck {
-	featureId: string;
-	title: string;
-	criterionIds: string[];
-}
-
-export interface QuestValidationCriterion {
+export interface ValidationReadinessCheck {
 	id: string;
-	title: string;
-	milestoneId: string;
-	featureIds: string[];
-	expectedBehavior: string;
-	proofStrategy: ValidationProofStrategy;
-	proofDetails: string;
+	surface: string;
+	description: string;
+	status: ValidationSurfaceStatus;
 	commands: string[];
-	confidence: ValidationConfidence;
+	evidence: string[];
+	notes?: string;
 }
 
-export interface QuestValidationContract {
+export interface ValidationReadiness {
 	summary: string;
-	milestoneExpectations: QuestValidationMilestoneExpectation[];
-	featureChecks: QuestValidationFeatureCheck[];
-	criteria: QuestValidationCriterion[];
-	weakValidationWarnings: string[];
+	checks: ValidationReadinessCheck[];
+}
+
+export interface ValidationAssertion {
+	id: string;
+	milestoneId: string;
+	description: string;
+	method: ValidationMethod;
+	criticality: ValidationCriticality;
+	status: ValidationAssertionStatus;
+	evidence: string[];
+	featureIds?: string[];
+	notes?: string;
+	commands?: string[];
+}
+
+export interface ValidationState {
+	assertions: ValidationAssertion[];
+	updatedAt: number;
 }
 
 export interface QuestPlan {
 	title: string;
 	summary: string;
-	successCriteria: string[];
-	features: QuestFeature[];
+	goal?: string;
+	risks: string[];
+	environment: string[];
+	services: QuestServiceDefinition[];
+	validationSummary?: string;
+	humanQaChecklist: string[];
 	milestones: QuestMilestone[];
-	validationContract: QuestValidationContract;
+	features: QuestFeature[];
 }
 
 export interface QuestPlanRevisionRequest {
@@ -191,10 +229,15 @@ export interface QuestState {
 	title: string;
 	goal: string;
 	status: QuestStatus;
+	config: QuestConfig;
 	defaultModel: ModelChoice;
 	roleModels: Partial<Record<QuestRole, ModelChoice>>;
 	plan?: QuestPlan;
 	planHash?: string;
+	validationReadiness?: ValidationReadiness;
+	validationState?: ValidationState;
+	proposalMarkdown?: string;
+	servicesYaml?: string;
 	planRevisions: QuestPlanRevision[];
 	pendingPlanRevisionRequests: QuestPlanRevisionRequest[];
 	steeringNotes: string[];
@@ -225,14 +268,18 @@ export interface ParsedQuestPlan {
 
 export interface QuestStoragePaths {
 	rootDir: string;
-	projectDir: string;
 	activeFile: string;
+	sharedSkillsDir: string;
+	sharedWorkflowsFile: string;
 	questDir: string;
 	questFile: string;
+	proposalFile: string;
+	validationReadinessFile: string;
+	validationContractFile: string;
+	validationStateFile: string;
+	featuresFile: string;
+	servicesFile: string;
+	skillsDir: string;
 	eventsFile: string;
-	workersDir: string;
-	projectMetadataRoot: string;
-	projectMetadataDir: string;
-	projectWorkflowsDir: string;
-	projectWorkflowsFile: string;
+	runsDir: string;
 }

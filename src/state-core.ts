@@ -5,24 +5,32 @@ import { basename, join } from "node:path";
 import type {
 	LearnedWorkflow,
 	ModelChoice,
+	QuestConfig,
 	QuestEventRecord,
 	QuestPlanRevision,
 	QuestState,
 	QuestStatus,
 	QuestStoragePaths,
+	ValidationAssertion,
 	WorkerRunRecord,
 } from "./types.js";
 
 const ACTIVE_FILE = "active.json";
-const QUESTS_ROOT_DIR = "quests";
+const QUESTS_ROOT_DIR = ".pi/quests";
 const QUEST_FILE = "quest.json";
+const PROPOSAL_FILE = "proposal.md";
+const VALIDATION_READINESS_FILE = "validation-readiness.json";
+const VALIDATION_CONTRACT_FILE = "validation-contract.md";
+const VALIDATION_STATE_FILE = "validation-state.json";
+const FEATURES_FILE = "features.json";
+const SERVICES_FILE = "services.yaml";
 const EVENTS_FILE = "events.jsonl";
-const WORKERS_DIR = "workers";
-const PROJECTS_METADATA_DIR = "projects";
-const WORKFLOWS_DIR = "workflows";
-const WORKFLOWS_FILE = "learned-workflows.json";
+const RUNS_DIR = "runs";
+const SKILLS_DIR = "skills";
+const SHARED_SKILLS_DIR = "shared-skills";
+const SHARED_WORKFLOWS_FILE = "index.json";
 const PRUNE_LOG_AGE_MS = 1000 * 60 * 60 * 24 * 14;
-const TERMINAL_STATUSES = new Set<QuestStatus>(["completed", "failed", "aborted"]);
+const TERMINAL_STATUSES = new Set<QuestStatus>(["completed", "aborted"]);
 
 export function projectIdFor(cwd: string): string {
 	const hash = createHash("sha1").update(cwd).digest("hex").slice(0, 10);
@@ -30,62 +38,288 @@ export function projectIdFor(cwd: string): string {
 	return `${name}-${hash}`;
 }
 
-function storagePathsFor(agentDir: string, cwd: string, questId: string, rootDirName: string, questFileName: string): QuestStoragePaths {
-	const rootDir = join(agentDir, rootDirName);
-	const projectId = projectIdFor(cwd);
-	const projectDir = join(rootDir, projectId);
-	const questDir = join(projectDir, questId);
-	const projectMetadataRoot = join(rootDir, PROJECTS_METADATA_DIR);
-	const projectMetadataDir = join(projectMetadataRoot, projectId);
-	const projectWorkflowsDir = join(projectMetadataDir, WORKFLOWS_DIR);
+function yamlScalar(value: string | number | boolean): string {
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	if (/^[a-zA-Z0-9._/-]+$/.test(value)) return value;
+	return JSON.stringify(value);
+}
 
+function yamlLines(value: unknown, indent = 0): string[] {
+	const prefix = " ".repeat(indent);
+	if (Array.isArray(value)) {
+		if (value.length === 0) return [`${prefix}[]`];
+		return value.flatMap((item) => {
+			if (item && typeof item === "object" && !Array.isArray(item)) {
+				const entries = Object.entries(item);
+				if (entries.length === 0) return [`${prefix}- {}`];
+				const [firstKey, firstValue] = entries[0];
+				const firstValueLines = yamlLines(firstValue, indent + 2);
+				const firstLine = firstValueLines[0]?.trimStart() ?? "";
+				const lines = [`${prefix}- ${firstKey}: ${firstLine}`];
+				lines.push(...firstValueLines.slice(1));
+				for (const [key, nextValue] of entries.slice(1)) {
+					const nested = yamlLines(nextValue, indent + 2);
+					lines.push(`${" ".repeat(indent + 2)}${key}: ${nested[0]?.trimStart() ?? ""}`);
+					lines.push(...nested.slice(1));
+				}
+				return lines;
+			}
+			return [`${prefix}- ${yamlScalar(item as string | number | boolean)}`];
+		});
+	}
+	if (value && typeof value === "object") {
+		const entries = Object.entries(value);
+		if (entries.length === 0) return [`${prefix}{}`];
+		return entries.flatMap(([key, nextValue]) => {
+			if (Array.isArray(nextValue) || (nextValue && typeof nextValue === "object")) {
+				return [`${prefix}${key}:`, ...yamlLines(nextValue, indent + 2)];
+			}
+			return [`${prefix}${key}: ${yamlScalar(nextValue as string | number | boolean)}`];
+		});
+	}
+	return [`${prefix}${yamlScalar(value as string | number | boolean)}`];
+}
+
+function buildConfig(cwd: string, createdAt: number, model: ModelChoice): QuestConfig {
 	return {
-		rootDir,
-		projectDir,
-		activeFile: join(projectDir, ACTIVE_FILE),
-		questDir,
-		questFile: join(questDir, questFileName),
-		eventsFile: join(questDir, EVENTS_FILE),
-		workersDir: join(questDir, WORKERS_DIR),
-		projectMetadataRoot,
-		projectMetadataDir,
-		projectWorkflowsDir,
-		projectWorkflowsFile: join(projectWorkflowsDir, WORKFLOWS_FILE),
+		orchestratorModel: { ...model },
+		workerModel: { ...model },
+		validatorModel: { ...model },
+		validationConcurrency: 2,
+		cwd,
+		createdAt,
 	};
 }
 
-export function getQuestPathsFromAgentDir(agentDir: string, cwd: string, questId: string): QuestStoragePaths {
-	return storagePathsFor(agentDir, cwd, questId, QUESTS_ROOT_DIR, QUEST_FILE);
+function slugify(value: string): string {
+	return value
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(0, 64) || "workflow";
 }
 
-async function ensureProjectDir(agentDir: string, cwd: string): Promise<QuestStoragePaths> {
-	const paths = getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
-	await mkdir(paths.projectDir, { recursive: true });
-	await mkdir(paths.projectWorkflowsDir, { recursive: true });
+export function getQuestPaths(cwd: string, questId: string): QuestStoragePaths {
+	const rootDir = join(cwd, QUESTS_ROOT_DIR);
+	const questDir = join(rootDir, questId);
+	const sharedSkillsDir = join(rootDir, SHARED_SKILLS_DIR);
+	return {
+		rootDir,
+		activeFile: join(rootDir, ACTIVE_FILE),
+		sharedSkillsDir,
+		sharedWorkflowsFile: join(sharedSkillsDir, SHARED_WORKFLOWS_FILE),
+		questDir,
+		questFile: join(questDir, QUEST_FILE),
+		proposalFile: join(questDir, PROPOSAL_FILE),
+		validationReadinessFile: join(questDir, VALIDATION_READINESS_FILE),
+		validationContractFile: join(questDir, VALIDATION_CONTRACT_FILE),
+		validationStateFile: join(questDir, VALIDATION_STATE_FILE),
+		featuresFile: join(questDir, FEATURES_FILE),
+		servicesFile: join(questDir, SERVICES_FILE),
+		skillsDir: join(questDir, SKILLS_DIR),
+		eventsFile: join(questDir, EVENTS_FILE),
+		runsDir: join(questDir, RUNS_DIR),
+	};
+}
+
+function summarizeAssertions(assertions: ValidationAssertion[]): string[] {
+	if (assertions.length === 0) return ["No validation assertions captured yet."];
+	return assertions.map(
+		(assertion) =>
+			`- [${assertion.status}] ${assertion.id} · ${assertion.criticality} · ${assertion.method}\n  ${assertion.description}${
+				assertion.evidence.length ? `\n  Evidence: ${assertion.evidence.join("; ")}` : ""
+			}`,
+	);
+}
+
+function proposalMarkdown(quest: QuestState): string {
+	if (quest.proposalMarkdown?.trim()) return quest.proposalMarkdown.trim();
+	const plan = quest.plan;
+	if (!plan) {
+		return `# ${quest.title}\n\n## Goal\n${quest.goal}\n`;
+	}
+	const milestoneLines =
+		plan.milestones.length > 0
+			? plan.milestones
+					.sort((a, b) => a.order - b.order)
+					.map((milestone) => `- ${milestone.title}: ${milestone.description}`)
+					.join("\n")
+			: "- None yet.";
+	const riskLines = plan.risks.length > 0 ? plan.risks.map((risk) => `- ${risk}`).join("\n") : "- None noted.";
+	const envLines =
+		plan.environment.length > 0 ? plan.environment.map((line) => `- ${line}`).join("\n") : "- Use the existing repo environment.";
+	const validationSummary = plan.validationSummary ? `\n## Validation Summary\n${plan.validationSummary}\n` : "";
+	return `# ${plan.title}
+
+## Goal
+${quest.goal}
+
+## Summary
+${plan.summary}
+
+## Milestones
+${milestoneLines}
+
+## Risks
+${riskLines}
+
+## Environment
+${envLines}${validationSummary}`;
+}
+
+function validationContractMarkdown(quest: QuestState): string {
+	const readiness = quest.validationReadiness;
+	const assertions = quest.validationState?.assertions ?? [];
+	const readinessLines =
+		readiness?.checks.length
+			? readiness.checks
+					.map(
+						(check) =>
+							`- ${check.surface} [${check.status}] ${check.description}${
+								check.notes ? `\n  Notes: ${check.notes}` : ""
+							}${check.commands.length ? `\n  Commands: ${check.commands.join(", ")}` : ""}${
+								check.evidence.length ? `\n  Evidence: ${check.evidence.join("; ")}` : ""
+							}`,
+					)
+					.join("\n")
+			: "- No readiness checks captured yet.";
+	return `# Validation Contract
+
+## Readiness
+${readiness?.summary ?? "No validation readiness summary captured yet."}
+
+${readinessLines}
+
+## Assertions
+${summarizeAssertions(assertions).join("\n")}
+`;
+}
+
+function servicesYaml(quest: QuestState): string {
+	if (quest.servicesYaml?.trim()) return quest.servicesYaml.trimEnd();
+	return yamlLines({
+		services: (quest.plan?.services ?? []).map((service) => ({
+			name: service.name,
+			purpose: service.purpose,
+			commands: service.commands,
+			ports: service.ports,
+			notes: service.notes,
+		})),
+	}).join("\n");
+}
+
+async function ensureRoot(cwd: string): Promise<QuestStoragePaths> {
+	const paths = getQuestPaths(cwd, "__bootstrap__");
+	await mkdir(paths.rootDir, { recursive: true });
+	await mkdir(paths.sharedSkillsDir, { recursive: true });
 	return paths;
 }
 
-async function ensureQuestDir(agentDir: string, cwd: string, questId: string): Promise<QuestStoragePaths> {
-	const paths = getQuestPathsFromAgentDir(agentDir, cwd, questId);
-	await mkdir(paths.projectDir, { recursive: true });
+async function ensureQuestDir(cwd: string, questId: string): Promise<QuestStoragePaths> {
+	const paths = getQuestPaths(cwd, questId);
+	await mkdir(paths.rootDir, { recursive: true });
+	await mkdir(paths.sharedSkillsDir, { recursive: true });
 	await mkdir(paths.questDir, { recursive: true });
-	await mkdir(paths.workersDir, { recursive: true });
-	await mkdir(paths.projectWorkflowsDir, { recursive: true });
+	await mkdir(paths.skillsDir, { recursive: true });
+	await mkdir(paths.runsDir, { recursive: true });
 	return paths;
 }
 
-export async function setActiveQuestId(agentDir: string, cwd: string, questId: string | null): Promise<void> {
-	const paths = getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
+async function writeSharedWorkflowSkills(paths: QuestStoragePaths, workflows: LearnedWorkflow[]): Promise<void> {
+	await mkdir(paths.sharedSkillsDir, { recursive: true });
+	const existing = existsSync(paths.sharedSkillsDir) ? await readdir(paths.sharedSkillsDir) : [];
+	for (const entry of existing) {
+		if (entry === SHARED_WORKFLOWS_FILE) continue;
+		if (!entry.endsWith(".md")) continue;
+		await unlink(join(paths.sharedSkillsDir, entry)).catch(() => {});
+	}
+	for (const workflow of workflows) {
+		const file = join(paths.sharedSkillsDir, `${slugify(`${workflow.title}-${workflow.id}`)}.md`);
+		const body = `# ${workflow.title}
+
+${workflow.note}
+
+Source: ${workflow.source}
+
+Evidence:
+${workflow.evidence.length ? workflow.evidence.map((line) => `- ${line}`).join("\n") : "- None recorded."}
+`;
+		await writeFile(file, `${body.trimEnd()}\n`, "utf-8");
+	}
+}
+
+async function syncQuestArtifacts(quest: QuestState): Promise<void> {
+	const paths = await ensureQuestDir(quest.cwd, quest.id);
+	await writeFile(paths.questFile, `${JSON.stringify(quest, null, 2)}\n`, "utf-8");
+	await writeFile(paths.proposalFile, `${proposalMarkdown(quest).trimEnd()}\n`, "utf-8");
+	await writeFile(paths.validationReadinessFile, `${JSON.stringify(quest.validationReadiness ?? { summary: "", checks: [] }, null, 2)}\n`, "utf-8");
+	await writeFile(paths.validationContractFile, `${validationContractMarkdown(quest).trimEnd()}\n`, "utf-8");
+	await writeFile(
+		paths.validationStateFile,
+		`${JSON.stringify(quest.validationState ?? { assertions: [], updatedAt: Date.now() }, null, 2)}\n`,
+		"utf-8",
+	);
+	await writeFile(paths.featuresFile, `${JSON.stringify(quest.plan?.features ?? [], null, 2)}\n`, "utf-8");
+	await writeFile(paths.servicesFile, `${servicesYaml(quest)}\n`, "utf-8");
+}
+
+function normalizeQuest(quest: QuestState): QuestState {
+	if (!quest.config) {
+		const baseModel = quest.defaultModel ?? {
+			provider: "openai-codex",
+			model: "gpt-5.4",
+			thinkingLevel: "high" as const,
+		};
+		quest.config = buildConfig(quest.cwd, quest.createdAt, baseModel);
+	}
+	if (!quest.defaultModel) quest.defaultModel = quest.config.orchestratorModel;
+	if (!quest.roleModels) {
+		quest.roleModels = {
+			orchestrator: quest.config.orchestratorModel,
+			worker: quest.config.workerModel,
+			validator: quest.config.validatorModel,
+		};
+	}
+	if (quest.status === ("ready" as QuestStatus)) quest.status = "proposal_ready";
+	if ((quest.status as string) === "failed") quest.status = "blocked";
+	quest.plan?.milestones.forEach((milestone, index) => {
+		if (milestone.order === undefined) milestone.order = index + 1;
+		if (!milestone.description) milestone.description = milestone.summary ?? milestone.title;
+		if ((milestone.status as string) === "failed") milestone.status = "blocked";
+	});
+	quest.plan?.features.forEach((feature, index) => {
+		if (feature.order === undefined) feature.order = index + 1;
+		if (!feature.description) feature.description = feature.summary ?? feature.title;
+		if (!feature.preconditions) feature.preconditions = [];
+		if (!feature.fulfills) feature.fulfills = [];
+		if ((feature.status as string) === "failed") feature.status = "blocked";
+		if (!feature.acceptanceCriteria) feature.acceptanceCriteria = feature.summary ? [feature.summary] : [];
+		if (!feature.summary) feature.summary = feature.description;
+	});
+	if (!quest.plan?.risks) quest.plan && (quest.plan.risks = []);
+	if (!quest.plan?.environment) quest.plan && (quest.plan.environment = []);
+	if (!quest.plan?.services) quest.plan && (quest.plan.services = []);
+	if (!quest.plan?.humanQaChecklist) quest.plan && (quest.plan.humanQaChecklist = []);
+	if (!quest.validationState) {
+		quest.validationState = {
+			assertions: [],
+			updatedAt: quest.updatedAt,
+		};
+	}
+	return quest;
+}
+
+export async function setActiveQuestId(cwd: string, questId: string | null): Promise<void> {
+	const paths = await ensureRoot(cwd);
 	if (!questId) {
 		if (existsSync(paths.activeFile)) await unlink(paths.activeFile);
 		return;
 	}
-	await mkdir(paths.projectDir, { recursive: true });
 	await writeFile(paths.activeFile, `${JSON.stringify({ questId })}\n`, "utf-8");
 }
 
-export async function getActiveQuestId(agentDir: string, cwd: string): Promise<string | null> {
-	const paths = getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
+export async function getActiveQuestId(cwd: string): Promise<string | null> {
+	const paths = getQuestPaths(cwd, "__bootstrap__");
 	if (!existsSync(paths.activeFile)) return null;
 	try {
 		const raw = await readFile(paths.activeFile, "utf-8");
@@ -96,46 +330,47 @@ export async function getActiveQuestId(agentDir: string, cwd: string): Promise<s
 	}
 }
 
-export async function saveQuest(agentDir: string, quest: QuestState): Promise<void> {
-	const paths = await ensureQuestDir(agentDir, quest.cwd, quest.id);
+export async function saveQuest(quest: QuestState): Promise<void> {
 	quest.updatedAt = Date.now();
-	await writeFile(paths.questFile, `${JSON.stringify(quest, null, 2)}\n`, "utf-8");
+	normalizeQuest(quest);
+	await syncQuestArtifacts(quest);
 }
 
-export async function appendQuestEvent(agentDir: string, cwd: string, questId: string, event: QuestEventRecord): Promise<void> {
-	const paths = await ensureQuestDir(agentDir, cwd, questId);
+export async function appendQuestEvent(cwd: string, questId: string, event: QuestEventRecord): Promise<void> {
+	const paths = await ensureQuestDir(cwd, questId);
 	await writeFile(paths.eventsFile, `${JSON.stringify(event)}\n`, { encoding: "utf-8", flag: "a" });
 }
 
-export async function writeWorkerRun(agentDir: string, cwd: string, questId: string, record: WorkerRunRecord): Promise<void> {
-	const paths = await ensureQuestDir(agentDir, cwd, questId);
-	const file = join(paths.workersDir, `${record.startedAt}-${record.role}-${record.id}.json`);
+export async function writeWorkerRun(cwd: string, questId: string, record: WorkerRunRecord): Promise<void> {
+	const paths = await ensureQuestDir(cwd, questId);
+	const file = join(paths.runsDir, `${record.startedAt}-${record.role}-${record.id}.json`);
 	await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, "utf-8");
 }
 
-export async function loadQuest(agentDir: string, cwd: string, questId: string): Promise<QuestState | null> {
-	const paths = getQuestPathsFromAgentDir(agentDir, cwd, questId);
+export async function loadQuest(cwd: string, questId: string): Promise<QuestState | null> {
+	const paths = getQuestPaths(cwd, questId);
 	if (!existsSync(paths.questFile)) return null;
 	try {
 		const raw = await readFile(paths.questFile, "utf-8");
-		return JSON.parse(raw) as QuestState;
+		return normalizeQuest(JSON.parse(raw) as QuestState);
 	} catch {
 		return null;
 	}
 }
 
-export async function loadActiveQuest(agentDir: string, cwd: string): Promise<QuestState | null> {
-	const questId = await getActiveQuestId(agentDir, cwd);
+export async function loadActiveQuest(cwd: string): Promise<QuestState | null> {
+	const questId = await getActiveQuestId(cwd);
 	if (!questId) return null;
-	return loadQuest(agentDir, cwd, questId);
+	return loadQuest(cwd, questId);
 }
 
 function initialPlanRevision(): QuestPlanRevision[] {
 	return [];
 }
 
-export async function createQuest(agentDir: string, cwd: string, goal: string, defaultModel: ModelChoice): Promise<QuestState> {
+export async function createQuest(cwd: string, goal: string, defaultModel: ModelChoice): Promise<QuestState> {
 	const questId = randomUUID();
+	const now = Date.now();
 	const quest: QuestState = {
 		id: questId,
 		projectId: projectIdFor(cwd),
@@ -143,20 +378,33 @@ export async function createQuest(agentDir: string, cwd: string, goal: string, d
 		title: goal,
 		goal,
 		status: "planning",
-		defaultModel,
-		roleModels: {},
+		config: buildConfig(cwd, now, defaultModel),
+		defaultModel: defaultModel,
+		roleModels: {
+			orchestrator: { ...defaultModel },
+			worker: { ...defaultModel },
+			validator: { ...defaultModel },
+		},
+		validationReadiness: {
+			summary: "Validation readiness has not been probed yet.",
+			checks: [],
+		},
+		validationState: {
+			assertions: [],
+			updatedAt: now,
+		},
 		planRevisions: initialPlanRevision(),
 		pendingPlanRevisionRequests: [],
 		steeringNotes: [],
 		humanQaStatus: "pending",
 		shipReadiness: "not_ready",
-		createdAt: Date.now(),
-		updatedAt: Date.now(),
+		createdAt: now,
+		updatedAt: now,
 		recentRuns: [],
 	};
-	await saveQuest(agentDir, quest);
-	await setActiveQuestId(agentDir, cwd, questId);
-	await appendQuestEvent(agentDir, cwd, questId, { ts: Date.now(), type: "quest_created", data: { goal } });
+	await saveQuest(quest);
+	await setActiveQuestId(cwd, questId);
+	await appendQuestEvent(cwd, questId, { ts: Date.now(), type: "quest_created", data: { goal } });
 	return quest;
 }
 
@@ -164,81 +412,60 @@ export function questIsTerminal(quest: QuestState): boolean {
 	return TERMINAL_STATUSES.has(quest.status);
 }
 
-export async function switchActiveQuest(agentDir: string, cwd: string, questId: string): Promise<QuestState | null> {
-	const quest = await loadQuest(agentDir, cwd, questId);
+export async function switchActiveQuest(cwd: string, questId: string): Promise<QuestState | null> {
+	const quest = await loadQuest(cwd, questId);
 	if (!quest) return null;
-	await setActiveQuestId(agentDir, cwd, questId);
+	await setActiveQuestId(cwd, questId);
 	return quest;
 }
 
-export async function listProjectQuests(agentDir: string, cwd: string): Promise<QuestState[]> {
-	const paths = getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
-	if (!existsSync(paths.projectDir)) return [];
+export async function listProjectQuests(cwd: string): Promise<QuestState[]> {
+	const paths = getQuestPaths(cwd, "__bootstrap__");
+	if (!existsSync(paths.rootDir)) return [];
 
+	const entries = await readdir(paths.rootDir, { withFileTypes: true });
+	const questDirs = entries.filter((entry) => entry.isDirectory() && entry.name !== SHARED_SKILLS_DIR);
 	const quests: QuestState[] = [];
-	for (const questDir of await listQuestDirs(paths.projectDir)) {
-		const questFile = join(questDir, QUEST_FILE);
+	for (const entry of questDirs) {
+		const questFile = join(paths.rootDir, entry.name, QUEST_FILE);
 		if (!existsSync(questFile)) continue;
 		try {
 			const raw = await readFile(questFile, "utf-8");
-			quests.push(JSON.parse(raw) as QuestState);
+			quests.push(normalizeQuest(JSON.parse(raw) as QuestState));
 		} catch {
 			continue;
 		}
 	}
-
 	return quests.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-async function listProjectDirs(rootDir: string): Promise<string[]> {
-	if (!existsSync(rootDir)) return [];
-	const entries = await readdir(rootDir, { withFileTypes: true });
-	return entries
-		.filter((entry) => entry.isDirectory() && entry.name !== PROJECTS_METADATA_DIR)
-		.map((entry) => join(rootDir, entry.name));
-}
+export async function pruneQuestStorage(cwd: string, now = Date.now()): Promise<{ prunedLogs: number; deletedRuns: number }> {
+	const paths = getQuestPaths(cwd, "__bootstrap__");
+	if (!existsSync(paths.rootDir)) return { prunedLogs: 0, deletedRuns: 0 };
 
-async function listQuestDirs(projectDir: string): Promise<string[]> {
-	const entries = await readdir(projectDir, { withFileTypes: true });
-	return entries.filter((entry) => entry.isDirectory()).map((entry) => join(projectDir, entry.name));
-}
-
-export async function pruneQuestStorage(agentDir: string, now = Date.now()): Promise<{ prunedLogs: number; deletedRuns: number }> {
 	let prunedLogs = 0;
 	let deletedRuns = 0;
+	const entries = await readdir(paths.rootDir, { withFileTypes: true });
+	for (const entry of entries) {
+		if (!entry.isDirectory() || entry.name === SHARED_SKILLS_DIR) continue;
+		const quest = await loadQuest(cwd, entry.name);
+		if (!quest || !TERMINAL_STATUSES.has(quest.status) || quest.prunedAt) continue;
+		if (now - quest.updatedAt < PRUNE_LOG_AGE_MS) continue;
 
-	const rootDir = join(agentDir, QUESTS_ROOT_DIR);
-	for (const projectDir of await listProjectDirs(rootDir)) {
-		for (const questDir of await listQuestDirs(projectDir)) {
-			const questFile = join(questDir, QUEST_FILE);
-			if (!existsSync(questFile)) continue;
-
-			let quest: QuestState | null = null;
-			try {
-				quest = JSON.parse(await readFile(questFile, "utf-8")) as QuestState;
-			} catch {
-				continue;
-			}
-			if (!quest || !TERMINAL_STATUSES.has(quest.status) || quest.prunedAt) continue;
-			if (now - quest.updatedAt < PRUNE_LOG_AGE_MS) continue;
-
-			const eventsFile = join(questDir, EVENTS_FILE);
-			if (existsSync(eventsFile)) {
-				await unlink(eventsFile);
-				prunedLogs++;
-			}
-
-			const workersDir = join(questDir, WORKERS_DIR);
-			if (existsSync(workersDir)) {
-				const entries = await readdir(workersDir);
-				deletedRuns += entries.length;
-				await rm(workersDir, { recursive: true, force: true });
-			}
-
-			quest.prunedAt = now;
-			quest.updatedAt = now;
-			await writeFile(questFile, `${JSON.stringify(quest, null, 2)}\n`, "utf-8");
+		const questPaths = getQuestPaths(cwd, quest.id);
+		if (existsSync(questPaths.eventsFile)) {
+			await unlink(questPaths.eventsFile);
+			prunedLogs++;
 		}
+		if (existsSync(questPaths.runsDir)) {
+			const runEntries = await readdir(questPaths.runsDir);
+			deletedRuns += runEntries.length;
+			await rm(questPaths.runsDir, { recursive: true, force: true });
+		}
+
+		quest.prunedAt = now;
+		quest.updatedAt = now;
+		await saveQuest(quest);
 	}
 
 	return { prunedLogs, deletedRuns };
@@ -248,11 +475,11 @@ export function trimRecentRuns<T extends { startedAt: number }>(runs: T[], max =
 	return [...runs].sort((a, b) => b.startedAt - a.startedAt).slice(0, max);
 }
 
-export async function loadLearnedWorkflows(agentDir: string, cwd: string): Promise<LearnedWorkflow[]> {
-	const paths = getQuestPathsFromAgentDir(agentDir, cwd, "__bootstrap__");
-	if (!existsSync(paths.projectWorkflowsFile)) return [];
+export async function loadLearnedWorkflows(cwd: string): Promise<LearnedWorkflow[]> {
+	const paths = getQuestPaths(cwd, "__bootstrap__");
+	if (!existsSync(paths.sharedWorkflowsFile)) return [];
 	try {
-		const raw = await readFile(paths.projectWorkflowsFile, "utf-8");
+		const raw = await readFile(paths.sharedWorkflowsFile, "utf-8");
 		const parsed = JSON.parse(raw);
 		if (Array.isArray(parsed)) return parsed as LearnedWorkflow[];
 	} catch {
@@ -261,22 +488,23 @@ export async function loadLearnedWorkflows(agentDir: string, cwd: string): Promi
 	return [];
 }
 
-export async function saveLearnedWorkflows(agentDir: string, cwd: string, workflows: LearnedWorkflow[]): Promise<void> {
-	const paths = await ensureProjectDir(agentDir, cwd);
-	await writeFile(paths.projectWorkflowsFile, `${JSON.stringify(workflows, null, 2)}\n`, "utf-8");
+export async function saveLearnedWorkflows(cwd: string, workflows: LearnedWorkflow[]): Promise<void> {
+	const paths = await ensureRoot(cwd);
+	await writeFile(paths.sharedWorkflowsFile, `${JSON.stringify(workflows, null, 2)}\n`, "utf-8");
+	await writeSharedWorkflowSkills(paths, workflows);
 }
 
-export async function questDirStats(agentDir: string, cwd: string, questId: string): Promise<{ hasEvents: boolean; runFiles: number }> {
-	const paths = getQuestPathsFromAgentDir(agentDir, cwd, questId);
+export async function questDirStats(cwd: string, questId: string): Promise<{ hasEvents: boolean; runFiles: number }> {
+	const paths = getQuestPaths(cwd, questId);
 	if (!existsSync(paths.questFile)) return { hasEvents: false, runFiles: 0 };
 	const hasEvents = existsSync(paths.eventsFile);
 	let runFiles = 0;
-	if (existsSync(paths.workersDir)) runFiles = (await readdir(paths.workersDir)).length;
+	if (existsSync(paths.runsDir)) runFiles = (await readdir(paths.runsDir)).length;
 	return { hasEvents, runFiles };
 }
 
-export async function questAgeMs(agentDir: string, cwd: string, questId: string): Promise<number | null> {
-	const paths = getQuestPathsFromAgentDir(agentDir, cwd, questId);
+export async function questAgeMs(cwd: string, questId: string): Promise<number | null> {
+	const paths = getQuestPaths(cwd, questId);
 	if (!existsSync(paths.questFile)) return null;
 	const stats = await stat(paths.questFile);
 	return Date.now() - stats.mtimeMs;

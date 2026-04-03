@@ -1,185 +1,145 @@
 # Pi Quests
 
-Private personal Pi extension for validation-first quest planning and execution.
+`@m-mohamed/pi-quests` is a standalone Pi package that adds validation-first quest orchestration on top of Pi core.
 
-Canonical source repo:
+Pi core stays upstream. Quest is your package. That means:
 
-- `/Users/mohamedmohamed/research/pi-quests`
+- Pi core dependencies still come from the upstream Pi packages such as `@mariozechner/pi-coding-agent`
+- Quest itself is published under your own package identity: `@m-mohamed/pi-quests`
+- the package is loaded the Pi-native way through the `pi` manifest and a TypeScript extension entrypoint at `./src/index.ts`
 
-Live deployed extension path:
+## Preview
 
-- `~/.pi/agent/extensions/pi-quests -> /Users/mohamedmohamed/research/pi-quests`
+![Quest Control](https://raw.githubusercontent.com/m-mohamed/pi-quests/main/docs/quest-control.png)
 
-## What It Does
+## Installation
 
-- `/enter-quest` enters quest mode for conversational planning and steering
-- `/exit-quest` leaves quest mode and restores normal Pi input handling
-- `/quest` opens Quest Control for the active quest
-- `/quests` lists and selects quests for the current repo
-- `/quest new <goal>` is the explicit non-interactive quest creation path
-- planning stays in the main Pi session
-- the approved quest proposal now includes:
-  - quest summary
-  - milestones
-  - features
-  - a first-class validation contract
-  - explicit role/model assignments from quest state
- - `/quest accept` and `/quest resume` execute one milestone at a time
- - `/quest abort` explicitly interrupts an active worker, validator, or replan run
- - `/quest approve` records the final human QA acknowledgment after validation passes
-- worker and validator runs happen in isolated `pi --mode json --no-session` subprocesses
-- Quest Control now streams child worker telemetry into the widget/status surface
-- `/quest steer <instruction>` queues a remaining-plan revision instead of silently changing scope
-- `/quest model` and `/quest role-model <role>` keep model choice explicit
-- `/quest prune` prunes old quest runtime logs
-- `/quest pause` is only a checkpoint hold for idle or already-paused quests
+Install from a local checkout:
 
-## Lifecycle
+```bash
+pi install /Users/mohamedmohamed/research/pi-quests
+```
 
-1. `/enter-quest` enables conversational quest mode in the current Pi session.
-2. Plain-text input creates or refines the active quest proposal.
-3. The proposal is stored privately and marked `ready`.
-4. `/quest accept` is the approval boundary.
-5. `/quest resume` continues milestone-by-milestone.
-6. `/quest abort` is the active interruption path while a child run is in flight.
-7. Completion means the quest has been validated and is ready for human QA.
-8. `/quest approve` is the explicit human QA acknowledgment step.
+Install from git:
 
-Quest completion does not mean "safe to ship blindly."
+```bash
+pi install git+https://github.com/m-mohamed/pi-quests.git
+```
 
-## Design
+Install from npm once published:
 
-This extension is intentionally:
+```bash
+pi install npm:@m-mohamed/pi-quests
+```
 
-- private
-- auto-discovered from `~/.pi/agent/extensions/`
-- hot-reloadable with `/reload`
-- modeled on Pi's extension surface instead of modifying Pi core
-- explicit about models, reasoning, and validation confidence
+Install it project-locally so the repo auto-loads Quest for everyone using that checkout:
 
-This extension intentionally does not:
+```bash
+pi install -l /Users/mohamedmohamed/research/pi-quests
+```
 
-- write quest state into the repos you work on
-- auto-route models with hidden heuristics
-- depend on Pi packages, presets, or keybinding overrides
-- use raw `agent.subscribe(...)` inside the extension
-- aim for Factory parity, remote background agents, or package publication in the current tranche
+Or declare it directly in `.pi/settings.json`:
 
-## State
+```json
+{
+  "packages": ["npm:@m-mohamed/pi-quests"]
+}
+```
 
-Private quest state lives under:
+## Quickstart
 
-- `~/.pi/agent/quests/<project-id>/<quest-id>/quest.json`
-- `~/.pi/agent/quests/<project-id>/<quest-id>/events.jsonl`
-- `~/.pi/agent/quests/<project-id>/<quest-id>/workers/*.json`
+```bash
+/quest new Build a validator-first bug bash workflow
+/quest
+/quest accept
+```
 
-Project-scoped learned workflows live under:
+Typical flow:
 
-- `~/.pi/agent/quests/projects/<project-id>/workflows/learned-workflows.json`
+1. create a quest with `/quest new <goal>`
+2. review the generated proposal and validation contract on disk
+3. start execution with `/quest accept`
+4. monitor progress in Quest Control with `/quest`
+5. finish with the explicit human QA handoff before shipping anything
 
-Learned workflows are private by default and never written into the target repo automatically.
+## Commands
 
-Passive inspection stays read-only:
+- `/quest new <goal>`
+- `/quest`
+- `/quest enter`
+- `/quest exit`
+- `/quest accept`
+- `/quest pause`
+- `/quest resume`
+- `/quest abort`
+- `/quest model <orchestrator|worker|validator> <provider/model[:thinking]>`
+- `/quests`
 
-- `/quest`, `/quests`, and other read paths do not create `~/.pi/agent/quests/` state until a quest or learned workflow is actually written
-- quest storage is created only when a quest starts persisting state or when learned workflows are saved
+## Runtime Model
 
-## Validation Contract
+Quest is proposal-first and validation-first:
 
-Each proposal stores a validation contract that maps:
+1. `/quest new` creates a repo-local quest under `.pi/quests/<quest-id>/`
+2. the orchestrator runs a dry-run validation readiness probe before proposal approval
+3. proposal artifacts are written to disk for review
+4. `/quest accept` starts execution
+5. workers run one feature at a time in isolated `pi --mode json --no-session` subprocesses
+6. validators run milestone checks and can append corrective features before work continues
+7. completion always ends with an explicit human QA checklist and a limited-coverage summary
 
-- milestone -> expected user-visible or system behavior
-- feature -> validation criteria
-- criterion -> proof strategy and confidence
+Quest never auto-commits, auto-deploys, or auto-ships.
 
-If the contract is weak, the quest says so explicitly. Weak validation lowers confidence even when a quest completes.
+## Stored Artifacts
 
-## Model Policy
+Quest state is stored in the working repository under `.pi/quests/<quest-id>/`:
 
-- one quest-level default `provider/model/thinking`
-- optional overrides for `orchestrator`, `worker`, and `validator`
-- no hidden routing
+- `quest.json`
+- `proposal.md`
+- `validation-readiness.json`
+- `validation-contract.md`
+- `validation-state.json`
+- `features.json`
+- `services.yaml`
+- `skills/*.md`
 
-Working defaults:
+Shared learned workflow guidance is stored under `.pi/quests/shared-skills/`.
 
-- Codex lane: `gpt-5.4` default, `gpt-5.4-mini` fast, `high` normal, `xhigh` only when chosen
-- OpenCode Go lane: `glm-5`, `kimi-k2.5`, `minimax-m2.7`, up to `high`
+Quest artifacts are the source of truth. `pi.appendEntry()` is only used for session-local UI state such as quest mode and the last-opened Quest Control tab.
+
+## Quest Control
+
+`/quest` opens Quest Control in interactive mode and prints a summary in print/RPC mode.
+
+Quest Control uses Pi’s native custom UI surface through `ctx.ui.custom()` and shows:
+
+- quest summary, status, and role models
+- current milestone and feature progress
+- validation readiness and assertion counts
+- worker and validator run state
+- latest run details and handoff information
+
+## Package Shape
+
+This package follows the Pi package conventions used by the docs, examples, and the current community ecosystem:
+
+- `package.json` includes the `pi-package` keyword
+- `pi.extensions` points directly at `./src/index.ts`
+- Pi core libraries are `peerDependencies`
+- Quest logic lives in the extension, not in Pi core
+
+That is the Pi-native pattern for add-on packages like `pi-tools`, `pi-cmux`, `pi-show-diffs`, and similar third-party Pi packages.
 
 ## Development
 
-The extension is structured like a small standalone project even though the deployed copy lives under `~/.pi/agent/extensions/`.
-
-Included support files:
-
-- `CHANGELOG.md`
-- `evals/README.md`
-- `LICENSE`
-- `tests/`
-- `scripts/evals.ts`
-- `scripts/smoke.ts`
-
-Local verification:
+Useful local commands:
 
 ```bash
-bun test
-tsc -p tsconfig.typecheck.json
-bun run evals
-bun run evals:regression
-bun run evals:capability
-bun run evals:scenario
-bun run scripts/smoke.ts
-bun run verify
-bun run verify:full
+npm run typecheck
+npm run test
+npm run check
+npm run pack:check
 ```
 
-## Eval-First Development
-
-Quest improvements should be driven by evals, not intuition.
-
-The repo now carries three eval layers:
-
-- regression evals: release-gating checks for quest invariants that must not regress
-- capability evals: prompt/orchestration checks for validation-first quest behavior
-- scenario evals: slower end-to-end checks against fixture repos and live Pi subprocesses
-
-The current eval harness is intentionally Pi-native:
-
-- code-graded and deterministic
-- separate from live model judging
-- separate from human QA
-- narrow enough to run on every local iteration
-
-Human interactive review still matters for:
-
-- proposal-review quality in the TUI
-- Quest Control ergonomics
-- live worker and validator behavior
-- final QA judgment before `/quest approve`
-
-Interactive verification checklist:
-
-- `/reload`
-- `/enter-quest`
-- `/exit-quest`
-- `/quest`
-- `/quests`
-- `/quest model`
-- `/quest role-model worker`
-- `/quest role-model validator`
-- `/quest approve`
-- create a quest, review the proposal, then `/quest accept`
-- verify Quest Control updates live while a worker or validator is running
-
-## Compatibility
+Maintainer-only manual harnesses also live under `scripts/`, but they are not part of the publish gate.
 
 Targeted against Pi `0.64.x`.
-
-Compatibility matrix:
-
-| Surface | Contract |
-|---------|----------|
-| Pi version | `0.64.x` |
-| Extension hooks | `registerCommand`, `pi.on(...)`, `ctx.ui.setStatus`, `ctx.ui.setWidget` |
-| Worker streams | `message_update`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end`, `turn_end`, `agent_end` |
-
-The smoke script checks the installed `pi --version`, and the scenario suite now includes a compatibility eval that fails if the child JSON event stream no longer exposes the event types quests depend on.

@@ -10,7 +10,7 @@ import {
 	loadActiveQuest,
 	saveQuest,
 } from "../src/state-core.js";
-import type { QuestState, WorkerRunRecord } from "../src/types.js";
+import type { QuestState } from "../src/types.js";
 
 interface ScenarioResult {
 	id: string;
@@ -56,23 +56,6 @@ const agentSettings = {
 
 function assert(condition: unknown, message: string): asserts condition {
 	if (!condition) throw new Error(message);
-}
-
-function commandRoleRun(summary: string): WorkerRunRecord {
-	return {
-		id: `run-${Date.now()}`,
-		role: "worker",
-		startedAt: Date.now() - 500,
-		endedAt: Date.now(),
-		provider: "openai-codex",
-		model: "gpt-5.4-mini",
-		thinkingLevel: "low",
-		exitCode: 0,
-		ok: true,
-		summary,
-		phase: "completed",
-		events: [],
-	};
 }
 
 function parseJsonLines(output: string): any[] {
@@ -203,10 +186,10 @@ async function compatibilityJsonEvents(): Promise<ScenarioResult> {
 
 async function questControlSurface(): Promise<ScenarioResult> {
 	return await withScenarioSandbox("command-only", async (context) => {
-		const quest = await createQuest(context.agentDir, context.repoDir, "Inspect the command surface split", {
+		const quest = await createQuest(context.repoDir, "Inspect the command surface split", {
 			...scenarioModelChoice,
 		});
-		quest.status = "ready";
+		quest.status = "proposal_ready";
 		quest.plan = {
 			title: "Command surface split",
 			summary: "Keep quest control and project quest listing separate.",
@@ -221,7 +204,7 @@ async function questControlSurface(): Promise<ScenarioResult> {
 				weakValidationWarnings: [],
 			},
 		};
-		await saveQuest(context.agentDir, quest);
+		await saveQuest(quest);
 
 		const control = await runPi(context, "/quest");
 		const list = await runPi(context, "/quests");
@@ -231,7 +214,7 @@ async function questControlSurface(): Promise<ScenarioResult> {
 			control.stdout.includes("Quest: Command surface split") &&
 			control.stdout.includes("Next action: /quest accept") &&
 			list.stdout.includes("Inspect the command surface split") &&
-			list.stdout.includes("ready");
+			list.stdout.includes("proposal_ready");
 
 		return {
 			id: "quest-control-surface",
@@ -248,20 +231,27 @@ async function questControlSurface(): Promise<ScenarioResult> {
 
 async function readonlyWebProposal(): Promise<ScenarioResult> {
 	return await withScenarioSandbox("readonly-web", async (context) => {
-		await createQuest(context.agentDir, context.repoDir, "Plan a tiny readonly code health audit for this repo.", {
+		await createQuest(context.repoDir, "Plan a tiny readonly code health audit for this repo.", {
 			...scenarioModelChoice,
 		});
 		const result = await runPi(
 			context,
 			"Plan the active quest for this repo. Do not ask clarifying questions. Keep it to one milestone. Return the final quest JSON.",
 		);
-		const quest = await loadActiveQuest(context.agentDir, context.repoDir);
-		const passed = result.exitCode === 0 && quest?.status === "ready" && Boolean(quest.plan?.validationContract) && repoPollutionCheck(context.repoDir);
+		const quest = await loadActiveQuest(context.repoDir);
+		const passed =
+			result.exitCode === 0 &&
+			quest?.status === "proposal_ready" &&
+			Boolean(quest.plan?.validationContract) &&
+			repoPollutionCheck(context.repoDir);
 		return {
 			id: "readonly-web",
 			title: "Readonly quest planning captures a proposal without repo pollution",
 			passed,
-			summary: passed ? "Readonly quest planning reached ready with a stored validation contract and no repo pollution." : `Readonly quest planning failed to reach ready.${result.stderr ? ` ${result.stderr.trim()}` : ""}`,
+			summary:
+				passed
+					? "Readonly quest planning reached proposal_ready with a stored validation contract and no repo pollution."
+					: `Readonly quest planning failed to reach proposal_ready.${result.stderr ? ` ${result.stderr.trim()}` : ""}`,
 			artifacts: {
 				status: quest?.status,
 				hasPlan: Boolean(quest?.plan),
@@ -274,19 +264,19 @@ async function readonlyWebProposal(): Promise<ScenarioResult> {
 
 async function weakValidationWarning(): Promise<ScenarioResult> {
 	return await withScenarioSandbox("weak-validation", async (context) => {
-		await createQuest(context.agentDir, context.repoDir, "Plan a tiny README quality audit for this repo.", {
+		await createQuest(context.repoDir, "Plan a tiny README quality audit for this repo.", {
 			...scenarioModelChoice,
 		});
 		const result = await runPi(
 			context,
 			"Plan the active quest for this repo. There are no automated checks, no browser surface, and validation is mostly static inspection plus human QA. Do not ask clarifying questions. Return the final quest JSON.",
 		);
-		const quest = await loadActiveQuest(context.agentDir, context.repoDir);
+		const quest = await loadActiveQuest(context.repoDir);
 		const warnings = quest?.plan?.validationContract.weakValidationWarnings ?? [];
 		const strategies = quest?.plan?.validationContract.criteria.map((criterion) => criterion.proofStrategy) ?? [];
 		const passed =
 			result.exitCode === 0 &&
-			quest?.status === "ready" &&
+			quest?.status === "proposal_ready" &&
 			warnings.length > 0 &&
 			(strategies.includes("read_only") || strategies.includes("manual"));
 		return {
@@ -305,7 +295,7 @@ async function weakValidationWarning(): Promise<ScenarioResult> {
 
 async function humanQaGate(): Promise<ScenarioResult> {
 	return await withScenarioSandbox("command-only", async (context) => {
-		const quest = await createQuest(context.agentDir, context.repoDir, "Finish human QA gate", {
+		const quest = await createQuest(context.repoDir, "Finish human QA gate", {
 			...scenarioModelChoice,
 		});
 		quest.status = "completed";
@@ -342,16 +332,21 @@ async function humanQaGate(): Promise<ScenarioResult> {
 				weakValidationWarnings: [],
 			},
 		};
-		await saveQuest(context.agentDir, quest);
+		await saveQuest(quest);
 
-		const result = await runPi(context, "/quest approve");
-		const persisted = await loadActiveQuest(context.agentDir, context.repoDir);
-		const passed = result.exitCode === 0 && persisted?.humanQaStatus === "approved" && persisted?.shipReadiness === "human_qa_complete";
+		const result = await runPi(context, "/quest");
+		const persisted = await loadActiveQuest(context.repoDir);
+		const passed =
+			result.exitCode === 0 &&
+			persisted?.humanQaStatus === "pending" &&
+			persisted?.shipReadiness === "validated_waiting_for_human_qa" &&
+			result.stdout.includes("Human QA checklist:") &&
+			result.stdout.includes("Quest completed. Human QA is still required before shipping.");
 		return {
 			id: "human-qa-gate",
 			title: "Human QA approval remains an explicit final step",
 			passed,
-			summary: passed ? "Quest approval required an explicit /quest approve step." : `Quest approval did not update the final QA state correctly.${result.stderr ? ` ${result.stderr.trim()}` : ""}`,
+			summary: passed ? "Completed quests still stop at an explicit human QA handoff." : `Completed quest state lost the explicit human QA handoff.${result.stderr ? ` ${result.stderr.trim()}` : ""}`,
 			artifacts: {
 				humanQaStatus: persisted?.humanQaStatus,
 				shipReadiness: persisted?.shipReadiness,
@@ -366,7 +361,7 @@ async function abortRecovery(): Promise<ScenarioResult> {
 		const sleeper = spawn("sleep", ["60"], { detached: true, stdio: "ignore" });
 		sleeper.unref();
 
-		const quest = await createQuest(context.agentDir, context.repoDir, "Resume unfinished work after operator abort", {
+		const quest = await createQuest(context.repoDir, "Resume unfinished work after operator abort", {
 			...scenarioModelChoice,
 		});
 		quest.roleModels.worker = { ...scenarioModelChoice };
@@ -447,10 +442,10 @@ async function abortRecovery(): Promise<ScenarioResult> {
 						title: "Repo tests pass",
 						milestoneId: "m1",
 						featureIds: ["f2"],
-						expectedBehavior: "The repo test command passes",
+						expectedBehavior: "The repo marker command passes",
 						proofStrategy: "command",
-						proofDetails: "Run bun test.",
-						commands: ["bun test"],
+						proofDetails: "Use rg to confirm README.md contains QUEST_ABORT_RECOVERY_OK.",
+						commands: ["rg QUEST_ABORT_RECOVERY_OK README.md"],
 						confidence: "high",
 					},
 				],
@@ -466,10 +461,10 @@ async function abortRecovery(): Promise<ScenarioResult> {
 			phase: "streaming",
 			startedAt: Date.now() - 1000,
 		};
-		await saveQuest(context.agentDir, quest);
+		await saveQuest(quest);
 
 		const abortResult = await runPi(context, "/quest abort");
-		const abortedQuest = await loadActiveQuest(context.agentDir, context.repoDir);
+		const abortedQuest = await loadActiveQuest(context.repoDir);
 		const abortPassed =
 			abortResult.exitCode === 0 &&
 			abortedQuest?.status === "aborted" &&
@@ -477,7 +472,7 @@ async function abortRecovery(): Promise<ScenarioResult> {
 			abortedQuest.plan?.features.find((feature) => feature.id === "f2")?.status === "blocked";
 
 		const resumeResult = await runPi(context, "/quest resume");
-		const resumedQuest = await loadActiveQuest(context.agentDir, context.repoDir);
+		const resumedQuest = await loadActiveQuest(context.repoDir);
 		const readme = await readFile(join(context.repoDir, "README.md"), "utf-8");
 		const resumePassed =
 			resumeResult.exitCode === 0 &&
@@ -505,7 +500,7 @@ async function abortRecovery(): Promise<ScenarioResult> {
 async function validatorBlockReplan(): Promise<ScenarioResult> {
 	return await withScenarioSandbox("command-only", async (context) => {
 		await writeFile(join(context.repoDir, "README.md"), "# Command Only Fixture\n", "utf-8");
-		const quest = await createQuest(context.agentDir, context.repoDir, "Revise only remaining unfinished work after validator feedback", {
+		const quest = await createQuest(context.repoDir, "Revise only remaining unfinished work after validator feedback", {
 			...scenarioModelChoice,
 		});
 		quest.roleModels.worker = { ...scenarioModelChoice };
@@ -570,15 +565,15 @@ async function validatorBlockReplan(): Promise<ScenarioResult> {
 				milestoneId: "m2",
 			},
 		];
-		await appendQuestEvent(context.agentDir, context.repoDir, quest.id, {
+		await appendQuestEvent(context.repoDir, quest.id, {
 			ts: Date.now(),
 			type: "milestone_blocked",
 			data: { milestoneId: "m2", title: "Remaining work", summary: "Synthetic validator block for scenario eval." },
 		});
-		await saveQuest(context.agentDir, quest);
+		await saveQuest(quest);
 
 		const result = await runPi(context, "/quest resume");
-		const persisted = await loadActiveQuest(context.agentDir, context.repoDir);
+		const persisted = await loadActiveQuest(context.repoDir);
 		const readme = await readFile(join(context.repoDir, "README.md"), "utf-8");
 		const passed =
 			result.exitCode === 0 &&

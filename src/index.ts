@@ -1,18 +1,21 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { Type } from "@sinclair/typebox";
 import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
-import { mergeRemainingPlan, parseQuestPlanText, planningInstructions } from "./plan-core.js";
+import { Key, Text, matchesKey } from "@mariozechner/pi-tui";
+import { defaultHumanQaChecklist, mergeRemainingPlan, parseQuestPlanText, planningInstructions, synthesizeValidationAssertions } from "./plan-core.js";
 import { describeActiveRun, markQuestAborted, prepareQuestForResume, terminateQuestProcess } from "./runtime-core.js";
 import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
 import {
 	appendQuestEvent,
 	createQuest,
+	getQuestPaths,
 	listProjectQuests,
 	loadActiveQuest,
 	loadLearnedWorkflows,
 	loadQuest,
-	questIsTerminal,
 	pruneQuestStorage,
 	saveLearnedWorkflows,
 	saveQuest,
@@ -20,19 +23,21 @@ import {
 	trimRecentRuns,
 	writeWorkerRun,
 } from "./state.js";
-import { executeFeatureWorker, executePlanRevision, executeValidator } from "./workers.js";
+import { executeFeatureWorker, executePlanRevision, executeValidationReadinessProbe, executeValidator } from "./workers.js";
 import { deriveLearnedWorkflows, mergeLearnedWorkflows } from "./workflows.js";
 import type {
 	LearnedWorkflow,
 	LiveRunSnapshot,
+	ModelChoice,
 	QuestFeature,
 	QuestMilestone,
-	QuestPlanRevisionRequest,
 	QuestRole,
 	QuestState,
 	QuestActiveRun,
-	ModelChoice,
 	ThinkingLevel,
+	ValidationAssertion,
+	ValidationReadiness,
+	ValidationSurfaceStatus,
 	WorkerEventRecord,
 } from "./types.js";
 
@@ -40,8 +45,11 @@ const CUSTOM_MESSAGE_TYPE = "pi-quests";
 const STATUS_KEY = "pi-quests";
 const WIDGET_KEY = "pi-quests";
 const QUEST_MODE_ENTRY = "quest-mode";
-const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const QUEST_DASHBOARD_ENTRY = "quest-control";
 const ROLE_NAMES: QuestRole[] = ["orchestrator", "worker", "validator"];
+const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const DASHBOARD_TABS = ["summary", "features", "runs", "detail"] as const;
+type DashboardTab = (typeof DASHBOARD_TABS)[number];
 
 function createDefaultModelChoice(model: Model<any> | null, thinkingLevel: ThinkingLevel): ModelChoice {
 	return {
@@ -51,35 +59,15 @@ function createDefaultModelChoice(model: Model<any> | null, thinkingLevel: Think
 	};
 }
 
-function modelLabel(choice: ModelChoice | undefined): string {
-	if (!choice) return "inherit";
-	return `${choice.provider}/${choice.model} @ ${choice.thinkingLevel}`;
-}
-
 function truncate(text: string, max = 120): string {
 	const compact = text.replace(/\s+/g, " ").trim();
 	if (compact.length <= max) return compact;
 	return `${compact.slice(0, max - 1)}…`;
 }
 
-function currentMilestone(quest: QuestState): QuestMilestone | undefined {
-	if (!quest.plan) return undefined;
-	for (const milestone of quest.plan.milestones) {
-		if (milestone.status !== "completed") return milestone;
-	}
-	return undefined;
-}
-
-function currentMilestoneFeatures(quest: QuestState, milestoneId: string): QuestFeature[] {
-	return (quest.plan?.features ?? []).filter((feature) => feature.milestoneId === milestoneId);
-}
-
-function nextPendingFeature(quest: QuestState, milestoneId: string): QuestFeature | undefined {
-	return currentMilestoneFeatures(quest, milestoneId).find((feature) => feature.status === "pending");
-}
-
-function currentOrDefaultModel(quest: QuestState, role: QuestRole): ModelChoice {
-	return quest.roleModels[role] ?? quest.defaultModel;
+function modelLabel(choice: ModelChoice | undefined): string {
+	if (!choice) return "inherit";
+	return `${choice.provider}/${choice.model}:${choice.thinkingLevel}`;
 }
 
 function roleFromArg(arg: string): QuestRole | null {
@@ -87,39 +75,62 @@ function roleFromArg(arg: string): QuestRole | null {
 	return ROLE_NAMES.includes(normalized as QuestRole) ? (normalized as QuestRole) : null;
 }
 
-function latestAssistantText(messages: any[]): string {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg = messages[i];
-		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
-		const text = msg.content
-			.filter((part: { type: string }) => part.type === "text")
-			.map((part: { text: string }) => part.text)
-			.join("\n")
-			.trim();
-		if (text) return text;
-	}
-	return "";
+function currentOrDefaultModel(quest: QuestState, role: QuestRole): ModelChoice {
+	return quest.roleModels[role] ?? quest.defaultModel;
 }
 
-function supportsXhigh(choice: ModelChoice): boolean {
-	return choice.provider === "openai-codex" && /^gpt-5\./.test(choice.model);
+function syncQuestConfig(quest: QuestState) {
+	quest.config.orchestratorModel = currentOrDefaultModel(quest, "orchestrator");
+	quest.config.workerModel = currentOrDefaultModel(quest, "worker");
+	quest.config.validatorModel = currentOrDefaultModel(quest, "validator");
 }
 
-function availableThinkingLevels(choice: ModelChoice): ThinkingLevel[] {
-	if (!supportsXhigh(choice)) return THINKING_LEVELS.filter((level) => level !== "xhigh");
-	return THINKING_LEVELS;
+function currentMilestone(quest: QuestState): QuestMilestone | undefined {
+	if (!quest.plan) return undefined;
+	return quest.plan.milestones
+		.slice()
+		.sort((a, b) => a.order - b.order)
+		.find((milestone) => milestone.status !== "completed");
 }
 
-function summarizeRecentRuns(quest: QuestState): string {
-	if (quest.recentRuns.length === 0) return "none";
-	return quest.recentRuns
-		.slice(0, 4)
-		.map((run) => `[${run.role}] ${run.summary}${run.latestToolName ? ` · ${run.latestToolName}` : ""}`)
-		.join("\n");
+function currentMilestoneFeatures(quest: QuestState, milestoneId: string): QuestFeature[] {
+	return (quest.plan?.features ?? [])
+		.filter((feature) => feature.milestoneId === milestoneId)
+		.sort((a, b) => a.order - b.order);
 }
 
-function questAwaitingHumanQa(quest: QuestState): boolean {
-	return quest.status === "completed" && quest.shipReadiness === "validated_waiting_for_human_qa" && quest.humanQaStatus !== "approved";
+function nextPendingFeature(quest: QuestState, milestoneId: string): QuestFeature | undefined {
+	return currentMilestoneFeatures(quest, milestoneId).find((feature) => feature.status === "pending");
+}
+
+function assertionCounts(quest: QuestState) {
+	const assertions = quest.validationState?.assertions ?? [];
+	return {
+		total: assertions.length,
+		passed: assertions.filter((assertion) => assertion.status === "passed").length,
+		failed: assertions.filter((assertion) => assertion.status === "failed").length,
+		limited: assertions.filter((assertion) => assertion.status === "limited").length,
+		pending: assertions.filter((assertion) => assertion.status === "pending").length,
+	};
+}
+
+function readinessWarningCount(quest: QuestState) {
+	return (quest.validationReadiness?.checks ?? []).filter((check) => check.status === "limited" || check.status === "unsupported").length;
+}
+
+function humanQaChecklist(quest: QuestState): string[] {
+	return defaultHumanQaChecklist(
+		quest.plan ?? {
+			title: quest.title,
+			summary: quest.goal,
+			risks: [],
+			environment: [],
+			services: [],
+			humanQaChecklist: ["Review the primary user flows manually before shipping."],
+			milestones: [],
+			features: [],
+		},
+	);
 }
 
 function questActiveRun(quest: QuestState, liveRun: LiveRunSnapshot | null): QuestActiveRun | null {
@@ -138,24 +149,30 @@ function questActiveRun(quest: QuestState, liveRun: LiveRunSnapshot | null): Que
 	return quest.activeRun ?? null;
 }
 
-function summarizeQuest(
-	quest: QuestState,
-	workflows: LearnedWorkflow[],
-	liveRun: LiveRunSnapshot | null,
-	questModeEnabled: boolean,
-): string {
+function summarizeRecentRuns(quest: QuestState): string {
+	if (quest.recentRuns.length === 0) return "none";
+	return quest.recentRuns
+		.slice(0, 4)
+		.map((run) => `[${run.role}] ${run.summary}${run.latestToolName ? ` · ${run.latestToolName}` : ""}`)
+		.join("\n");
+}
+
+function summarizeQuest(quest: QuestState, workflows: LearnedWorkflow[], liveRun: LiveRunSnapshot | null, questModeEnabled: boolean): string {
 	const featureCount = quest.plan?.features.length ?? 0;
 	const done = quest.plan?.features.filter((feature) => feature.status === "completed").length ?? 0;
 	const milestone = currentMilestone(quest);
-	const weakWarnings = quest.plan?.validationContract.weakValidationWarnings.length ?? 0;
+	const readinessWarnings = readinessWarningCount(quest);
+	const assertions = assertionCounts(quest);
 	const activeRun = questActiveRun(quest, liveRun);
+	const readinessLines =
+		quest.validationReadiness?.checks.length
+			? quest.validationReadiness.checks.map((check) => `- ${check.surface}: ${check.status}${check.notes ? ` · ${check.notes}` : ""}`).join("\n")
+			: "- none";
 
 	return `# Quest: ${quest.plan?.title ?? quest.title}
 
 - Status: ${quest.status}
-- Proposal: ${quest.plan ? "captured" : "not ready"}
-- Human QA: ${quest.humanQaStatus}
-- Ship readiness: ${quest.shipReadiness}
+- Quest mode: ${questModeEnabled ? "on" : "off"}
 - Goal: ${quest.goal}
 - Default model: ${modelLabel(quest.defaultModel)}
 - Orchestrator model: ${modelLabel(currentOrDefaultModel(quest, "orchestrator"))}
@@ -163,59 +180,45 @@ function summarizeQuest(
 - Validator model: ${modelLabel(currentOrDefaultModel(quest, "validator"))}
 - Features: ${done}/${featureCount} complete
 - Active milestone: ${milestone ? `${milestone.title} [${milestone.status}]` : "none"}
-- Validation criteria: ${quest.plan?.validationContract.criteria.length ?? 0}
-- Weak validation warnings: ${weakWarnings}
-- Pending plan revisions: ${quest.pendingPlanRevisionRequests.length}
+- Validation assertions: ${assertions.passed}/${assertions.total} passed · ${assertions.failed} failed · ${assertions.limited} limited · ${assertions.pending} pending
+- Validation readiness warnings: ${readinessWarnings}
 - Learned workflows: ${workflows.length}
-- Quest mode: ${questModeEnabled ? "on" : "off"}
-- Next action: ${questAwaitingHumanQa(quest) ? "/quest approve" : quest.status === "ready" ? "/quest accept" : quest.status === "paused" || quest.status === "aborted" ? "/quest resume" : quest.status === "running" ? "/quest abort" : "none"}
-- Active run: ${liveRun ? `${liveRun.role}/${liveRun.phase}${liveRun.latestToolName ? ` · ${liveRun.latestToolName}` : ""}${liveRun.latestMessage ? ` · ${truncate(liveRun.latestMessage, 80)}` : ""}` : activeRun ? `${describeActiveRun(quest, activeRun)} · ${activeRun.phase}${activeRun.abortRequestedAt ? " · abort requested" : ""}` : "idle"}
+- Active run: ${
+		liveRun
+			? `${liveRun.role}/${liveRun.phase}${liveRun.latestToolName ? ` · ${liveRun.latestToolName}` : ""}${liveRun.latestMessage ? ` · ${truncate(liveRun.latestMessage, 80)}` : ""}`
+			: activeRun
+				? `${describeActiveRun(quest, activeRun)} · ${activeRun.phase}`
+				: "idle"
+	}
 ${quest.lastSummary ? `- Last summary: ${quest.lastSummary}` : ""}
 ${quest.lastError ? `- Last error: ${quest.lastError}` : ""}
+
+Validation readiness:
+${readinessLines}
 
 Recent runs:
 ${summarizeRecentRuns(quest)}
 
-${quest.plan?.validationContract.weakValidationWarnings.length ? `Validation warnings:\n${quest.plan.validationContract.weakValidationWarnings.map((warning) => `- ${warning}`).join("\n")}` : "Validation warnings:\n- none"}
-
-${quest.pendingPlanRevisionRequests.length ? `Pending revision requests:\n${quest.pendingPlanRevisionRequests.map((request) => `- [${request.source}] ${request.note}`).join("\n")}` : "Pending revision requests:\n- none"}`;
+Human QA checklist:
+${humanQaChecklist(quest).map((item) => `- ${item}`).join("\n")}
+`;
 }
 
-function questWidgetLines(
-	quest: QuestState,
-	workflows: LearnedWorkflow[],
-	liveRun: LiveRunSnapshot | null,
-	questModeEnabled: boolean,
-): string[] {
-	const lines = [`quest:${quest.plan?.title ?? quest.title} [${quest.status}]`, `default:${modelLabel(quest.defaultModel)}`];
-	const activeRun = questActiveRun(quest, liveRun);
+function questWidgetLines(quest: QuestState, liveRun: LiveRunSnapshot | null, questModeEnabled: boolean): string[] {
 	const milestone = currentMilestone(quest);
-	lines.push(`mode:${questModeEnabled ? "on" : "off"}`);
-	if (milestone) lines.push(`milestone:${milestone.title} [${milestone.status}]`);
-	if (quest.plan) {
-		const completed = quest.plan.features.filter((feature) => feature.status === "completed").length;
-		lines.push(`features:${completed}/${quest.plan.features.length}`);
-		lines.push(`validation:${quest.plan.validationContract.criteria.length} checks`);
-		if (quest.plan.validationContract.weakValidationWarnings.length > 0) {
-			lines.push(`weak-validation:${quest.plan.validationContract.weakValidationWarnings.length}`);
-		}
-	}
-	lines.push(`orchestrator:${modelLabel(currentOrDefaultModel(quest, "orchestrator"))}`);
-	lines.push(`worker:${modelLabel(currentOrDefaultModel(quest, "worker"))}`);
-	lines.push(`validator:${modelLabel(currentOrDefaultModel(quest, "validator"))}`);
-	lines.push(`qa:${quest.humanQaStatus}`);
-	lines.push(`ship:${quest.shipReadiness}`);
-	lines.push(`workflows:${workflows.length}`);
-	if (quest.pendingPlanRevisionRequests.length > 0) lines.push(`replan:${quest.pendingPlanRevisionRequests.length} pending`);
-	if (liveRun) {
-		lines.push(`active:${liveRun.role}/${liveRun.phase}`);
-		if (liveRun.latestToolName) lines.push(`tool:${liveRun.latestToolName} ${truncate(liveRun.latestToolSummary || "", 48)}`.trim());
-		if (liveRun.latestMessage) lines.push(`msg:${truncate(liveRun.latestMessage, 60)}`);
-	} else if (activeRun) {
-		lines.push(`active:${activeRun.role}/${activeRun.phase}`);
-		if (activeRun.abortRequestedAt) lines.push("abort:requested");
-	}
-	return lines;
+	const assertions = assertionCounts(quest);
+	const activeFeature = milestone ? nextPendingFeature(quest, milestone.id) : undefined;
+	const warnings = readinessWarningCount(quest) + assertions.limited;
+	const activeRun = questActiveRun(quest, liveRun);
+	return [
+		`quest:${quest.plan?.title ?? quest.title} [${quest.status}]`,
+		`mode:${questModeEnabled ? "on" : "off"}`,
+		`feature:${activeFeature?.title ?? "none"}`,
+		`milestone:${milestone?.title ?? "none"}`,
+		`assertions:${assertions.passed}/${assertions.total} passed`,
+		`warnings:${warnings}`,
+		`run:${activeRun ? `${activeRun.role}/${activeRun.phase}` : "idle"}`,
+	];
 }
 
 async function emitNote(pi: ExtensionAPI, ctx: ExtensionContext, content: string, level: "info" | "warning" | "error" = "info") {
@@ -223,50 +226,93 @@ async function emitNote(pi: ExtensionAPI, ctx: ExtensionContext, content: string
 	pi.sendMessage({ customType: CUSTOM_MESSAGE_TYPE, content, display: true }, { triggerTurn: false });
 }
 
-async function chooseModelChoice(
-	pi: ExtensionAPI,
-	ctx: ExtensionContext,
-	initial: ModelChoice,
-	applyNow: boolean,
-): Promise<ModelChoice | null> {
-	if (!ctx.hasUI) {
-		await emitNote(pi, ctx, "Model selection requires interactive mode.", "warning");
-		return null;
-	}
+function parseModelChoiceSpec(spec: string, fallback: ModelChoice): ModelChoice | null {
+	const trimmed = spec.trim();
+	if (!trimmed) return null;
+	const [providerModel, thinking] = trimmed.split(":");
+	const slashIndex = providerModel.indexOf("/");
+	if (slashIndex <= 0 || slashIndex === providerModel.length - 1) return null;
+	const provider = providerModel.slice(0, slashIndex);
+	const model = providerModel.slice(slashIndex + 1);
+	const thinkingLevel = thinking && THINKING_LEVELS.includes(thinking as ThinkingLevel) ? (thinking as ThinkingLevel) : fallback.thinkingLevel;
+	return { provider, model, thinkingLevel };
+}
 
-	const available = await ctx.modelRegistry.getAvailable();
-	if (available.length === 0) {
-		await emitNote(pi, ctx, "No available models found.", "warning");
-		return null;
-	}
+function readinessSummaryForWarnings(quest: QuestState): string {
+	const weak = (quest.validationReadiness?.checks ?? []).filter((check) => check.status === "limited" || check.status === "unsupported");
+	if (weak.length === 0) return "All captured validation surfaces are supported.";
+	return weak.map((check) => `${check.surface}:${check.status}`).join(", ");
+}
 
-	const labels = available.map((model) => `${model.provider}/${model.id}`);
-	const selectedLabel = await ctx.ui.select("Quest model", labels);
-	if (!selectedLabel) return null;
+function relevantAssertionsForPass(quest: QuestState, milestoneId: string, pass: "code_review" | "user_surface"): ValidationAssertion[] {
+	const assertions = (quest.validationState?.assertions ?? []).filter((assertion) => assertion.milestoneId === milestoneId);
+	return pass === "code_review"
+		? assertions.filter((assertion) => assertion.method !== "user_surface")
+		: assertions.filter((assertion) => assertion.method === "user_surface" || assertion.method === "mixed");
+}
 
-	const selectedModel = available.find((model) => `${model.provider}/${model.id}` === selectedLabel);
-	if (!selectedModel) return null;
+function markAssertions(
+	quest: QuestState,
+	assertions: ValidationAssertion[],
+	status: ValidationAssertion["status"],
+	evidenceLine: string,
+) {
+	if (!quest.validationState) return;
+	const ids = new Set(assertions.map((assertion) => assertion.id));
+	quest.validationState.assertions = quest.validationState.assertions.map((assertion) => {
+		if (!ids.has(assertion.id)) return assertion;
+		return {
+			...assertion,
+			status,
+			evidence: evidenceLine ? [...assertion.evidence, evidenceLine].slice(-8) : assertion.evidence,
+		};
+	});
+	quest.validationState.updatedAt = Date.now();
+}
 
-	const choice: ModelChoice = {
-		provider: selectedModel.provider,
-		model: selectedModel.id,
-		thinkingLevel: initial.thinkingLevel,
+function mergeValidationAssertions(existing: ValidationAssertion[], next: ValidationAssertion[]): ValidationAssertion[] {
+	const byId = new Map(existing.map((assertion) => [assertion.id, assertion]));
+	return next.map((assertion) => {
+		const previous = byId.get(assertion.id);
+		return previous
+			? {
+					...assertion,
+					status: previous.status,
+					evidence: previous.evidence,
+				}
+			: assertion;
+	});
+}
+
+function appendCorrectiveFeatures(quest: QuestState, milestone: QuestMilestone, issues: string[], assertions: ValidationAssertion[]) {
+	if (!quest.plan) return;
+	const maxOrder = Math.max(0, ...quest.plan.features.map((feature) => feature.order));
+	const targetAssertionIds = assertions.map((assertion) => assertion.id);
+	const corrective = issues.map((issue, index) => ({
+		id: `fix-${randomUUID()}`,
+		order: maxOrder + index + 1,
+		milestoneId: milestone.id,
+		title: `Corrective follow-up ${index + 1}`,
+		description: issue,
+		preconditions: [],
+		fulfills: targetAssertionIds,
+		status: "pending" as const,
+		handoff: `Resolve validator issue: ${issue}`,
+	}));
+	quest.plan.features.push(...corrective);
+}
+
+function synthesizeAssertionsForQuestPlan(quest: QuestState) {
+	if (!quest.plan) return;
+	const next = synthesizeValidationAssertions(quest.plan.milestones, quest.plan.features);
+	quest.validationState = {
+		assertions: mergeValidationAssertions(quest.validationState?.assertions ?? [], next),
+		updatedAt: Date.now(),
 	};
+}
 
-	const thinking = await ctx.ui.select("Thinking level", availableThinkingLevels(choice), choice.thinkingLevel);
-	if (!thinking) return null;
-	choice.thinkingLevel = thinking as ThinkingLevel;
-
-	if (applyNow) {
-		const success = await pi.setModel(selectedModel);
-		if (success) {
-			pi.setThinkingLevel(choice.thinkingLevel);
-		} else {
-			await emitNote(pi, ctx, `Model ${selectedLabel} is not currently available for the live session.`, "warning");
-		}
-	}
-
-	return choice;
+function proposalReady(quest: QuestState): boolean {
+	return Boolean(quest.plan && quest.validationReadiness && quest.validationState && quest.plan.features.length > 0);
 }
 
 export default function questExtension(pi: ExtensionAPI) {
@@ -276,9 +322,14 @@ export default function questExtension(pi: ExtensionAPI) {
 	let planningEvents: WorkerEventRecord[] = [];
 	let questModeEnabled = false;
 	let planningTurnActive = false;
+	let dashboardTab: DashboardTab = "summary";
 
 	function persistQuestMode() {
 		pi.appendEntry(QUEST_MODE_ENTRY, { enabled: questModeEnabled });
+	}
+
+	function persistDashboardTab() {
+		pi.appendEntry(QUEST_DASHBOARD_ENTRY, { tab: dashboardTab });
 	}
 
 	async function applyQuestUi(ctx: ExtensionContext, quest: QuestState | null) {
@@ -294,9 +345,8 @@ export default function questExtension(pi: ExtensionAPI) {
 			return;
 		}
 		const liveSummary = liveRun ? ` · ${liveRun.role}:${liveRun.phase}` : "";
-		const modeSuffix = questModeEnabled ? " · mode:on" : "";
-		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `quest:${quest.status}${liveSummary}${modeSuffix}`));
-		ctx.ui.setWidget(WIDGET_KEY, questWidgetLines(quest, currentWorkflows, liveRun, questModeEnabled));
+		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `quest:${quest.status}${liveSummary}`));
+		ctx.ui.setWidget(WIDGET_KEY, questWidgetLines(quest, liveRun, questModeEnabled));
 	}
 
 	async function refreshCurrentQuest(cwd: string) {
@@ -328,27 +378,6 @@ export default function questExtension(pi: ExtensionAPI) {
 		await applyQuestUi(ctx, currentQuest);
 	}
 
-	async function showStatus(ctx: ExtensionContext) {
-		currentQuest = await loadActiveQuest(ctx.cwd);
-		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
-		if (!currentQuest) {
-			await emitNote(
-				pi,
-				ctx,
-				`No active quest for this repo.
-
-- Quest mode: ${questModeEnabled ? "on" : "off"}
-- Use /enter-quest for interactive planning
-- Use /quest new <goal> for explicit non-interactive creation
-- Use /quests to browse existing quests`,
-			);
-			await applyQuestUi(ctx, null);
-			return;
-		}
-		await emitNote(pi, ctx, summarizeQuest(currentQuest, currentWorkflows, liveRun, questModeEnabled));
-		await applyQuestUi(ctx, currentQuest);
-	}
-
 	async function setQuestMode(ctx: ExtensionContext, enabled: boolean) {
 		questModeEnabled = enabled;
 		if (!enabled) planningTurnActive = false;
@@ -356,108 +385,214 @@ export default function questExtension(pi: ExtensionAPI) {
 		await applyQuestUi(ctx, currentQuest);
 	}
 
-	function questPlanningPrompt(goal: string): string {
-		return `Let's plan a quest for this repository.\n\nGoal: ${goal}\n\nAsk clarifying questions if needed. When the proposal is ready, return the quest JSON in the required schema.`;
+	async function ensureCurrentQuest(ctx: ExtensionContext): Promise<QuestState | null> {
+		currentQuest = await loadActiveQuest(ctx.cwd);
+		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
+		if (!currentQuest) {
+			await emitNote(pi, ctx, "No active quest in this repo. Use `/quest new <goal>` first.", "warning");
+			return null;
+		}
+		return currentQuest;
 	}
 
-	function questListLines(quests: QuestState[], activeQuestId: string | null): string[] {
-		return quests.map((quest) => {
-			const marker = quest.id === activeQuestId ? "*" : " ";
-			const updated = new Date(quest.updatedAt).toLocaleString();
-			return `${marker} ${quest.id} · ${quest.title} · ${quest.status} · ${updated}`;
-		});
-	}
-
-	async function createPlanningQuest(
-		ctx: ExtensionContext,
-		goal: string,
-		options: { triggerPlanningTurn: boolean },
-	): Promise<QuestState> {
+	async function createPlanningQuest(ctx: ExtensionContext, goal: string): Promise<QuestState> {
 		const modelChoice = createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
 		currentQuest = await createQuest(ctx.cwd, goal, modelChoice);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
-		await pruneQuestStorage();
-		currentQuest.lastSummary = options.triggerPlanningTurn
-			? "Quest created. Planning will start immediately."
-			: "Quest created in planning mode. Send a follow-up prompt to continue planning.";
+		await pruneQuestStorage(ctx.cwd);
+		await setQuestMode(ctx, true);
+		await emitNote(pi, ctx, `Quest created: ${goal}`);
+
+		liveRun = createLiveRunSnapshot("validator", {}, "readiness");
+		await persistActiveRun(ctx, currentQuest, {
+			role: "validator",
+			kind: "readiness",
+			phase: "readiness",
+			startedAt: Date.now(),
+		});
+
+		const probe = await executeValidationReadinessProbe(
+			ctx.cwd,
+			currentOrDefaultModel(currentQuest, "validator"),
+			async (snapshot) => {
+				liveRun = snapshot;
+				if (currentQuest?.activeRun && currentQuest.activeRun.phase !== snapshot.phase) {
+					currentQuest.activeRun.phase = snapshot.phase;
+					await saveQuest(currentQuest);
+				}
+				await applyQuestUi(ctx, currentQuest);
+			},
+			async (pid) => {
+				if (currentQuest?.activeRun) {
+					currentQuest.activeRun.pid = pid;
+					await saveQuest(currentQuest);
+				}
+			},
+		);
+		liveRun = null;
+		currentQuest.recentRuns = trimRecentRuns([probe.run, ...currentQuest.recentRuns]);
+		currentQuest.activeRun = undefined;
+		if (probe.readiness) currentQuest.validationReadiness = probe.readiness;
+		if (probe.servicesYaml) currentQuest.servicesYaml = probe.servicesYaml;
+		currentQuest.lastSummary = probe.readiness
+			? `Dry-run validation readiness captured. ${readinessSummaryForWarnings(currentQuest)}`
+			: "Dry-run validation readiness probe could not capture structured results.";
 		await saveQuest(currentQuest);
+		await writeWorkerRun(currentQuest.cwd, currentQuest.id, probe.run);
 		await applyQuestUi(ctx, currentQuest);
 		return currentQuest;
 	}
 
-	async function queueSteeringNote(
-		ctx: ExtensionContext,
-		quest: QuestState,
-		note: string,
-		source: "command" | "quest-mode",
-	): Promise<QuestState> {
-		const originalStatus = quest.status;
-		quest.steeringNotes.push(note);
-
-		if (quest.status === "planning") {
-			planningTurnActive = true;
-			await saveQuest(quest);
-			await appendQuestEvent(ctx.cwd, quest.id, {
-				ts: Date.now(),
-				type: "quest_steer",
-				data: { note, source },
-			});
-			if (ctx.isIdle()) {
-				pi.sendUserMessage(note);
-			} else {
-				pi.sendUserMessage(note, { deliverAs: "followUp" });
-			}
-			await applyQuestUi(ctx, quest);
-			await emitNote(pi, ctx, "Planning follow-up sent to the active quest.");
-			return quest;
+	async function openQuestControl(ctx: ExtensionContext, quest: QuestState) {
+		if (!ctx.hasUI) {
+			await emitNote(pi, ctx, summarizeQuest(quest, currentWorkflows, liveRun, questModeEnabled));
+			return;
+		}
+		if (!ctx.ui.custom) {
+			await emitNote(pi, ctx, summarizeQuest(quest, currentWorkflows, liveRun, questModeEnabled));
+			return;
 		}
 
-		if (quest.status === "completed") {
-			await saveQuest(quest);
-			await appendQuestEvent(ctx.cwd, quest.id, {
-				ts: Date.now(),
-				type: "quest_steer_saved",
-				data: { note, source },
-			});
-			await applyQuestUi(ctx, quest);
-			await emitNote(pi, ctx, "Active quest is already completed. The note was saved, but completed quests are not reopened.", "warning");
-			return quest;
-		}
+		let selectedFeature = 0;
+		let selectedRun = 0;
 
-		quest.pendingPlanRevisionRequests.push({
-			id: randomUUID(),
-			source: "steer",
-			note,
-			createdAt: Date.now(),
+		await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+			let closed = false;
+			const interval = setInterval(() => {
+				void (async () => {
+					currentQuest = await loadActiveQuest(ctx.cwd);
+					currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
+					if (!currentQuest) return;
+					tui.requestRender();
+				})();
+			}, 1000);
+
+			const cleanup = () => {
+				if (closed) return;
+				closed = true;
+				clearInterval(interval);
+				persistDashboardTab();
+				done(undefined);
+			};
+
+			const component = {
+				render(width: number) {
+					const questForRender = currentQuest ?? quest;
+					const milestone = currentMilestone(questForRender);
+					const milestoneFeatures = milestone ? currentMilestoneFeatures(questForRender, milestone.id) : [];
+					const runs = questForRender.recentRuns.slice(0, 8);
+					const assertions = assertionCounts(questForRender);
+					const activeFeature = milestoneFeatures[selectedFeature] ?? milestoneFeatures[0];
+					const activeRun = runs[selectedRun] ?? runs[0];
+					const detailLines =
+						dashboardTab === "features" && activeFeature
+							? [
+									`Feature: ${activeFeature.title}`,
+									`Status: ${activeFeature.status}`,
+									`Description: ${activeFeature.description}`,
+									`Fulfills: ${activeFeature.fulfills.join(", ") || "none"}`,
+									`Handoff: ${activeFeature.handoff || "none"}`,
+								]
+							: activeRun
+								? [
+										`Run: ${activeRun.role}`,
+										`Summary: ${activeRun.summary}`,
+										`Phase: ${activeRun.phase}`,
+										`Tool: ${activeRun.latestToolName || "none"}`,
+										`Issues: ${activeRun.issues?.join("; ") || "none"}`,
+									]
+								: ["No detail selected."];
+					const lines = [
+						theme.bold(theme.fg("accent", `Quest Control · ${questForRender.plan?.title ?? questForRender.title}`)),
+						theme.fg("muted", `tab:${dashboardTab} · q close · tab switch · j/k move · r run/resume · p pause · a abort`),
+						"",
+						theme.bold("Summary"),
+						`status: ${questForRender.status}`,
+						`milestone: ${milestone ? `${milestone.title} [${milestone.status}]` : "none"}`,
+						`models: o=${modelLabel(currentOrDefaultModel(questForRender, "orchestrator"))} | w=${modelLabel(currentOrDefaultModel(questForRender, "worker"))} | v=${modelLabel(currentOrDefaultModel(questForRender, "validator"))}`,
+						`validation: ${assertions.passed}/${assertions.total} passed, ${assertions.failed} failed, ${assertions.limited} limited, ${readinessWarningCount(questForRender)} readiness warnings`,
+						"",
+						theme.bold("Features"),
+						...(milestoneFeatures.length > 0
+							? milestoneFeatures.map((feature, index) =>
+									`${dashboardTab === "features" && index === selectedFeature ? ">" : " "} [${feature.status}] ${feature.title}`,
+								)
+							: ["  none"]),
+						"",
+						theme.bold("Workers / Validators"),
+						...(runs.length > 0
+							? runs.map((run, index) =>
+									`${dashboardTab === "runs" && index === selectedRun ? ">" : " "} [${run.role}] ${truncate(run.summary, Math.max(20, width - 18))}`,
+								)
+							: ["  none"]),
+						"",
+						theme.bold("Detail"),
+						...detailLines,
+					];
+					return new Text(lines.join("\n"), 0, 0).render(width);
+				},
+				invalidate() {},
+				handleInput(data: string) {
+					if (matchesKey(data, Key.escape) || data === "q") {
+						cleanup();
+						return true;
+					}
+					if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
+						const nextIndex = (DASHBOARD_TABS.indexOf(dashboardTab) + 1) % DASHBOARD_TABS.length;
+						dashboardTab = DASHBOARD_TABS[nextIndex];
+						tui.requestRender();
+						return true;
+					}
+					if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+						const nextIndex = (DASHBOARD_TABS.indexOf(dashboardTab) - 1 + DASHBOARD_TABS.length) % DASHBOARD_TABS.length;
+						dashboardTab = DASHBOARD_TABS[nextIndex];
+						tui.requestRender();
+						return true;
+					}
+					const questForInput = currentQuest ?? quest;
+					const milestone = currentMilestone(questForInput);
+					const milestoneFeatures = milestone ? currentMilestoneFeatures(questForInput, milestone.id) : [];
+					const runs = questForInput.recentRuns.slice(0, 8);
+					if ((data === "j" || matchesKey(data, Key.down)) && dashboardTab === "features") {
+						selectedFeature = Math.min(milestoneFeatures.length - 1, selectedFeature + 1);
+						tui.requestRender();
+						return true;
+					}
+					if ((data === "k" || matchesKey(data, Key.up)) && dashboardTab === "features") {
+						selectedFeature = Math.max(0, selectedFeature - 1);
+						tui.requestRender();
+						return true;
+					}
+					if (data === "j" && dashboardTab === "runs") {
+						selectedRun = Math.min(runs.length - 1, selectedRun + 1);
+						tui.requestRender();
+						return true;
+					}
+					if (data === "k" && dashboardTab === "runs") {
+						selectedRun = Math.max(0, selectedRun - 1);
+						tui.requestRender();
+						return true;
+					}
+					if (data === "r") {
+						void handleQuestCommand(
+							questForInput.status === "proposal_ready" ? "accept" : questForInput.status === "paused" || questForInput.status === "blocked" ? "resume" : "",
+							ctx,
+						).then(() => tui.requestRender());
+						return true;
+					}
+					if (data === "p") {
+						void handleQuestCommand("pause", ctx).then(() => tui.requestRender());
+						return true;
+					}
+					if (data === "a" || data === "i") {
+						void handleQuestCommand("abort", ctx).then(() => tui.requestRender());
+						return true;
+					}
+					return false;
+				},
+			};
+			return component;
 		});
-
-		if (originalStatus === "running" || quest.activeRun) {
-			quest.lastSummary = "Queued a steering note for the remaining plan.";
-		} else if (originalStatus === "ready") {
-			quest.status = "paused";
-			quest.lastSummary = "Steering note saved. Apply the revision with /quest resume before accepting the quest.";
-		} else if (originalStatus === "paused") {
-			quest.lastSummary = "Steering note saved. The remaining plan will be revised on the next /quest resume.";
-		} else if (originalStatus === "aborted") {
-			quest.lastSummary = "Steering note saved. The remaining plan will be revised on the next /quest resume.";
-		}
-
-		await saveQuest(quest);
-		await appendQuestEvent(ctx.cwd, quest.id, {
-			ts: Date.now(),
-			type: "quest_steer",
-			data: { note, source },
-		});
-		await applyQuestUi(ctx, quest);
-
-		if (originalStatus === "running" || quest.activeRun) {
-			await emitNote(pi, ctx, "Steering note queued for the remaining plan. Use /quest abort if you need to interrupt the active run.", "warning");
-		} else if (originalStatus === "ready") {
-			await emitNote(pi, ctx, "Steering note saved. Use /quest resume to revise the remaining plan before accepting the quest.");
-		} else {
-			await emitNote(pi, ctx, "Steering note saved. The remaining plan will be revised on the next /quest resume.");
-		}
-		return quest;
 	}
 
 	async function showQuestList(ctx: ExtensionContext) {
@@ -465,68 +600,66 @@ export default function questExtension(pi: ExtensionAPI) {
 		currentQuest = await loadActiveQuest(ctx.cwd);
 		const activeQuestId = currentQuest?.id ?? null;
 		if (quests.length === 0) {
+			await emitNote(pi, ctx, "No quests found for this repo. Use `/quest new <goal>` to create one.");
+			await applyQuestUi(ctx, currentQuest);
+			return;
+		}
+		if (!ctx.hasUI) {
 			await emitNote(
 				pi,
 				ctx,
-				`No quests found for this repo.
-
-- Use /enter-quest for interactive planning
-- Use /quest new <goal> for explicit creation`,
+				`Project quests:\n${quests.map((quest) => `- ${quest.id === activeQuestId ? "*" : " "} ${quest.title} · ${quest.status}`).join("\n")}`,
 			);
-			await applyQuestUi(ctx, currentQuest);
 			return;
 		}
-
-		if (!ctx.hasUI) {
-			await emitNote(pi, ctx, `Project quests:\n${questListLines(quests, activeQuestId).map((line) => `- ${line}`).join("\n")}`);
-			await applyQuestUi(ctx, currentQuest);
-			return;
-		}
-
-		const labels = quests.map((quest) => {
-			const marker = quest.id === activeQuestId ? "* " : "";
-			return `${marker}${quest.title} · ${quest.status} · ${quest.id}`;
-		});
+		const labels = quests.map((quest) => `${quest.id === activeQuestId ? "* " : ""}${quest.title} · ${quest.status} · ${quest.id}`);
 		const selected = await ctx.ui.select("Project quests", labels);
-		if (!selected) {
-			await applyQuestUi(ctx, currentQuest);
-			return;
-		}
+		if (!selected) return;
 		const selectedQuest = quests[labels.indexOf(selected)];
-		if (!selectedQuest) {
-			await applyQuestUi(ctx, currentQuest);
-			return;
-		}
-
+		if (!selectedQuest) return;
 		currentQuest = await switchActiveQuest(ctx.cwd, selectedQuest.id);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
 		await applyQuestUi(ctx, currentQuest);
-		await emitNote(pi, ctx, `Active quest set to "${selectedQuest.title}". Use /quest to inspect it.`);
+		await emitNote(pi, ctx, `Active quest set to "${selectedQuest.title}".`);
 	}
 
-	async function markPlanReady(ctx: ExtensionContext, quest: QuestState, text: string) {
-		const parsed = parseQuestPlanText(text);
-		if (!parsed) return;
-		if (quest.planHash === parsed.hash) return;
+	async function queueSteeringNote(ctx: ExtensionContext, quest: QuestState, note: string, source: "command" | "quest-mode"): Promise<QuestState> {
+		const originalStatus = quest.status;
+		quest.steeringNotes.push(note);
+		quest.pendingPlanRevisionRequests.push({
+			id: randomUUID(),
+			source: "steer",
+			note,
+			createdAt: Date.now(),
+		});
+		if (originalStatus === "running" || quest.activeRun) {
+			quest.lastSummary = "Queued a steering note for the remaining plan.";
+		} else if (originalStatus === "blocked" || originalStatus === "paused") {
+			quest.lastSummary = "Steering note saved. The remaining plan will be revised on the next /quest resume.";
+		}
+		await saveQuest(quest);
+		await appendQuestEvent(ctx.cwd, quest.id, { ts: Date.now(), type: "quest_steer", data: { note, source } });
+		await applyQuestUi(ctx, quest);
+		await emitNote(
+			pi,
+			ctx,
+			originalStatus === "running" || quest.activeRun
+				? "Steering note queued for the remaining plan."
+				: "Steering note saved. Use `/quest resume` to revise the remaining plan.",
+		);
+		return quest;
+	}
 
+	async function markPlanReadyFromText(ctx: ExtensionContext, quest: QuestState, text: string) {
+		const parsed = parseQuestPlanText(text);
+		if (!parsed || quest.planHash === parsed.hash) return;
 		quest.plan = parsed.plan;
 		quest.planHash = parsed.hash;
 		quest.title = parsed.plan.title;
-		quest.status = "ready";
-		quest.lastSummary = `${parsed.plan.summary} Review the proposal and validation contract, then use /quest accept.`;
-		quest.lastError = undefined;
-		quest.pendingPlanRevisionRequests = [];
-		quest.planRevisions = [
-			{
-				id: randomUUID(),
-				source: "initial" as const,
-				summary: "Initial quest proposal captured.",
-				hash: parsed.hash,
-				createdAt: Date.now(),
-				requestIds: [],
-			},
-			...quest.planRevisions,
-		].slice(0, 12);
+		synthesizeAssertionsForQuestPlan(quest);
+		quest.plan.humanQaChecklist = humanQaChecklist(quest);
+		quest.status = "proposal_ready";
+		quest.lastSummary = `${parsed.plan.summary} Review the proposal and use /quest accept when ready.`;
 		await saveQuest(quest);
 		await appendQuestEvent(quest.cwd, quest.id, {
 			ts: Date.now(),
@@ -534,23 +667,17 @@ export default function questExtension(pi: ExtensionAPI) {
 			data: {
 				featureCount: parsed.plan.features.length,
 				milestoneCount: parsed.plan.milestones.length,
-				validationCriteria: parsed.plan.validationContract.criteria.length,
-				weakValidationWarnings: parsed.plan.validationContract.weakValidationWarnings.length,
+				assertionCount: quest.validationState?.assertions.length ?? 0,
 			},
 		});
 		liveRun = null;
 		planningEvents = [];
 		await applyQuestUi(ctx, quest);
-		await emitNote(
-			pi,
-			ctx,
-			`Quest proposal captured: ${parsed.plan.features.length} feature(s), ${parsed.plan.milestones.length} milestone(s), ${parsed.plan.validationContract.criteria.length} validation check(s). Review with /quest, then use /quest accept.`,
-		);
+		await emitNote(pi, ctx, `Quest proposal captured. Review it with \`/quest\`, then use \`/quest accept\`.`);
 	}
 
 	async function applyPendingPlanRevision(ctx: ExtensionContext, quest: QuestState): Promise<QuestState> {
 		if (!quest.plan || quest.pendingPlanRevisionRequests.length === 0) return quest;
-
 		const requests = [...quest.pendingPlanRevisionRequests];
 		liveRun = createLiveRunSnapshot("orchestrator", { milestoneId: currentMilestone(quest)?.id }, "replanning");
 		await persistActiveRun(ctx, quest, {
@@ -560,7 +687,6 @@ export default function questExtension(pi: ExtensionAPI) {
 			phase: "replanning",
 			startedAt: Date.now(),
 		});
-
 		const { run, revisedPlan } = await executePlanRevision(
 			quest,
 			requests,
@@ -575,7 +701,6 @@ export default function questExtension(pi: ExtensionAPI) {
 				await applyQuestUi(ctx, quest);
 			},
 			async (pid) => {
-				if (quest.activeRun?.pid === pid) return;
 				if (quest.activeRun) {
 					quest.activeRun.pid = pid;
 					await saveQuest(quest);
@@ -586,258 +711,62 @@ export default function questExtension(pi: ExtensionAPI) {
 		quest.recentRuns = trimRecentRuns([run, ...quest.recentRuns]);
 		liveRun = null;
 		await persistLearnedWorkflows(run);
-		const persistedQuest = await refreshCurrentQuest(ctx.cwd);
-		if (!persistedQuest) {
-			await applyQuestUi(ctx, null);
-			return quest;
-		}
-		quest = persistedQuest;
 		quest.activeRun = undefined;
-
-		if (quest.status === "aborted") {
-			await saveQuest(quest);
-			await applyQuestUi(ctx, quest);
-			await emitNote(pi, ctx, "Quest abort acknowledged. Use /quest resume to continue unfinished work.", "warning");
-			return quest;
-		}
-
 		if (!run.ok || !revisedPlan) {
-			quest.status = "paused";
+			quest.status = "blocked";
 			quest.lastError = run.summary;
 			quest.lastSummary = "Plan revision failed. Review the quest and try again.";
 			await saveQuest(quest);
-			await appendQuestEvent(quest.cwd, quest.id, {
-				ts: Date.now(),
-				type: "quest_plan_revision_failed",
-				data: { summary: run.summary },
-			});
-			await applyQuestUi(ctx, quest);
-			await emitNote(pi, ctx, `Quest replan failed. ${run.summary}`, "warning");
-			return quest;
-		}
-
-		const existingPlan = quest.plan;
-		if (!existingPlan) {
-			quest.status = "paused";
-			quest.lastError = "Quest plan disappeared before replanning could finish.";
-			quest.lastSummary = "Quest replan could not continue because the current plan was missing.";
-			await saveQuest(quest);
 			await applyQuestUi(ctx, quest);
 			return quest;
 		}
-
-		const mergedPlan = mergeRemainingPlan(existingPlan, revisedPlan);
-		const hash = createHash("sha1").update(JSON.stringify(mergedPlan)).digest("hex");
+		const mergedPlan = mergeRemainingPlan(quest.plan, revisedPlan);
 		quest.plan = mergedPlan;
-		quest.planHash = hash;
+		quest.planHash = randomUUID();
+		synthesizeAssertionsForQuestPlan(quest);
 		quest.pendingPlanRevisionRequests = [];
-		const revisionSource: "validator" | "steer" = requests.some((request) => request.source === "validator") ? "validator" : "steer";
-		quest.planRevisions = [
-			{
-				id: randomUUID(),
-				source: revisionSource,
-				summary: "Revised the remaining quest plan.",
-				hash,
-				createdAt: Date.now(),
-				requestIds: requests.map((request) => request.id),
-			},
-			...quest.planRevisions,
-		].slice(0, 12);
-		quest.lastSummary = "Revised the remaining quest plan and validation contract.";
-		quest.lastError = undefined;
+		quest.lastSummary = "Remaining plan revised.";
 		await saveQuest(quest);
-		await appendQuestEvent(quest.cwd, quest.id, {
-			ts: Date.now(),
-			type: "quest_plan_revised",
-			data: {
-				requestCount: requests.length,
-				featureCount: quest.plan.features.length,
-				milestoneCount: quest.plan.milestones.length,
-			},
-		});
+		await appendQuestEvent(quest.cwd, quest.id, { ts: Date.now(), type: "quest_plan_revised", data: { requestCount: requests.length } });
 		await applyQuestUi(ctx, quest);
-		await emitNote(pi, ctx, "Revised the remaining quest plan. Resuming execution.");
 		return quest;
 	}
 
-	async function completeQuest(ctx: ExtensionContext, quest: QuestState) {
+	async function completeQuest(ctx: ExtensionContext, quest: QuestState): Promise<QuestState> {
 		quest.status = "completed";
-		quest.completedAt = Date.now();
-		quest.humanQaStatus = "pending";
 		quest.shipReadiness = "validated_waiting_for_human_qa";
-		quest.activeRun = undefined;
-		quest.lastSummary = "Quest validated successfully. Human QA is still required before shipping. Use /quest approve after review.";
-		quest.lastError = undefined;
+		quest.humanQaStatus = "pending";
+		quest.completedAt = Date.now();
+		quest.lastSummary = `Quest completed. Human QA is still required before shipping.\n${humanQaChecklist(quest).map((item) => `- ${item}`).join("\n")}`;
 		await saveQuest(quest);
 		await appendQuestEvent(quest.cwd, quest.id, { ts: Date.now(), type: "quest_completed" });
 		await applyQuestUi(ctx, quest);
-		await emitNote(pi, ctx, `Quest "${quest.plan?.title ?? quest.title}" completed. Human QA is still required before shipping. Use /quest approve after review.`);
+		await emitNote(pi, ctx, `Quest "${quest.plan?.title ?? quest.title}" completed. Human QA is still required before shipping.`);
 		return quest;
 	}
 
-	async function approveQuest(ctx: ExtensionContext, quest: QuestState) {
-		if (quest.status !== "completed" || quest.shipReadiness !== "validated_waiting_for_human_qa") {
-			await emitNote(pi, ctx, "Quest is not waiting on human QA approval.", "warning");
-			return;
-		}
-		if (quest.humanQaStatus === "approved") {
-			await emitNote(pi, ctx, `Human QA is already approved for "${quest.plan?.title ?? quest.title}".`);
-			return;
-		}
-
-		quest.humanQaStatus = "approved";
-		quest.shipReadiness = "human_qa_complete";
-		quest.lastSummary = "Human QA approved. The quest is now marked ready to ship.";
-		quest.lastError = undefined;
-		await saveQuest(quest);
-		await appendQuestEvent(quest.cwd, quest.id, { ts: Date.now(), type: "quest_human_qa_approved" });
-		await applyQuestUi(ctx, quest);
-		await emitNote(pi, ctx, `Human QA approved for "${quest.plan?.title ?? quest.title}". The quest is now marked ready to ship.`);
-	}
-
-	async function runQuestMilestone(ctx: ExtensionContext, quest: QuestState): Promise<QuestState> {
-		if (!quest.plan) {
-			await emitNote(pi, ctx, "Quest has no approved proposal yet.", "warning");
-			return quest;
-		}
-
-		if (quest.pendingPlanRevisionRequests.length > 0) {
-			quest = await applyPendingPlanRevision(ctx, quest);
-			if (quest.pendingPlanRevisionRequests.length > 0) return quest;
-		}
-
-		const milestone = currentMilestone(quest);
-		if (!milestone) return completeQuest(ctx, quest);
-
-		quest.status = "running";
-		milestone.status = "running";
-		if (!quest.startedAt) quest.startedAt = Date.now();
-		await saveQuest(quest);
-		await appendQuestEvent(quest.cwd, quest.id, {
-			ts: Date.now(),
-			type: "milestone_started",
-			data: { milestoneId: milestone.id, title: milestone.title },
-		});
-		await applyQuestUi(ctx, quest);
-
-		while (true) {
-			const feature = nextPendingFeature(quest, milestone.id);
-			if (!feature) break;
-
-			feature.status = "running";
-			quest.lastError = undefined;
-			liveRun = createLiveRunSnapshot("worker", { featureId: feature.id, milestoneId: milestone.id });
-			await persistActiveRun(ctx, quest, {
-				role: "worker",
-				kind: "feature",
-				featureId: feature.id,
-				milestoneId: milestone.id,
-				phase: liveRun.phase,
-				startedAt: Date.now(),
-			});
-
-			const run = await executeFeatureWorker(
-				quest,
-				feature,
-				milestone,
-				currentOrDefaultModel(quest, "worker"),
-				currentWorkflows,
-				async (snapshot) => {
-					liveRun = snapshot;
-					if (quest.activeRun && quest.activeRun.phase !== snapshot.phase) {
-						quest.activeRun.phase = snapshot.phase;
-						await saveQuest(quest);
-					}
-					await applyQuestUi(ctx, quest);
-				},
-				async (pid) => {
-					if (quest.activeRun?.pid === pid) return;
-					if (quest.activeRun) {
-						quest.activeRun.pid = pid;
-						await saveQuest(quest);
-					}
-				},
-			);
-			liveRun = null;
-			await writeWorkerRun(quest.cwd, quest.id, run);
-			await persistLearnedWorkflows(run);
-			const persistedQuest = await refreshCurrentQuest(ctx.cwd);
-			if (!persistedQuest) {
-				await applyQuestUi(ctx, null);
-				return quest;
-			}
-			quest = persistedQuest;
-			quest.recentRuns = trimRecentRuns([run, ...quest.recentRuns]);
-			quest.activeRun = undefined;
-
-			if (run.aborted && quest.status !== "aborted") {
-				markQuestAborted(quest);
-			}
-
-			if (quest.status === "aborted") {
-				await saveQuest(quest);
-				await appendQuestEvent(quest.cwd, quest.id, {
-					ts: Date.now(),
-					type: "quest_aborted",
-					data: { summary: quest.lastInterruption?.summary ?? run.summary },
-				});
-				await applyQuestUi(ctx, quest);
-				await emitNote(pi, ctx, "Quest abort acknowledged. Use /quest resume to continue the remaining work.", "warning");
-				return quest;
-			}
-
-			if (!run.ok) {
-				const activeFeature = quest.plan?.features.find((item) => item.id === feature.id);
-				if (activeFeature) {
-					activeFeature.status = "failed";
-					activeFeature.lastError = run.stderr || run.summary;
-				}
-				quest.status = "failed";
-				quest.shipReadiness = "not_ready";
-				quest.lastError = run.summary;
-				quest.lastSummary = `Feature failed: ${feature.title}`;
-				await saveQuest(quest);
-				await appendQuestEvent(quest.cwd, quest.id, {
-					ts: Date.now(),
-					type: "feature_failed",
-					data: { featureId: feature.id, title: feature.title, summary: run.summary },
-				});
-				await applyQuestUi(ctx, quest);
-				await emitNote(pi, ctx, `Quest failed on feature "${feature.title}". ${run.summary}`, "error");
-				return quest;
-			}
-
-			const completedFeature = quest.plan?.features.find((item) => item.id === feature.id);
-			if (completedFeature) {
-				completedFeature.status = "completed";
-				completedFeature.lastRunSummary = run.summary;
-				completedFeature.lastError = undefined;
-			}
-			quest.lastSummary = `Completed feature: ${feature.title}`;
-			await saveQuest(quest);
-			await appendQuestEvent(quest.cwd, quest.id, {
-				ts: Date.now(),
-				type: "feature_completed",
-				data: { featureId: feature.id, title: feature.title, summary: run.summary, tool: run.latestToolName },
-			});
-			await applyQuestUi(ctx, quest);
-		}
-
-		liveRun = createLiveRunSnapshot("validator", { milestoneId: milestone.id }, "validating");
+	async function runValidationPass(
+		ctx: ExtensionContext,
+		quest: QuestState,
+		milestone: QuestMilestone,
+		features: QuestFeature[],
+		pass: "code_review" | "user_surface",
+	): Promise<{ quest: QuestState; ok: boolean; issues: string[] }> {
+		liveRun = createLiveRunSnapshot("validator", { milestoneId: milestone.id }, pass);
 		await persistActiveRun(ctx, quest, {
 			role: "validator",
 			kind: "validator",
 			milestoneId: milestone.id,
-			phase: liveRun.phase,
+			phase: pass,
 			startedAt: Date.now(),
 		});
-
 		const validator = await executeValidator(
 			quest,
 			milestone,
-			currentMilestoneFeatures(quest, milestone.id),
+			features,
 			currentOrDefaultModel(quest, "validator"),
 			currentWorkflows,
+			pass,
 			async (snapshot) => {
 				liveRun = snapshot;
 				if (quest.activeRun && quest.activeRun.phase !== snapshot.phase) {
@@ -847,7 +776,6 @@ export default function questExtension(pi: ExtensionAPI) {
 				await applyQuestUi(ctx, quest);
 			},
 			async (pid) => {
-				if (quest.activeRun?.pid === pid) return;
 				if (quest.activeRun) {
 					quest.activeRun.pid = pid;
 					await saveQuest(quest);
@@ -856,102 +784,182 @@ export default function questExtension(pi: ExtensionAPI) {
 		);
 		liveRun = null;
 		await writeWorkerRun(quest.cwd, quest.id, validator);
-		await persistLearnedWorkflows(validator);
-		const persistedQuest = await refreshCurrentQuest(ctx.cwd);
-		if (!persistedQuest) {
-			await applyQuestUi(ctx, null);
-			return quest;
-		}
-		quest = persistedQuest;
 		quest.recentRuns = trimRecentRuns([validator, ...quest.recentRuns]);
+		await persistLearnedWorkflows(validator);
 		quest.activeRun = undefined;
-
-		if (validator.aborted && quest.status !== "aborted") {
-			markQuestAborted(quest);
-		}
-
-		if (quest.status === "aborted") {
-			await saveQuest(quest);
-			await appendQuestEvent(quest.cwd, quest.id, {
-				ts: Date.now(),
-				type: "quest_aborted",
-				data: { summary: quest.lastInterruption?.summary ?? validator.summary },
-			});
-			await applyQuestUi(ctx, quest);
-			await emitNote(pi, ctx, "Quest abort acknowledged. Use /quest resume to continue the remaining work.", "warning");
-			return quest;
-		}
-
+		const assertions = relevantAssertionsForPass(quest, milestone.id, pass);
 		if (!validator.ok || (validator.issues?.length ?? 0) > 0) {
-			const activeMilestone = quest.plan?.milestones.find((item) => item.id === milestone.id);
-			if (activeMilestone) activeMilestone.status = "blocked";
-			quest.status = "paused";
-			quest.shipReadiness = "not_ready";
-			quest.lastError = (validator.issues && validator.issues.length > 0 ? validator.issues.join("; ") : validator.summary) || validator.summary;
-			quest.lastSummary = `Validator blocked milestone "${milestone.title}".`;
-			quest.pendingPlanRevisionRequests.push({
-				id: randomUUID(),
-				source: "validator",
-				note: `Revisit remaining work after validator block on "${milestone.title}".`,
-				createdAt: Date.now(),
-				milestoneId: milestone.id,
-				issues: validator.issues,
-			});
-			await saveQuest(quest);
-			await appendQuestEvent(quest.cwd, quest.id, {
-				ts: Date.now(),
-				type: "milestone_blocked",
-				data: { milestoneId: milestone.id, title: milestone.title, summary: validator.summary, issues: validator.issues },
-			});
-			await applyQuestUi(ctx, quest);
-			await emitNote(
-				pi,
-				ctx,
-				`Milestone "${milestone.title}" is blocked. ${validator.summary} The remaining plan will be revised on the next /quest resume.`,
-				"warning",
-			);
-			return quest;
+			markAssertions(quest, assertions, pass === "user_surface" ? "limited" : "failed", validator.summary);
+			appendCorrectiveFeatures(quest, milestone, validator.issues && validator.issues.length > 0 ? validator.issues : [validator.summary], assertions);
+			return { quest, ok: false, issues: validator.issues ?? [validator.summary] };
 		}
-
-		const completedMilestone = quest.plan?.milestones.find((item) => item.id === milestone.id);
-		if (completedMilestone) completedMilestone.status = "completed";
-		quest.lastSummary = `Validated milestone: ${milestone.title}`;
-		const remaining = quest.plan?.milestones.some((item) => item.status !== "completed") ?? false;
-		quest.status = remaining ? "paused" : "completed";
-		quest.shipReadiness = remaining ? "not_ready" : "validated_waiting_for_human_qa";
-		if (!remaining) {
-			quest.completedAt = Date.now();
-			quest.humanQaStatus = "pending";
-			quest.lastSummary = `Validated milestone: ${milestone.title}. Human QA is still required before shipping. Use /quest approve after review.`;
-		}
-		await saveQuest(quest);
-		await appendQuestEvent(quest.cwd, quest.id, {
-			ts: Date.now(),
-			type: "milestone_completed",
-			data: { milestoneId: milestone.id, title: milestone.title, summary: validator.summary },
-		});
-		await applyQuestUi(ctx, quest);
-			await emitNote(
-				pi,
-				ctx,
-				remaining
-					? `Milestone "${milestone.title}" completed. Use /quest resume for the next milestone.`
-					: `Quest "${quest.plan?.title ?? quest.title}" validated. Human QA is still required before shipping. Use /quest approve after review.`,
-			);
-		return quest;
+		markAssertions(quest, assertions, "passed", validator.summary);
+		return { quest, ok: true, issues: [] };
 	}
 
-	pi.registerMessageRenderer(CUSTOM_MESSAGE_TYPE, (message, _context, theme) => {
-		return new Text(theme.fg("accent", "[quest] ") + String(message.content), 0, 0);
-	});
+	async function runQuest(ctx: ExtensionContext, quest: QuestState): Promise<QuestState> {
+		if (!quest.plan) {
+			await emitNote(pi, ctx, "Quest has no approved proposal yet.", "warning");
+			return quest;
+		}
+		if (quest.pendingPlanRevisionRequests.length > 0) {
+			quest = await applyPendingPlanRevision(ctx, quest);
+		}
+		if (quest.status === "aborted") return quest;
 
-	const handleQuestCommand = async (args: string, ctx: ExtensionContext) => {
+		while (true) {
+			const milestone = currentMilestone(quest);
+			if (!milestone) return completeQuest(ctx, quest);
+			quest.status = "running";
+			milestone.status = "running";
+			if (!quest.startedAt) quest.startedAt = Date.now();
+			await saveQuest(quest);
+			await appendQuestEvent(quest.cwd, quest.id, { ts: Date.now(), type: "milestone_started", data: { milestoneId: milestone.id, title: milestone.title } });
+			await applyQuestUi(ctx, quest);
+
+			while (true) {
+				const feature = nextPendingFeature(quest, milestone.id);
+				if (!feature) break;
+
+				feature.status = "running";
+				quest.lastError = undefined;
+				liveRun = createLiveRunSnapshot("worker", { featureId: feature.id, milestoneId: milestone.id });
+				await persistActiveRun(ctx, quest, {
+					role: "worker",
+					kind: "feature",
+					featureId: feature.id,
+					milestoneId: milestone.id,
+					phase: liveRun.phase,
+					startedAt: Date.now(),
+				});
+				const run = await executeFeatureWorker(
+					quest,
+					feature,
+					milestone,
+					currentOrDefaultModel(quest, "worker"),
+					currentWorkflows,
+					async (snapshot) => {
+						liveRun = snapshot;
+						if (quest.activeRun && quest.activeRun.phase !== snapshot.phase) {
+							quest.activeRun.phase = snapshot.phase;
+							await saveQuest(quest);
+						}
+						await applyQuestUi(ctx, quest);
+					},
+					async (pid) => {
+						if (quest.activeRun) {
+							quest.activeRun.pid = pid;
+							await saveQuest(quest);
+						}
+					},
+				);
+				liveRun = null;
+				await writeWorkerRun(quest.cwd, quest.id, run);
+				quest.recentRuns = trimRecentRuns([run, ...quest.recentRuns]);
+				await persistLearnedWorkflows(run);
+				quest.activeRun = undefined;
+
+				if (run.aborted) {
+					markQuestAborted(quest);
+				}
+				if ((quest.status as string) === "aborted") {
+					await saveQuest(quest);
+					await applyQuestUi(ctx, quest);
+					return quest;
+				}
+				if (!run.ok) {
+					feature.status = "blocked";
+					feature.lastError = run.stderr || run.summary;
+					milestone.status = "blocked";
+					quest.status = "blocked";
+					quest.lastError = run.summary;
+					quest.lastSummary = `Feature blocked: ${feature.title}`;
+					await saveQuest(quest);
+					await appendQuestEvent(quest.cwd, quest.id, {
+						ts: Date.now(),
+						type: "feature_blocked",
+						data: { featureId: feature.id, title: feature.title, summary: run.summary },
+					});
+					await applyQuestUi(ctx, quest);
+					await emitNote(pi, ctx, `Quest blocked on feature "${feature.title}". ${run.summary}`, "warning");
+					return quest;
+				}
+
+				feature.status = "completed";
+				feature.lastRunSummary = run.summary;
+				feature.lastError = undefined;
+				quest.lastSummary = `Completed feature: ${feature.title}`;
+				await saveQuest(quest);
+				await appendQuestEvent(quest.cwd, quest.id, {
+					ts: Date.now(),
+					type: "feature_completed",
+					data: { featureId: feature.id, title: feature.title, summary: run.summary },
+				});
+				await applyQuestUi(ctx, quest);
+			}
+
+			const features = currentMilestoneFeatures(quest, milestone.id);
+			const codePass = await runValidationPass(ctx, quest, milestone, features, "code_review");
+			quest = codePass.quest;
+			if (!codePass.ok) {
+				milestone.status = "blocked";
+				quest.status = "blocked";
+				quest.lastError = codePass.issues.join("; ");
+				quest.lastSummary = `Validator blocked milestone "${milestone.title}". Corrective features were appended before the next milestone can start.`;
+				quest.pendingPlanRevisionRequests.push({
+					id: randomUUID(),
+					source: "validator",
+					note: `Rework validator issues in "${milestone.title}" before continuing.`,
+					createdAt: Date.now(),
+					milestoneId: milestone.id,
+					issues: codePass.issues,
+				});
+				await saveQuest(quest);
+				await applyQuestUi(ctx, quest);
+				await emitNote(pi, ctx, `Milestone "${milestone.title}" is blocked after code review.`, "warning");
+				return quest;
+			}
+
+			const userPass = await runValidationPass(ctx, quest, milestone, features, "user_surface");
+			quest = userPass.quest;
+			if (!userPass.ok) {
+				milestone.status = "blocked";
+				quest.status = "blocked";
+				quest.lastError = userPass.issues.join("; ");
+				quest.lastSummary = `User-surface validation blocked milestone "${milestone.title}". Corrective features were appended before the next milestone can start.`;
+				quest.pendingPlanRevisionRequests.push({
+					id: randomUUID(),
+					source: "validator",
+					note: `Resolve user-surface validation issues in "${milestone.title}" before continuing.`,
+					createdAt: Date.now(),
+					milestoneId: milestone.id,
+					issues: userPass.issues,
+				});
+				await saveQuest(quest);
+				await applyQuestUi(ctx, quest);
+				await emitNote(pi, ctx, `Milestone "${milestone.title}" is blocked after user-surface validation.`, "warning");
+				return quest;
+			}
+
+			milestone.status = "completed";
+			quest.lastSummary = `Validated milestone: ${milestone.title}`;
+			await saveQuest(quest);
+			await appendQuestEvent(quest.cwd, quest.id, { ts: Date.now(), type: "milestone_completed", data: { milestoneId: milestone.id, title: milestone.title } });
+			await applyQuestUi(ctx, quest);
+		}
+	}
+
+	async function handleQuestCommand(args: string, ctx: ExtensionContext) {
 		const trimmed = args.trim();
 		currentQuest = await loadActiveQuest(ctx.cwd);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
 
 		if (!trimmed) {
-			await showStatus(ctx);
+			if (!currentQuest) {
+				await emitNote(pi, ctx, `No active quest for this repo.\n\n- Quest mode: ${questModeEnabled ? "on" : "off"}\n- Use /quest new <goal> to create one\n- Use /quests to browse existing quests`);
+				return;
+			}
+			await openQuestControl(ctx, currentQuest);
 			return;
 		}
 
@@ -964,19 +972,13 @@ export default function questExtension(pi: ExtensionAPI) {
 					await emitNote(pi, ctx, "Usage: /quest new <goal>", "warning");
 					return;
 				}
-				if (currentQuest && !questIsTerminal(currentQuest)) {
-					await emitNote(pi, ctx, "There is already an active non-terminal quest in this repo. Use /quest to inspect it or /quests to switch quests.", "warning");
+				if (currentQuest && !["completed", "aborted"].includes(currentQuest.status)) {
+					await emitNote(pi, ctx, "There is already an active non-terminal quest in this repo. Use /quest to inspect it or /quests to switch.", "warning");
 					return;
 				}
-				currentQuest = await createPlanningQuest(ctx, remainder, { triggerPlanningTurn: ctx.hasUI });
-				if (ctx.hasUI) await setQuestMode(ctx, true);
-				await emitNote(pi, ctx, `Quest created: ${remainder}`);
-				if (!ctx.hasUI) {
-					await emitNote(pi, ctx, "Quest created safely in non-interactive mode. Run another prompt in this repo to continue planning.");
-					return;
-				}
+				currentQuest = await createPlanningQuest(ctx, remainder);
 				planningTurnActive = true;
-				const prompt = questPlanningPrompt(remainder);
+				const prompt = `Let's plan a quest for this repository.\n\nGoal: ${remainder}\n\nAsk clarifying questions if needed. Use the quest tools to write the proposal when you are ready.`;
 				if (ctx.isIdle()) {
 					pi.sendUserMessage(prompt);
 				} else {
@@ -985,87 +987,41 @@ export default function questExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			case "enter": {
+				await setQuestMode(ctx, true);
+				await emitNote(pi, ctx, "Quest mode enabled.");
+				return;
+			}
+
+			case "exit": {
+				await setQuestMode(ctx, false);
+				await emitNote(pi, ctx, "Quest mode disabled.");
+				return;
+			}
+
 			case "accept": {
-				if (!currentQuest) {
-					await emitNote(pi, ctx, "No active quest. Use /enter-quest or /quest new <goal> to create one.", "warning");
+				if (!(await ensureCurrentQuest(ctx))) return;
+				if (!currentQuest || currentQuest.status !== "proposal_ready") {
+					await emitNote(pi, ctx, "Use /quest accept only after the quest proposal reaches proposal_ready.", "warning");
 					return;
 				}
-				if (currentQuest.status === "running" || currentQuest.activeRun) {
-					await emitNote(pi, ctx, "Quest is already running. Use /quest abort if you need to interrupt the active run.", "warning");
+				if (!proposalReady(currentQuest)) {
+					await emitNote(pi, ctx, "The quest proposal is incomplete. Ensure proposal, features, validation, and readiness artifacts are all captured first.", "warning");
 					return;
 				}
-				if (!currentQuest.plan || currentQuest.status !== "ready") {
-					await emitNote(pi, ctx, "Use /quest accept only after the quest proposal reaches ready.", "warning");
-					return;
-				}
-				currentQuest = await runQuestMilestone(ctx, currentQuest);
-				return;
-			}
-
-			case "resume": {
-				if (!currentQuest) {
-					await emitNote(pi, ctx, "No active quest. Use /enter-quest or /quest new <goal> to create one.", "warning");
-					return;
-				}
-				if (currentQuest.status === "running" || currentQuest.activeRun) {
-					await emitNote(pi, ctx, "Quest is already running. Use /quest abort if you need to interrupt the active run.", "warning");
-					return;
-				}
-				if (!currentQuest.plan) {
-					await emitNote(pi, ctx, "Quest has no approved proposal yet. Keep planning until the quest proposal reaches ready.", "warning");
-					return;
-				}
-				if (currentQuest.status === "completed") {
-					await emitNote(
-						pi,
-						ctx,
-						questAwaitingHumanQa(currentQuest)
-							? "Quest is already validated. Human QA is still required before shipping. Use /quest approve after review."
-							: "Quest is already completed and human QA has already been approved.",
-					);
-					return;
-				}
-				if (currentQuest.status !== "paused" && currentQuest.status !== "aborted") {
-					await emitNote(pi, ctx, "Use /quest resume only for paused or aborted quests.", "warning");
-					return;
-				}
-
-				if (currentQuest.status === "aborted") {
-					if (prepareQuestForResume(currentQuest)) {
-						await appendQuestEvent(ctx.cwd, currentQuest.id, {
-							ts: Date.now(),
-							type: "quest_resumed_after_abort",
-							data: {
-								summary: currentQuest.lastInterruption?.summary,
-							},
-						});
-					}
-				}
-
-				currentQuest = await runQuestMilestone(ctx, currentQuest);
-				return;
-			}
-
-			case "approve": {
-				if (!currentQuest) {
-					await emitNote(pi, ctx, "No active quest to approve.", "warning");
-					return;
-				}
-				await approveQuest(ctx, currentQuest);
+				currentQuest = await runQuest(ctx, currentQuest);
 				return;
 			}
 
 			case "pause": {
-				if (!currentQuest) {
-					await emitNote(pi, ctx, "No active quest to pause.", "warning");
+				if (!(await ensureCurrentQuest(ctx))) return;
+				if (!currentQuest) return;
+				if (currentQuest.activeRun) {
+					await emitNote(pi, ctx, "Quest is actively running. Use /quest abort to interrupt the active worker or validator.", "warning");
 					return;
 				}
-				if (currentQuest.status === "running" || currentQuest.activeRun) {
-					await emitNote(pi, ctx, "Quest is actively running. Use /quest abort to stop the active worker, validator, or replan run.", "warning");
-					return;
-				}
-				if (currentQuest.status === "planning") {
-					await emitNote(pi, ctx, "Quest planning is conversational. Use /exit-quest to leave quest mode or keep refining the proposal.", "warning");
+				if (currentQuest.status === "planning" || currentQuest.status === "proposal_ready") {
+					await emitNote(pi, ctx, "Planning is conversational. Use /quest exit to leave quest mode or keep refining the proposal.", "warning");
 					return;
 				}
 				currentQuest.status = "paused";
@@ -1076,20 +1032,33 @@ export default function questExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			case "abort": {
-				if (!currentQuest) {
-					await emitNote(pi, ctx, "No active quest to abort.", "warning");
+			case "resume": {
+				if (!(await ensureCurrentQuest(ctx))) return;
+				if (!currentQuest) return;
+				if (!currentQuest.plan) {
+					await emitNote(pi, ctx, "Quest has no approved proposal yet.", "warning");
 					return;
 				}
-				if (!currentQuest.activeRun) {
+				if (currentQuest.status === "aborted") {
+					prepareQuestForResume(currentQuest);
+				}
+				if (currentQuest.status !== "paused" && currentQuest.status !== "blocked" && currentQuest.status !== "aborted") {
+					await emitNote(pi, ctx, "Use /quest resume only for paused, blocked, or aborted quests.", "warning");
+					return;
+				}
+				currentQuest = await runQuest(ctx, currentQuest);
+				return;
+			}
+
+			case "abort": {
+				if (!(await ensureCurrentQuest(ctx))) return;
+				if (!currentQuest?.activeRun) {
 					await emitNote(pi, ctx, "Quest does not have an active worker, validator, or replan run to abort.", "warning");
 					return;
 				}
-
 				const activePid = currentQuest.activeRun.pid;
 				const summary = markQuestAborted(currentQuest);
 				let terminationSummary = "No active child PID was recorded.";
-
 				if (typeof activePid === "number") {
 					const termination = await terminateQuestProcess(activePid);
 					if (termination.signal) {
@@ -1100,161 +1069,393 @@ export default function questExtension(pi: ExtensionAPI) {
 						terminationSummary = `Quest child process ${activePid} was not running when abort was requested.`;
 					}
 				}
-
 				await saveQuest(currentQuest);
 				await appendQuestEvent(ctx.cwd, currentQuest.id, {
 					ts: Date.now(),
 					type: "quest_abort_requested",
-					data: {
-						summary,
-						pid: activePid,
-						termination: terminationSummary,
-					},
-				});
-				await appendQuestEvent(ctx.cwd, currentQuest.id, {
-					ts: Date.now(),
-					type: "quest_aborted",
-					data: {
-						summary: currentQuest.lastInterruption?.summary ?? summary,
-					},
+					data: { summary, pid: activePid, termination: terminationSummary },
 				});
 				await applyQuestUi(ctx, currentQuest);
 				await emitNote(pi, ctx, `${summary ?? "Quest abort requested."} ${terminationSummary}`.trim(), "warning");
 				return;
 			}
 
-			case "steer": {
-				if (!currentQuest) {
-					await emitNote(pi, ctx, "No active quest to steer.", "warning");
-					return;
-				}
-				if (!remainder) {
-					await emitNote(pi, ctx, "Usage: /quest steer <instruction>", "warning");
-					return;
-				}
-				currentQuest = await queueSteeringNote(ctx, currentQuest, remainder, "command");
-				return;
-			}
-
 			case "model": {
-				if (!currentQuest) {
-					await emitNote(pi, ctx, "No active quest.", "warning");
+				if (!(await ensureCurrentQuest(ctx))) return;
+				if (!currentQuest) return;
+				const [roleArg, ...specParts] = remainder.split(/\s+/);
+				const role = roleFromArg(roleArg || "");
+				if (!role || specParts.length === 0) {
+					await emitNote(pi, ctx, "Usage: /quest model <orchestrator|worker|validator> <provider/model[:thinking]>", "warning");
 					return;
 				}
-				const next = await chooseModelChoice(pi, ctx, currentQuest.defaultModel, currentQuest.status === "planning");
-				if (!next) return;
-				currentQuest.defaultModel = next;
-				await saveQuest(currentQuest);
-				await appendQuestEvent(ctx.cwd, currentQuest.id, {
-					ts: Date.now(),
-					type: "quest_default_model_changed",
-					data: { model: `${next.provider}/${next.model}`, thinkingLevel: next.thinkingLevel },
-				});
-				await applyQuestUi(ctx, currentQuest);
-				await emitNote(pi, ctx, `Quest default model set to ${modelLabel(next)}.`);
-				return;
-			}
-
-			case "role-model": {
-				if (!currentQuest) {
-					await emitNote(pi, ctx, "No active quest.", "warning");
+				const next = parseModelChoiceSpec(specParts.join(" "), currentOrDefaultModel(currentQuest, role));
+				if (!next) {
+					await emitNote(pi, ctx, "Invalid model spec. Expected provider/model[:thinking].", "warning");
 					return;
 				}
-				const role = roleFromArg(remainder);
-				if (!role) {
-					await emitNote(pi, ctx, "Usage: /quest role-model <orchestrator|worker|validator>", "warning");
-					return;
-				}
-				const next = await chooseModelChoice(
-					pi,
-					ctx,
-					currentQuest.roleModels[role] ?? currentQuest.defaultModel,
-					role === "orchestrator" && currentQuest.status === "planning",
-				);
-				if (!next) return;
 				currentQuest.roleModels[role] = next;
+				syncQuestConfig(currentQuest);
 				await saveQuest(currentQuest);
 				await appendQuestEvent(ctx.cwd, currentQuest.id, {
 					ts: Date.now(),
 					type: "quest_role_model_changed",
 					data: { role, model: `${next.provider}/${next.model}`, thinkingLevel: next.thinkingLevel },
 				});
+				if (role === "orchestrator" && currentQuest.status === "planning") {
+					const model = ctx.modelRegistry.find(next.provider, next.model);
+					if (model) {
+						const success = await pi.setModel(model);
+						if (success) pi.setThinkingLevel(next.thinkingLevel);
+					}
+				}
 				await applyQuestUi(ctx, currentQuest);
 				await emitNote(pi, ctx, `${role} model set to ${modelLabel(next)}.`);
 				return;
 			}
 
-			case "prune": {
-				const result = await pruneQuestStorage();
-				await emitNote(
-					pi,
-					ctx,
-					`Pruned quest runtime logs: ${result.prunedLogs} event log(s), ${result.deletedRuns} worker run file(s). Quest metadata, validation contracts, and learned workflows were kept.`,
-				);
-				return;
-			}
-
 			default: {
-				if (subcommand === "status") {
-					await emitNote(pi, ctx, "Use /quest to open Quest Control.", "warning");
-					return;
-				}
-				if (subcommand === "start") {
-					await emitNote(pi, ctx, "Use /quest accept to approve a ready quest proposal.", "warning");
-					return;
-				}
 				await emitNote(
 					pi,
 					ctx,
-					"Unknown /quest subcommand. Use /quest, /quest new <goal>, /quest accept, /quest resume, /quest abort, /quest approve, /quest model, /quest role-model <role>, or /quest prune.",
+					"Unknown /quest subcommand. Use /quest, /quest new <goal>, /quest enter, /quest exit, /quest accept, /quest pause, /quest resume, /quest abort, or /quest model <role> <provider/model[:thinking]>.",
 					"warning",
 				);
 			}
 		}
-	};
+	}
 
-	pi.registerCommand("enter-quest", {
-		description: "Enter quest mode for conversational planning and steering",
-		handler: async (_args, ctx) => {
-			currentQuest = await loadActiveQuest(ctx.cwd);
-			currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
-			await setQuestMode(ctx, true);
-			if (!currentQuest) {
-				await emitNote(pi, ctx, "Quest mode enabled. Type the goal in plain text to create a new quest.");
-				return;
-			}
-			if (currentQuest.status === "planning") {
-				await emitNote(pi, ctx, "Quest mode enabled. Continue planning in plain text.");
-				return;
-			}
-			if (currentQuest.status === "ready") {
-				await emitNote(pi, ctx, "Quest mode enabled. Plain text will queue revisions for the remaining plan. Use /quest accept when the proposal is ready.");
-				return;
-			}
-			if (currentQuest.status === "running") {
-				await emitNote(pi, ctx, "Quest mode enabled. Plain text will queue steering notes for the remaining plan. Use /quest abort for immediate interruption.");
-				return;
-			}
-			if (currentQuest.status === "completed") {
-				await emitNote(pi, ctx, "Quest mode enabled. Completed quests are not reopened by plain text. Use /quest new <goal> to create a new quest.");
-				return;
-			}
-			await emitNote(pi, ctx, "Quest mode enabled. Plain text will revise the remaining plan for the active quest.");
+	async function resolveQuestForTool(ctx: ExtensionContext, questId?: string): Promise<QuestState | null> {
+		if (questId) return loadQuest(ctx.cwd, questId);
+		return loadActiveQuest(ctx.cwd);
+	}
+
+	pi.registerMessageRenderer(CUSTOM_MESSAGE_TYPE, (message, _context, theme) => new Text(theme.fg("accent", "[quest] ") + String(message.content), 0, 0));
+
+	pi.registerTool({
+		name: "quest_set_proposal",
+		label: "quest_set_proposal",
+		description: "Persist the current quest proposal, milestones, risks, environment, and human QA checklist.",
+		promptSnippet: "Persist a quest proposal and milestone outline",
+		parameters: Type.Object({
+			questId: Type.Optional(Type.String()),
+			title: Type.String(),
+			summary: Type.String(),
+			risks: Type.Optional(Type.Array(Type.String())),
+			environment: Type.Optional(Type.Array(Type.String())),
+			humanQaChecklist: Type.Optional(Type.Array(Type.String())),
+			validationSummary: Type.Optional(Type.String()),
+			proposalMarkdown: Type.Optional(Type.String()),
+			milestones: Type.Array(
+				Type.Object({
+					id: Type.String(),
+					title: Type.String(),
+					description: Type.String(),
+					order: Type.Optional(Type.Number()),
+					successCriteria: Type.Optional(Type.Array(Type.String())),
+					validationPrompt: Type.Optional(Type.String()),
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const quest = await resolveQuestForTool(ctx, params.questId);
+			if (!quest) return { content: [{ type: "text", text: "No active quest found." }] };
+			quest.title = params.title;
+			quest.proposalMarkdown = params.proposalMarkdown;
+			quest.plan = {
+				title: params.title,
+				summary: params.summary,
+				goal: quest.goal,
+				risks: params.risks ?? quest.plan?.risks ?? [],
+				environment: params.environment ?? quest.plan?.environment ?? [],
+				services: quest.plan?.services ?? [],
+				validationSummary: params.validationSummary ?? quest.plan?.validationSummary,
+				humanQaChecklist: params.humanQaChecklist ?? quest.plan?.humanQaChecklist ?? ["Review the primary user flows manually before shipping."],
+				milestones: params.milestones.map((milestone: any, index: number) => ({
+					id: milestone.id,
+					order: milestone.order ?? index + 1,
+					title: milestone.title,
+					description: milestone.description,
+					successCriteria: milestone.successCriteria ?? [],
+					validationPrompt: milestone.validationPrompt,
+					status: quest.plan?.milestones.find((existing) => existing.id === milestone.id)?.status ?? "pending",
+				})),
+				features: quest.plan?.features ?? [],
+			};
+			await saveQuest(quest);
+			currentQuest = quest;
+			await applyQuestUi(ctx, quest);
+			return {
+				content: [{ type: "text", text: `Stored proposal for ${params.title} with ${params.milestones.length} milestone(s).` }],
+				details: { questId: quest.id, milestoneCount: params.milestones.length },
+			};
 		},
 	});
 
-	pi.registerCommand("exit-quest", {
-		description: "Exit quest mode and restore normal Pi input handling",
-		handler: async (_args, ctx) => {
-			await setQuestMode(ctx, false);
-			await emitNote(pi, ctx, "Quest mode disabled.");
+	pi.registerTool({
+		name: "quest_set_features",
+		label: "quest_set_features",
+		description: "Persist the ordered feature list for the active quest.",
+		promptSnippet: "Persist quest features and their assertion mapping",
+		parameters: Type.Object({
+			questId: Type.Optional(Type.String()),
+			replaceExisting: Type.Optional(Type.Boolean()),
+			features: Type.Array(
+				Type.Object({
+					id: Type.String(),
+					title: Type.String(),
+					description: Type.String(),
+					milestoneId: Type.String(),
+					order: Type.Optional(Type.Number()),
+					preconditions: Type.Optional(Type.Array(Type.String())),
+					fulfills: Type.Optional(Type.Array(Type.String())),
+					handoff: Type.Optional(Type.String()),
+					workerPrompt: Type.Optional(Type.String()),
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const quest = await resolveQuestForTool(ctx, params.questId);
+			if (!quest || !quest.plan) return { content: [{ type: "text", text: "No active quest proposal found." }] };
+			const nextFeatures = params.features.map((feature: any, index: number) => ({
+				id: feature.id,
+				order: feature.order ?? index + 1,
+				milestoneId: feature.milestoneId,
+				title: feature.title,
+				description: feature.description,
+				preconditions: feature.preconditions ?? [],
+				fulfills: feature.fulfills ?? [],
+				status: quest.plan?.features.find((existing) => existing.id === feature.id)?.status ?? "pending",
+				handoff: feature.handoff,
+				workerPrompt: feature.workerPrompt,
+			}));
+			if (params.replaceExisting !== false) {
+				quest.plan.features = nextFeatures;
+			} else {
+				const byId = new Map(quest.plan.features.map((feature) => [feature.id, feature]));
+				for (const feature of nextFeatures) byId.set(feature.id, feature);
+				quest.plan.features = [...byId.values()].sort((a, b) => a.order - b.order);
+			}
+			synthesizeAssertionsForQuestPlan(quest);
+			await saveQuest(quest);
+			currentQuest = quest;
+			await applyQuestUi(ctx, quest);
+			return {
+				content: [{ type: "text", text: `Stored ${nextFeatures.length} feature(s).` }],
+				details: { questId: quest.id, featureCount: quest.plan.features.length },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "quest_set_validation",
+		label: "quest_set_validation",
+		description: "Persist validation readiness and assertion state for the active quest.",
+		promptSnippet: "Persist quest validation readiness and assertions",
+		parameters: Type.Object({
+			questId: Type.Optional(Type.String()),
+			readiness: Type.Optional(
+				Type.Object({
+					summary: Type.String(),
+					checks: Type.Array(
+						Type.Object({
+							id: Type.String(),
+							surface: Type.String(),
+							description: Type.String(),
+							status: Type.Union([Type.Literal("supported"), Type.Literal("limited"), Type.Literal("unsupported")]),
+							commands: Type.Optional(Type.Array(Type.String())),
+							evidence: Type.Optional(Type.Array(Type.String())),
+							notes: Type.Optional(Type.String()),
+						}),
+					),
+				}),
+			),
+			assertions: Type.Optional(
+				Type.Array(
+					Type.Object({
+						id: Type.String(),
+						milestoneId: Type.String(),
+						description: Type.String(),
+						method: Type.Union([
+							Type.Literal("code_review"),
+							Type.Literal("procedure_review"),
+							Type.Literal("user_surface"),
+							Type.Literal("command"),
+							Type.Literal("read_only"),
+							Type.Literal("manual"),
+							Type.Literal("mixed"),
+						]),
+						criticality: Type.Union([Type.Literal("critical"), Type.Literal("important"), Type.Literal("informational")]),
+						status: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("passed"), Type.Literal("failed"), Type.Literal("limited")])),
+						evidence: Type.Optional(Type.Array(Type.String())),
+						featureIds: Type.Optional(Type.Array(Type.String())),
+						notes: Type.Optional(Type.String()),
+						commands: Type.Optional(Type.Array(Type.String())),
+					}),
+				),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const quest = await resolveQuestForTool(ctx, params.questId);
+			if (!quest) return { content: [{ type: "text", text: "No active quest found." }] };
+			if (params.readiness) {
+				quest.validationReadiness = {
+					summary: params.readiness.summary,
+					checks: params.readiness.checks.map((check: any) => ({
+						id: check.id,
+						surface: check.surface,
+						description: check.description,
+						status: check.status as ValidationSurfaceStatus,
+						commands: check.commands ?? [],
+						evidence: check.evidence ?? [],
+						notes: check.notes,
+					})),
+				};
+			}
+			if (params.assertions) {
+				quest.validationState = {
+					assertions: params.assertions.map((assertion: any) => ({
+						id: assertion.id,
+						milestoneId: assertion.milestoneId,
+						description: assertion.description,
+						method: assertion.method,
+						criticality: assertion.criticality,
+						status: assertion.status ?? "pending",
+						evidence: assertion.evidence ?? [],
+						featureIds: assertion.featureIds ?? [],
+						notes: assertion.notes,
+						commands: assertion.commands ?? [],
+					})),
+					updatedAt: Date.now(),
+				};
+			}
+			await saveQuest(quest);
+			currentQuest = quest;
+			await applyQuestUi(ctx, quest);
+			return {
+				content: [{ type: "text", text: `Stored validation data for ${quest.title}.` }],
+				details: {
+					questId: quest.id,
+					assertionCount: quest.validationState?.assertions.length ?? 0,
+					readinessCount: quest.validationReadiness?.checks.length ?? 0,
+				},
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "quest_set_services",
+		label: "quest_set_services",
+		description: "Persist service definitions and services.yaml content for the active quest.",
+		promptSnippet: "Persist quest services and runtime assumptions",
+		parameters: Type.Object({
+			questId: Type.Optional(Type.String()),
+			servicesYaml: Type.Optional(Type.String()),
+			environment: Type.Optional(Type.Array(Type.String())),
+			services: Type.Array(
+				Type.Object({
+					name: Type.String(),
+					purpose: Type.String(),
+					commands: Type.Array(Type.String()),
+					ports: Type.Optional(Type.Array(Type.Number())),
+					notes: Type.Optional(Type.Array(Type.String())),
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const quest = await resolveQuestForTool(ctx, params.questId);
+			if (!quest || !quest.plan) return { content: [{ type: "text", text: "No active quest proposal found." }] };
+			quest.plan.services = params.services.map((service: any) => ({
+				name: service.name,
+				purpose: service.purpose,
+				commands: service.commands,
+				ports: service.ports,
+				notes: service.notes,
+			}));
+			if (params.environment) quest.plan.environment = params.environment;
+			if (params.servicesYaml) quest.servicesYaml = params.servicesYaml;
+			await saveQuest(quest);
+			currentQuest = quest;
+			await applyQuestUi(ctx, quest);
+			return {
+				content: [{ type: "text", text: `Stored ${params.services.length} service definition(s).` }],
+				details: { questId: quest.id, serviceCount: params.services.length },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "quest_write_skill",
+		label: "quest_write_skill",
+		description: "Write a generated quest skill under the quest or shared skill directory.",
+		promptSnippet: "Write a quest-local or shared skill markdown file",
+		parameters: Type.Object({
+			questId: Type.Optional(Type.String()),
+			name: Type.String(),
+			markdown: Type.String(),
+			shared: Type.Optional(Type.Boolean()),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const quest = await resolveQuestForTool(ctx, params.questId);
+			if (!quest) return { content: [{ type: "text", text: "No active quest found." }] };
+			const paths = getQuestPaths(quest.cwd, quest.id);
+			const dir = params.shared ? paths.sharedSkillsDir : paths.skillsDir;
+			await mkdir(dir, { recursive: true });
+			const file = join(dir, `${params.name.replace(/[^a-zA-Z0-9._-]+/g, "-")}.md`);
+			await writeFile(file, `${params.markdown.trimEnd()}\n`, "utf-8");
+			return {
+				content: [{ type: "text", text: `Wrote skill ${params.name}.` }],
+				details: { questId: quest.id, file, shared: params.shared === true },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "quest_update_state",
+		label: "quest_update_state",
+		description: "Update high-level quest state after proposal planning or orchestration checkpoints.",
+		promptSnippet: "Update quest status or summary",
+		parameters: Type.Object({
+			questId: Type.Optional(Type.String()),
+			status: Type.Optional(
+				Type.Union([
+					Type.Literal("planning"),
+					Type.Literal("proposal_ready"),
+					Type.Literal("running"),
+					Type.Literal("paused"),
+					Type.Literal("blocked"),
+					Type.Literal("completed"),
+					Type.Literal("aborted"),
+				]),
+			),
+			lastSummary: Type.Optional(Type.String()),
+			lastError: Type.Optional(Type.String()),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const quest = await resolveQuestForTool(ctx, params.questId);
+			if (!quest) return { content: [{ type: "text", text: "No active quest found." }] };
+			if (params.status) {
+				if (params.status === "proposal_ready" && !proposalReady(quest)) {
+					return { content: [{ type: "text", text: "Quest cannot move to proposal_ready until proposal, features, validation, and readiness artifacts are present." }] };
+				}
+				quest.status = params.status;
+			}
+			if (params.lastSummary) quest.lastSummary = params.lastSummary;
+			if (params.lastError !== undefined) quest.lastError = params.lastError || undefined;
+			await saveQuest(quest);
+			currentQuest = quest;
+			await applyQuestUi(ctx, quest);
+			return {
+				content: [{ type: "text", text: `Updated quest state to ${quest.status}.` }],
+				details: { questId: quest.id, status: quest.status },
+			};
 		},
 	});
 
 	pi.registerCommand("quest", {
 		description: "Open Quest Control or operate on the active quest",
 		getArgumentCompletions: (prefix) => {
-			const options = ["new", "accept", "resume", "approve", "pause", "abort", "steer", "model", "role-model", "prune"];
+			const options = ["new", "enter", "exit", "accept", "pause", "resume", "abort", "model"];
 			return options.filter((item) => item.startsWith(prefix)).map((item) => ({ value: item, label: item }));
 		},
 		handler: handleQuestCommand,
@@ -1272,9 +1473,15 @@ export default function questExtension(pi: ExtensionAPI) {
 		const questModeEntry = entries
 			.filter((entry: { type: string; customType?: string }) => entry.type === "custom" && entry.customType === QUEST_MODE_ENTRY)
 			.pop() as { data?: { enabled?: boolean } } | undefined;
+		const questDashboardEntry = entries
+			.filter((entry: { type: string; customType?: string }) => entry.type === "custom" && entry.customType === QUEST_DASHBOARD_ENTRY)
+			.pop() as { data?: { tab?: DashboardTab } } | undefined;
 		questModeEnabled = questModeEntry?.data?.enabled === true;
+		dashboardTab = DASHBOARD_TABS.includes(questDashboardEntry?.data?.tab ?? "summary")
+			? (questDashboardEntry?.data?.tab as DashboardTab)
+			: "summary";
 		planningTurnActive = false;
-		await pruneQuestStorage();
+		await pruneQuestStorage(ctx.cwd);
 		await loadQuestForContext(ctx);
 	});
 
@@ -1289,25 +1496,27 @@ export default function questExtension(pi: ExtensionAPI) {
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
 
 		if (!currentQuest) {
-			currentQuest = await createPlanningQuest(ctx, trimmed, { triggerPlanningTurn: true });
-			await emitNote(pi, ctx, `Quest created: ${trimmed}`);
+			currentQuest = await createPlanningQuest(ctx, trimmed);
 			planningTurnActive = true;
-			return { action: "transform" as const, text: questPlanningPrompt(trimmed) };
+			return {
+				action: "transform" as const,
+				text: `Let's plan a quest for this repository.\n\nGoal: ${trimmed}\n\nAsk clarifying questions if needed. Use the quest tools to persist the proposal when you are ready.`,
+			};
 		}
 
-		if (currentQuest.status === "planning") {
+		if (currentQuest.status === "planning" || currentQuest.status === "proposal_ready") {
 			planningTurnActive = true;
 			await applyQuestUi(ctx, currentQuest);
 			return { action: "continue" as const };
 		}
 
-		if (currentQuest.status === "ready" || currentQuest.status === "paused" || currentQuest.status === "aborted" || currentQuest.status === "running") {
+		if (currentQuest.status === "running" || currentQuest.status === "paused" || currentQuest.status === "blocked") {
 			currentQuest = await queueSteeringNote(ctx, currentQuest, trimmed, "quest-mode");
 			return { action: "handled" as const };
 		}
 
-		if (currentQuest.status === "completed") {
-			await emitNote(pi, ctx, "Active quest is already completed. Use /quest new <goal> to create a new quest.", "warning");
+		if (currentQuest.status === "completed" || currentQuest.status === "aborted") {
+			await emitNote(pi, ctx, "Plain input is not captured for completed or aborted quests. Start or select another quest first.", "warning");
 			return { action: "handled" as const };
 		}
 
@@ -1318,7 +1527,7 @@ export default function questExtension(pi: ExtensionAPI) {
 		currentQuest = await loadActiveQuest(ctx.cwd);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
 		const planningAllowed = planningTurnActive || !ctx.hasUI;
-		if (!planningAllowed || !currentQuest || currentQuest.status !== "planning") return;
+		if (!planningAllowed || !currentQuest || (currentQuest.status !== "planning" && currentQuest.status !== "proposal_ready")) return;
 		planningEvents = [];
 		liveRun = createLiveRunSnapshot("orchestrator", {}, "planning");
 		await applyQuestUi(ctx, currentQuest);
@@ -1334,7 +1543,7 @@ export default function questExtension(pi: ExtensionAPI) {
 	const planningRuntimeEvent = async (event: any, ctx: ExtensionContext) => {
 		if (!planningTurnActive && ctx.hasUI) return;
 		currentQuest = await loadActiveQuest(ctx.cwd);
-		if (!currentQuest || currentQuest.status !== "planning") return;
+		if (!currentQuest || (currentQuest.status !== "planning" && currentQuest.status !== "proposal_ready")) return;
 		const next = applyAgentEventToSnapshot(liveRun ?? createLiveRunSnapshot("orchestrator", {}), event, 60, planningEvents);
 		liveRun = next.snapshot;
 		planningEvents = next.events;
@@ -1350,21 +1559,19 @@ export default function questExtension(pi: ExtensionAPI) {
 	pi.on("agent_end", async (event, ctx) => {
 		currentQuest = await loadActiveQuest(ctx.cwd);
 		const planningAllowed = planningTurnActive || !ctx.hasUI;
-		if (!planningAllowed || !currentQuest || currentQuest.status !== "planning") {
+		if (!planningAllowed || !currentQuest || (currentQuest.status !== "planning" && currentQuest.status !== "proposal_ready")) {
 			planningTurnActive = false;
 			return;
 		}
 		const next = applyAgentEventToSnapshot(liveRun ?? createLiveRunSnapshot("orchestrator", {}), event, 60, planningEvents);
 		liveRun = next.snapshot;
 		planningEvents = next.events;
-		const text = latestAssistantText(event.messages as any[]);
-		if (!text) {
-			liveRun = null;
-			planningTurnActive = false;
-			await applyQuestUi(ctx, currentQuest);
-			return;
+		const text = event.messages ? event.messages.map((msg: any) => msg?.content?.map?.((part: any) => part?.text || "").join("\n") || "").join("\n") : "";
+		if (text && currentQuest.status === "planning") {
+			await markPlanReadyFromText(ctx, currentQuest, text);
 		}
-		await markPlanReady(ctx, currentQuest, text);
+		liveRun = null;
 		planningTurnActive = false;
+		await applyQuestUi(ctx, currentQuest);
 	});
 }

@@ -76,14 +76,12 @@ function result(
 	};
 }
 
-async function withSandbox<T>(fn: (paths: { agentDir: string; repoDir: string }) => Promise<T>): Promise<T> {
+async function withSandbox<T>(fn: (paths: { repoDir: string }) => Promise<T>): Promise<T> {
 	const root = await mkdtemp(join(tmpdir(), "pi-quests-evals-"));
-	const agentDir = join(root, "agent");
 	const repoDir = join(root, "repo");
-	await mkdir(agentDir, { recursive: true });
 	await mkdir(repoDir, { recursive: true });
 	try {
-		return await fn({ agentDir, repoDir });
+		return await fn({ repoDir });
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
@@ -127,10 +125,10 @@ function samplePlan(): QuestPlan {
 				summary: "Store the validation contract in quest state",
 				milestoneId: "m2",
 				acceptanceCriteria: [
-					"The repo test command passes",
+					"The repo check command passes",
 					"Inspect the quest state file and confirm the contract was persisted",
 				],
-				workerPrompt: "Keep the state private under ~/.pi/agent/quests.",
+				workerPrompt: "Keep the quest state under the repository-local .pi/quests directory.",
 				status: "pending",
 			},
 			{
@@ -178,10 +176,10 @@ function samplePlan(): QuestPlan {
 					title: "Tests pass",
 					milestoneId: "m2",
 					featureIds: ["f2"],
-					expectedBehavior: "The repo test command passes",
+					expectedBehavior: "The repo check command passes",
 					proofStrategy: "command",
-					proofDetails: "Run the repo's canonical test command.",
-					commands: ["bun test"],
+					proofDetails: "Run the repo's canonical check command.",
+					commands: ["npm run check"],
 					confidence: "high",
 				},
 				{
@@ -219,7 +217,7 @@ function sampleQuest(cwd = "/tmp/arrow"): QuestState {
 		cwd,
 		title: "Arrow",
 		goal: "Ship a validation-first project-management MVP.",
-		status: "ready",
+		status: "proposal_ready",
 		defaultModel: DEFAULT_MODEL,
 		roleModels: {
 			worker: { provider: "openai-codex", model: "gpt-5.4-mini", thinkingLevel: "high" },
@@ -357,7 +355,7 @@ const evalCases: EvalCaseDefinition[] = [
 						milestoneId: "m1",
 						acceptanceCriteria: [
 							"The page renders in the browser",
-							"The repo test command passes",
+							"The repo check command passes",
 							"Inspect the generated config file",
 							"Human QA signs off on the final polish",
 						],
@@ -392,7 +390,7 @@ ${JSON.stringify(samplePlan(), null, 2)}
 			const passed =
 				Boolean(parsed) &&
 				parsed?.plan.validationContract.summary === samplePlan().validationContract.summary &&
-				parsed?.plan.validationContract.criteria[1]?.commands[0] === "bun test" &&
+				parsed?.plan.validationContract.criteria[1]?.commands[0] === "npm run check" &&
 				parsed?.plan.validationContract.weakValidationWarnings[0] === "Final visual polish still depends on human QA.";
 			return result(
 				"regression",
@@ -464,9 +462,9 @@ ${JSON.stringify(samplePlan(), null, 2)}
 		title: "Passive quest reads do not create quest storage",
 		suite: "regression",
 		run: async () => {
-			return withSandbox(async ({ agentDir, repoDir }) => {
-				const loaded = await loadActiveQuest(agentDir, repoDir);
-				const passed = loaded === null && !existsSync(join(agentDir, "quests"));
+			return withSandbox(async ({ repoDir }) => {
+				const loaded = await loadActiveQuest(repoDir);
+				const passed = loaded === null && !existsSync(join(repoDir, ".pi", "quests"));
 				return result(
 					"regression",
 					"passive-read-stays-read-only",
@@ -475,7 +473,7 @@ ${JSON.stringify(samplePlan(), null, 2)}
 					passed ? "Quest status-style reads stayed passive." : "Passive reads created quest storage.",
 					{
 						loadedQuest: loaded,
-						questRootExists: existsSync(join(agentDir, "quests")),
+						questRootExists: existsSync(join(repoDir, ".pi", "quests")),
 					},
 				);
 			});
@@ -483,21 +481,21 @@ ${JSON.stringify(samplePlan(), null, 2)}
 	},
 	{
 		id: "learned-workflows-stay-private",
-		title: "Learned workflows persist under private quest state, not repo state",
+		title: "Learned workflows persist under repo-local quest state",
 		suite: "regression",
 		run: async () => {
-			return withSandbox(async ({ agentDir, repoDir }) => {
+			return withSandbox(async ({ repoDir }) => {
 				const workflows = sampleWorkflows();
-				await saveLearnedWorkflows(agentDir, repoDir, workflows);
-				const reloaded = await loadLearnedWorkflows(agentDir, repoDir);
-				const workflowFile = join(agentDir, "quests", "projects", projectIdFor(repoDir), "workflows", "learned-workflows.json");
-				const passed = reloaded.length === 1 && existsSync(workflowFile) && !existsSync(join(repoDir, "learned-workflows.json"));
+				await saveLearnedWorkflows(repoDir, workflows);
+				const reloaded = await loadLearnedWorkflows(repoDir);
+				const workflowFile = join(repoDir, ".pi", "quests", "shared-skills", "index.json");
+				const passed = reloaded.length === 1 && existsSync(workflowFile);
 				return result(
 					"regression",
 					"learned-workflows-stay-private",
-					"Learned workflows persist under private quest state, not repo state",
+					"Learned workflows persist under repo-local quest state",
 					passed,
-					passed ? "Learned workflows stayed private under ~/.pi/agent/quests-style storage." : "Learned workflows escaped into repo state or failed to persist.",
+					passed ? "Learned workflows persisted inside the repo-local .pi/quests state." : "Learned workflows failed to persist in the repo-local quest state.",
 					{
 						workflowFile,
 						reloadedCount: reloaded.length,

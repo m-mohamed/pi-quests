@@ -45,8 +45,11 @@ export function requiredEnvVarsForModel(modelSpec: string): string[] {
 		case "google":
 			return ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
 		case "openai":
-		case "openai-codex":
 			return ["OPENAI_API_KEY"];
+		case "openai-codex":
+		case "opencode-go":
+			// Credentials are extracted from ~/.pi/agent/auth.json by the runners
+			return [];
 		default:
 			return [];
 	}

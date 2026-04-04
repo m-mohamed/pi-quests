@@ -54,11 +54,15 @@ export function buildHarborCommand(options: HarborRunOptions): { command: string
 		if (existsSync(authFile)) {
 			try {
 				const auth = JSON.parse(readFileSync(authFile, "utf-8"));
+				// Extract OpenCode Go API key
 				let opencodeKey = auth?.["opencode-go"]?.key;
 				if (opencodeKey && opencodeKey.startsWith("!")) {
 					opencodeKey = execSync(opencodeKey.slice(1), { encoding: "utf-8" }).trim();
 				}
 				if (opencodeKey) args.push("--ae", `OPENCODE_API_KEY=${opencodeKey}`);
+				// Extract Codex OAuth access token
+				const codexToken = auth?.["openai-codex"]?.access;
+				if (codexToken) args.push("--ae", `OPENAI_API_KEY=${codexToken}`);
 			} catch {
 				// auth.json not readable — model credentials may fail inside the container
 			}

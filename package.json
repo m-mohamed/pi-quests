@@ -5,6 +5,7 @@
   "type": "module",
   "files": [
     "bin",
+    "blueprints",
     "benchmarks/__init__.py",
     "benchmarks/harbor/*.py",
     "benchmarks/harbor/*.ts",

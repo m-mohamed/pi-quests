@@ -34,30 +34,43 @@ class QuestInstalledAgent(BaseInstalledAgent):
             environment,
             command=(
                 "set -euo pipefail; "
-                'if [ -x "/usr/bin/node" ] || command -v node >/dev/null 2>&1; then '
-                '  echo "Node.js already installed"; '
-                "elif ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]; then"
-                "  apk add --no-cache nodejs;"
-                " elif command -v apt-get &>/dev/null; then"
-                "  apt-get update && apt-get install -y nodejs;"
-                " elif command -v yum &>/dev/null; then"
-                "  yum install -y nodejs;"
-                " else"
-                '  echo "Warning: No known package manager found, assuming node is available" >&2;'
-                " fi"
+                "NEEDS_UPGRADE=false; "
+                'if command -v node >/dev/null 2>&1; then '
+                '  NODE_VER="$(node -e \"console.log(process.versions.major)\")"; '
+                '  if [ "$NODE_VER" -lt 20 ] 2>/dev/null; then NEEDS_UPGRADE=true; fi; '
+                "else NEEDS_UPGRADE=true; fi; "
+                'if [ "$NEEDS_UPGRADE" = true ]; then '
+                '  ARCH="$(uname -m)"; '
+                '  case "$ARCH" in '
+                "    x86_64)  NODE_ARCH=\"x64\" ;; "
+                "    aarch64) NODE_ARCH=\"arm64\" ;; "
+                "    *)       NODE_ARCH=\"$ARCH\" ;; "
+                "  esac; "
+                "  curl -fsSL \"https://nodejs.org/dist/v20.18.3/node-v20.18.3-linux-${NODE_ARCH}.tar.xz\" -o /tmp/node.tar.xz; "
+                "  tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1; "
+                "  rm -f /tmp/node.tar.xz; "
+                "fi"
             ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )
         await self.exec_as_root(
             environment,
             command=(
-                "for bin in node; do"
+                "for bin in node npm; do"
                 '  BIN_PATH="$(which "$bin" 2>/dev/null || true)";'
                 '  if [ -n "$BIN_PATH" ] && [ "$BIN_PATH" != "/usr/local/bin/$bin" ]; then'
                 '    ln -sf "$BIN_PATH" "/usr/local/bin/$bin";'
                 "  fi;"
                 " done"
             ),
+        )
+        await self.exec_as_root(
+            environment,
+            command="npm install -g @mariozechner/pi-coding-agent@0.65.0",
+        )
+        await self.exec_as_root(
+            environment,
+            command="mkdir -p /opt/pi-auth",
         )
 
     @with_prompt_template

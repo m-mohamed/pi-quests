@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
+import { execSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultBenchmarkModel, missingEnvVarsForModel, requiredEnvVarsForModel } from "../shared.js";
@@ -47,7 +49,21 @@ export function buildHarborCommand(options: HarborRunOptions): { command: string
 	}
 	if (options.maxTasks && Number.isFinite(options.maxTasks) && options.maxTasks > 0) args.push("-l", String(options.maxTasks));
 	if (options.bundlePath) {
-		args.push("--mounts-json", JSON.stringify([`${options.bundlePath}:/opt/quest-package:ro`]));
+		const mounts = [`${options.bundlePath}:/opt/quest-package:ro`];
+		const authFile = join(homedir(), ".pi", "agent", "auth.json");
+		if (existsSync(authFile)) {
+			try {
+				const auth = JSON.parse(readFileSync(authFile, "utf-8"));
+				let opencodeKey = auth?.["opencode-go"]?.key;
+				if (opencodeKey && opencodeKey.startsWith("!")) {
+					opencodeKey = execSync(opencodeKey.slice(1), { encoding: "utf-8" }).trim();
+				}
+				if (opencodeKey) args.push("--ae", `OPENCODE_API_KEY=${opencodeKey}`);
+			} catch {
+				// auth.json not readable — model credentials may fail inside the container
+			}
+		}
+		args.push("--mounts-json", JSON.stringify(mounts));
 		args.push("--ae", "QUEST_PACKAGE_DIR=/opt/quest-package");
 	}
 	args.push("--ae", `QUEST_HARBOR_DATASET=${options.dataset}`);

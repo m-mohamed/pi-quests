@@ -1,6 +1,6 @@
 # Verified Baseline Results
 
-Last verified: 2026-04-03
+Last verified: 2026-04-04
 
 This document records the current reproducible benchmark baseline for Quest.
 It is intentionally conservative: only official-run paths and commands that
@@ -9,63 +9,69 @@ have been executed successfully are listed here.
 ## Package gate
 
 - `npm run check`: passing
+- `npm run typecheck`: passing
 - `npm pack --dry-run`: passing
-- `quest-headless`: verified from an installed/tarball context
+- `quest-headless`: verified from installed/tarball context
 
-## Terminal-Bench via Harbor
+## Terminal-Bench via Harbor (current baseline)
 
 - Harness: Harbor
 - Dataset: `terminal-bench-sample@2.0`
-- Model: `google/gemini-2.5-flash`
+- Model: `opencode-go/minimax-m2.5`
+- Thinking: `high`
 - Adapter: `quest-installed` / `quest-bench-v1`
 - Run artifact:
-  - `benchmarks/.runs/harbor/sample/2026-04-03__14-31-24/result.json`
+  - `benchmarks/.runs/harbor/sample/2026-04-03__20-35-56/result.json`
 - Task artifact:
-  - `benchmarks/.runs/harbor/sample/2026-04-03__14-31-24/chess-best-move__RXWGcUQ/result.json`
+  - `benchmarks/.runs/harbor/sample/2026-04-03__20-35-56/chess-best-move__Vh5oBLy/`
 
 Observed result:
 
 - trials: `1`
 - errors: `0`
 - mean reward: `0.0`
-- Quest outcome: `blocked`
+- Duration: ~3 minutes
+- Token usage: ~10K input, ~9K output (~$0.02/task)
 
 Interpretation:
 
-- The Harbor integration is healthy.
-- The benchmark is now measuring Quest behavior rather than adapter/setup
-  failures.
-- The current problem is agent-performance quality, not benchmark plumbing.
+- Full pipeline working: Harbor spawns Docker, installs Node.js 20+, installs pi,
+  injects auth credentials, Quest runs minimax-2.5, model produces real output.
+- Reward 0.0 because agent's chess move (Re8+) didn't match expected answers (g2g4, e2e4).
+- Plumbing is complete; agent quality is the next optimization target.
 
-## SlopCodeBench official runner
+## Historical baselines (superseded)
 
-- Runner: upstream `slop-code run`
-- Model: `gemini-2.5-flash`
-- Prompt: `just-solve`
-- Thinking: `none`
-- Run artifact:
-  - `benchmarks/.runs/slopcodebench/official/gemini-2.5-flash/quest_just-solve_none_20260403T1335/result.json`
+### Gemini baselines (incorrect model selection)
 
-Observed result:
+The baselines below were run with `google/gemini-2.5-flash` due to incorrect
+model selection in `defaultBenchmarkModel()`. They are kept for plumbing
+verification only and do not represent Quest's actual capability.
 
-- problems: `1`
-- checkpoints: `1`
-- problems solved: `0.0`
-- checkpoints solved: `0`
-- total pass rate: `0.18181818181818182`
+**Terminal-Bench:**
+- `benchmarks/.runs/harbor/sample/2026-04-03__14-31-24/`
 
-Interpretation:
+**SlopCodeBench:**  
+- `benchmarks/.runs/slopcodebench/official/gemini-2.5-flash/`
 
-- The official runner path works.
-- Checkpoint lineage and Quest artifacts are preserved.
-- The current problem is low task performance, not adapter correctness.
+## How to run baselines
 
-## What this baseline means
+```bash
+# Terminal-Bench sample (1 task)
+npm run benchmark:tbench:preflight
+npm run benchmark:tbench:sample -- --max-tasks 1
 
-- Quest is benchmarkable through both Harbor and the official SlopCodeBench
-  runner.
-- Trials can now optimize against real external benchmark traces instead of
-  only local fixtures.
-- Future public claims should compare against this document, not against
-  unverified local smoke runs.
-- The next benchmark-improvement work is tracked in `blueprints/changes/`.
+# Terminal-Bench full dataset
+npm run benchmark:tbench:sample
+npm run benchmark:tbench:full
+
+# SlopCodeBench official (requires cloned repo at /tmp/slop-code-bench)
+npm run benchmark:slop:official -- --problem <problem-id>
+```
+
+## Next steps
+
+- Trials can now optimize against real benchmark traces.
+- Profile tuning: prompt policies, thinking budgets, context handling.
+- Model upgrades: test stronger models (GPT-5.4, etc.) against same tasks.
+- Ground truth: `blueprints/changes/improve-benchmark-baselines/`

@@ -44,7 +44,7 @@ const agentSettings = {
 		"openai-codex/gpt-5.4-mini",
 		"opencode-go/glm-5",
 		"opencode-go/kimi-k2.5",
-		"opencode-go/minimax-m2.7",
+		"opencode-go/minimax-m2.5",
 	],
 	retry: {
 		enabled: false,

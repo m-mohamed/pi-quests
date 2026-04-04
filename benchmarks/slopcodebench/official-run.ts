@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execSync } from "node:child_process";
 import { defaultBenchmarkModel, missingEnvVarsForModel } from "../shared.js";
 
 interface OfficialRunOptions {
@@ -60,12 +63,28 @@ async function main() {
 	];
 	if (options.dryRun) args.push("--dry-run");
 
+	const envVars: Record<string, string> = {};
+	const authFile = join(homedir(), ".pi", "agent", "auth.json");
+	if (existsSync(authFile)) {
+		try {
+			const auth = JSON.parse(readFileSync(authFile, "utf-8"));
+			let opencodeKey = auth?.["opencode-go"]?.key;
+			if (opencodeKey && opencodeKey.startsWith("!")) {
+				opencodeKey = execSync(opencodeKey.slice(1), { encoding: "utf-8" }).trim();
+			}
+			if (opencodeKey) envVars.OPENCODE_API_KEY = opencodeKey;
+		} catch {
+			// auth.json not readable
+		}
+	}
+
 	const command = {
 		command: "uv",
 		args,
 		cwd: options.repo,
 		env: {
 			...process.env,
+			...envVars,
 			PYTHONPATH: [overlayDir, resolve(options.repo, "src"), process.env.PYTHONPATH].filter(Boolean).join(":"),
 			SLOPCODEBENCH_QUEST_BIN: `${process.execPath} ${resolve(rootDir, "bin", "quest-headless.mjs")}`,
 		},

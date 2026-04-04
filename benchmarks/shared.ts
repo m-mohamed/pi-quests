@@ -1,5 +1,6 @@
 import { cp, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
 export interface MaterializedWorkspace {
@@ -13,12 +14,30 @@ function benchmarkProvider(modelSpec: string): string {
 	return splitAt > 0 ? modelSpec.slice(0, splitAt) : modelSpec;
 }
 
+const DEFAULT_MODEL = "opencode-go/minimax-m2.5";
+
+function readPiDefaultModel(): string | undefined {
+	try {
+		const settingsPath = join(homedir(), ".pi", "agent", "settings.json");
+		const raw = readFileSync(settingsPath, "utf-8");
+		const settings = JSON.parse(raw);
+		const provider = settings.defaultProvider;
+		const model = settings.defaultModel;
+		if (provider && model) return `${provider}/${model}`;
+	} catch {
+		// Pi config not available — fall through to env var / default
+	}
+	return undefined;
+}
+
 export function defaultBenchmarkModel(): string {
 	const explicit = process.env.QUEST_BENCH_MODEL?.trim();
 	if (explicit) return explicit;
-	if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) return "google/gemini-2.5-flash";
+	const piDefault = readPiDefaultModel();
+	if (piDefault) return piDefault;
 	if (process.env.OPENAI_API_KEY) return "openai-codex/gpt-5.4";
-	return "openai-codex/gpt-5.4";
+	if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) return "google/gemini-2.5-flash";
+	return DEFAULT_MODEL;
 }
 
 export function requiredEnvVarsForModel(modelSpec: string): string[] {

@@ -11,6 +11,14 @@ import { defaultHumanQaChecklist, mergeRemainingPlan, parseQuestPlanText, planni
 import { describeActiveRun, markQuestAborted, prepareQuestForResume, terminateQuestProcess } from "./runtime-core.js";
 import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
 import {
+	buildQuestWidgetModel,
+	buildTrialsWidgetModel,
+	renderQuestActionLines,
+	renderQuestWidgetLines,
+	renderTrialsActionLines,
+	renderTrialsWidgetLines,
+} from "./ui-core.js";
+import {
 	appendQuestEvent,
 	createQuest,
 	getQuestPaths,
@@ -58,6 +66,7 @@ import type {
 const CUSTOM_MESSAGE_TYPE = "pi-quests";
 const STATUS_KEY = "pi-quests";
 const WIDGET_KEY = "pi-quests";
+const WIDGET_ACTIONS_KEY = "pi-quests-actions";
 const QUEST_MODE_ENTRY = "quest-mode";
 const QUEST_DASHBOARD_ENTRY = "quest-control";
 const ROLE_NAMES: QuestRole[] = ["orchestrator", "worker", "validator"];
@@ -274,23 +283,6 @@ ${humanQaChecklist(quest).map((item) => `- ${item}`).join("\n")}
 `;
 }
 
-function questWidgetLines(quest: QuestState, liveRun: LiveRunSnapshot | null, questModeEnabled: boolean): string[] {
-	const milestone = currentMilestone(quest);
-	const assertions = assertionCounts(quest);
-	const activeFeature = milestone ? nextPendingFeature(quest, milestone.id) : undefined;
-	const warnings = readinessWarningCount(quest) + assertions.limited;
-	const activeRun = questActiveRun(quest, liveRun);
-	return [
-		`quest:${quest.plan?.title ?? quest.title} [${quest.status}]`,
-		`mode:${questModeEnabled ? "on" : "off"}`,
-		`feature:${activeFeature?.title ?? "none"}`,
-		`milestone:${milestone?.title ?? "none"}`,
-		`assertions:${assertions.passed}/${assertions.total} passed`,
-		`warnings:${warnings}`,
-		`run:${activeRun ? `${activeRun.role}/${activeRun.phase}` : "idle"}`,
-	];
-}
-
 async function emitNote(pi: ExtensionAPI, ctx: ExtensionContext, content: string, level: "info" | "warning" | "error" = "info") {
 	if (ctx.hasUI) ctx.ui.notify(content, level);
 	pi.sendMessage({ customType: CUSTOM_MESSAGE_TYPE, content, display: true }, { triggerTurn: false });
@@ -398,6 +390,7 @@ export default function questExtension(pi: ExtensionAPI) {
 	let planningTurnActive = false;
 	let dashboardTab: DashboardTab = "summary";
 	let activeTrialPid: number | undefined;
+	let pendingQuestControlOpen = false;
 
 	function persistQuestMode() {
 		pi.appendEntry(QUEST_MODE_ENTRY, { enabled: questModeEnabled });
@@ -412,24 +405,28 @@ export default function questExtension(pi: ExtensionAPI) {
 		if (!quest) {
 			if (questModeEnabled) {
 				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", "quest:mode"));
-				ctx.ui.setWidget(WIDGET_KEY, ["quest-mode:on", "active:none"]);
-			} else if (currentTrialState?.status === "running") {
-				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `trials:${currentTrialState.status}`));
 				ctx.ui.setWidget(WIDGET_KEY, [
-					`trials:${currentTrialState.target}`,
-					`profile:${currentTrialState.activeProfileId}`,
-					`status:${currentTrialState.status}`,
-					`run:${trialLiveRun ? `${trialLiveRun.role}/${trialLiveRun.phase}` : "idle"}`,
+					"QUEST // ready",
+					"Status quest mode on  |  Active none",
+					"Focus plain input now creates a quest in this repo",
 				]);
+				ctx.ui.setWidget(WIDGET_ACTIONS_KEY, ["Actions /quest new <goal>  |  /quests  |  /quest trials"]);
+			} else if (currentTrialState?.status === "running") {
+				const trialState = currentTrialState;
+				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `trials:${trialState.status}`));
+				ctx.ui.setWidget(WIDGET_KEY, renderTrialsWidgetLines(buildTrialsWidgetModel(trialState, trialState.activeProfileId, trialLiveRun)));
+				ctx.ui.setWidget(WIDGET_ACTIONS_KEY, renderTrialsActionLines());
 			} else {
 				ctx.ui.setStatus(STATUS_KEY, undefined);
 				ctx.ui.setWidget(WIDGET_KEY, undefined);
+				ctx.ui.setWidget(WIDGET_ACTIONS_KEY, undefined);
 			}
 			return;
 		}
 		const liveSummary = liveRun ? ` · ${liveRun.role}:${liveRun.phase}` : "";
 		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `quest:${quest.status}${liveSummary}`));
-		ctx.ui.setWidget(WIDGET_KEY, questWidgetLines(quest, liveRun, questModeEnabled));
+		ctx.ui.setWidget(WIDGET_KEY, renderQuestWidgetLines(buildQuestWidgetModel(quest, liveRun, questModeEnabled)));
+		ctx.ui.setWidget(WIDGET_ACTIONS_KEY, renderQuestActionLines(quest.status));
 	}
 
 	async function refreshCurrentQuest(cwd: string) {
@@ -954,6 +951,7 @@ ${snapshot.traces.slice(0, 6).map((trace) => `- [${trace.role}] ${trace.tags.joi
 		});
 		liveRun = null;
 		planningEvents = [];
+		pendingQuestControlOpen = ctx.hasUI && Boolean(ctx.ui.custom);
 		await applyQuestUi(ctx, quest);
 		await emitNote(pi, ctx, `Quest proposal captured. Review it with \`/quest\`, then use \`/quest accept\`.`);
 	}
@@ -2111,5 +2109,9 @@ ${snapshot.traces.slice(0, 6).map((trace) => `- [${trace.role}] ${trace.tags.joi
 		planningTurnActive = false;
 		planningStartedAt = 0;
 		await applyQuestUi(ctx, currentQuest);
+		if (pendingQuestControlOpen && currentQuest?.status === "proposal_ready") {
+			pendingQuestControlOpen = false;
+			await openQuestControl(ctx, currentQuest);
+		}
 	});
 }

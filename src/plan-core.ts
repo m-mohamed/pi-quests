@@ -158,6 +158,13 @@ function learnedWorkflowSection(workflows: LearnedWorkflow[]): string {
 	return workflows.map((workflow) => `- ${workflow.title}: ${workflow.note}`).join("\n");
 }
 
+function loadedSessionContextGuidance(): string {
+	return `Pi already loads repo/global AGENTS.md instructions, relevant contextual files, and matching skills when they exist.
+- Treat that loaded context as binding instead of optional flavor.
+- Reuse a loaded skill when it fits the task instead of improvising a fresh workflow.
+- If AGENTS or a loaded skill conflicts with your default instinct, follow the loaded instruction.`;
+}
+
 export function planningInstructions(quest: QuestState, workflows: LearnedWorkflow[], profile?: QuestProfile): string {
 	const readinessSummary = quest.validationReadiness?.summary ?? "No dry-run validation readiness summary captured yet.";
 	const readinessLines =
@@ -189,6 +196,9 @@ ${readinessLines}
 
 Profile surface policy:
 ${policyLines}
+
+Loaded session context:
+${loadedSessionContextGuidance()}
 
 Use the structured quest tools instead of editing quest control files manually:
 - quest_set_proposal
@@ -257,6 +267,9 @@ Rules:
 
 Profile surface policy:
 ${policyLines}
+
+Loaded session context:
+${loadedSessionContextGuidance()}
 
 Current quest title: ${quest.plan?.title ?? quest.title}
 

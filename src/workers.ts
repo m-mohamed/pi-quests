@@ -202,6 +202,13 @@ Project learned workflows:
 ${learnedWorkflowSection(workflows)}`;
 }
 
+function loadedSessionContextGuidance(): string {
+	return `Loaded session context:
+- Pi may already have repo/global AGENTS.md instructions, contextual files, and matching skills in scope.
+- Treat those loaded instructions as binding, not optional hints.
+- If a relevant skill is already loaded, use it instead of inventing a new workflow from scratch.`;
+}
+
 export function buildFeaturePrompt(
 	quest: QuestState,
 	feature: QuestFeature,
@@ -247,6 +254,8 @@ ${promptSurfaceText(profile, "feature-worker")}
 Context policy:
 ${contextPolicy}
 
+${loadedSessionContextGuidance()}
+
 ${feature.handoff ? `Expected handoff:\n${feature.handoff}\n` : ""}${feature.workerPrompt ? `Feature-specific instructions:\n${feature.workerPrompt}\n` : ""}
 
 Execute only this feature. Keep the quest serial and scoped. Do not introduce unrelated changes.
@@ -274,6 +283,7 @@ export function buildWorkerSystemPrompt(profile: QuestProfile): string {
 Rules:
 - Focus only on the assigned feature.
 - Follow the repo's conventions and existing instructions.
+- Respect loaded AGENTS.md instructions and use relevant loaded skills when they fit the task.
 - Make the smallest correct change that satisfies the feature.
 - Do not start new quests or inspect quest internals.
 - Do not rewrite unrelated parts of the codebase.
@@ -324,6 +334,8 @@ ${validationLines}
 Profile surface policy:
 ${promptSurfaceText(profile, surfaceId)}
 
+${loadedSessionContextGuidance()}
+
 ${milestone.validationPrompt ? `Extra validation guidance:\n${milestone.validationPrompt}\n` : ""}
 
 You are read-only. Verify the milestone. Do not edit code.
@@ -344,6 +356,7 @@ export function buildValidatorSystemPrompt(pass: ValidatorPass, profile: QuestPr
 
 Rules:
 - Verify the assigned milestone using read-only tools and commands.
+- Respect loaded AGENTS.md instructions and any relevant loaded skills while staying read-only.
 - Do not edit or write files.
 - Be explicit about issues, blockers, or limited coverage.
 - Budget: at most ${profile.verificationBudget.validatorAttempts} validator attempt(s) before handing control back.
@@ -357,6 +370,7 @@ Rules:
 - Preserve completed work.
 - Only change unfinished milestones, unfinished features, and validation for unfinished work.
 - Keep the quest serial by default.
+- Respect loaded AGENTS.md instructions and reuse relevant loaded skills when they apply.
 - Do not edit repository files.
 - Policy surface:
 ${promptSurfaceText(profile, "plan-revision")}
@@ -378,6 +392,8 @@ Consider at least:
 
 Profile surface policy:
 ${promptSurfaceText(profile, "readiness-probe")}
+
+${loadedSessionContextGuidance()}
 
 Return:
 \`\`\`json
@@ -441,6 +457,8 @@ ${readinessLines}
 Profile surface policy:
 ${promptSurfaceText(profile, "planning")}
 
+${loadedSessionContextGuidance()}
+
 Return a compact quest plan as JSON with:
 - title
 - summary
@@ -502,6 +520,7 @@ Rules:
 - Plan the smallest serial execution path that can solve the task.
 - Keep human QA explicit at the end.
 - Be honest about limited or unsupported validation.
+- Respect loaded AGENTS.md instructions and use relevant loaded skills when they already fit the job.
 - Do not emit prose outside the required JSON block.
 - Planning policy:
 ${promptSurfaceText(profile, "planning")}`;

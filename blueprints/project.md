@@ -4,7 +4,7 @@
 
 `@m-mohamed/pi-quests` is a Pi-native package for long-running autonomous
 coding. Pi stays upstream as the primitive runtime. Quest adds proposal-first,
-validation-first orchestration. Trials add evals-and-traces optimization.
+validation-first orchestration. Trials adds evals-and-traces optimization.
 
 ## North Star
 
@@ -25,10 +25,12 @@ tweaks.
 ## Verified State
 
 - Package gate is green via `npm run check`.
-- Harbor-backed `terminal-bench-sample@2.0` runs complete without harness
-  errors.
-- The official SlopCodeBench runner path works with the Quest overlay.
-- Current public baseline is documented in `docs/baseline-results.md`.
+- Harbor-backed `terminal-bench-sample@2.0` runs complete without harness errors.
+- Official SlopCodeBench runner path works with Quest overlay.
+- Community traces downloaded: 723 sessions from HuggingFace.
+- Multiple models tested: minimax-m2.5, glm-5, kimi-k2.5 all produce real output.
+- All models return 0.0 reward on chess task (agent quality gap, not plumbing).
+- Current baseline documented in `docs/baseline-results.md`.
 
 ## Working Agreement
 

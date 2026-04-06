@@ -2,8 +2,7 @@
 
 ## Purpose
 
-Define how Trials turn Quest traces and evals into bounded, replayable
-improvements.
+Define how Quest turns traces into profile improvements.
 
 ## Current Commitments
 
@@ -22,21 +21,44 @@ Trials persist Quest traces that can be replayed into eval datasets.
 
 Trials limit changes to explicit profile-owned surfaces.
 
-#### Scenario: Lab applies a winning candidate
+#### Scenario: Profile patch is applied
 
 - GIVEN Trials identify an improving candidate
-- WHEN the candidate passes spot checks, full suites, and held-out checks
-- THEN Trials may update prompts, budgets, policies, and workflow hints
-- AND it does not mutate arbitrary runtime code as part of normal optimization
+- WHEN the candidate passes spot checks and full suites
+- THEN Trials update prompts, budgets, policies, and workflow hints
+- AND it does NOT mutate arbitrary runtime code
+
+### Pi-native trace ingestion
+
+Trials accept both Quest trace bundles and raw Pi session files.
+
+#### Scenario: Community trace is ingested
+
+- GIVEN a raw Pi session JSONL file
+- WHEN Trials parse the session
+- THEN it derives model choice, duration, and failure signals
+- AND it can use those signals for profile optimization
+
+### Meta-harness filesystem
+
+Trials maintain a filesystem of candidates for counterfactual reasoning.
+
+#### Scenario: Proposer reads prior candidates
+
+- GIVEN multiple candidates have been evaluated
+- WHEN a proposer reads the meta-harness filesystem
+- THEN it can access all prior profile patches
+- AND it can read all prior scores and traces
+- AND it can perform counterfactual diagnosis across candidates
 
 ### Overfitting guard
 
 Trials reject candidates that improve narrow replays while regressing
 held-out or core behavior.
 
-#### Scenario: Benchmark-only improvement regresses the core suite
+#### Scenario: Hold-out regression blocks adoption
 
-- GIVEN a candidate improves a benchmark replay slice
-- WHEN it regresses core regression or held-out datasets
+- GIVEN a candidate improves benchmark replay slice
+- WHEN it regresses hold-out or core datasets
 - THEN Trials reject the candidate
 - AND preserves the baseline profile

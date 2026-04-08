@@ -36,15 +36,11 @@ const scenarioModelChoice = {
 	thinkingLevel: "low",
 } as const;
 const agentSettings = {
-	defaultProvider: "openai-codex",
-	defaultModel: "gpt-5.4",
+	defaultProvider: "zai",
+	defaultModel: "glm-5.1",
 	defaultThinkingLevel: "high",
 	enabledModels: [
-		"openai-codex/gpt-5.4",
-		"openai-codex/gpt-5.4-mini",
-		"opencode-go/glm-5",
-		"opencode-go/kimi-k2.5",
-		"opencode-go/minimax-m2.5",
+		"zai/glm-5.1",
 	],
 	retry: {
 		enabled: false,

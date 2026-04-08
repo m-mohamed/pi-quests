@@ -5,8 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { runQuestHeadless } from "../src/headless-core.js";
-import { replayQuestRunIntoTrialDataset } from "../src/trials-runtime.js";
-import { loadQuestEvalDataset, listQuestTraceBundles } from "../src/state.js";
+import { listQuestTraceBundles } from "../src/state.js";
 
 const DEFAULT_MODEL = {
 	provider: "openai-codex",
@@ -37,6 +36,10 @@ function makeRun(role, summary, benchmark, overrides = {}) {
 test("runQuestHeadless writes a completed benchmark contract and trace provenance", async () => {
 	const repoDir = await mkdtemp(join(tmpdir(), "pi-quests-headless-"));
 	try {
+		let probeCalls = 0;
+		let plannerCalls = 0;
+		let validatorCalls = 0;
+		let workerCalls = 0;
 		const result = await runQuestHeadless(
 			{
 				cwd: repoDir,
@@ -52,6 +55,7 @@ test("runQuestHeadless writes a completed benchmark contract and trace provenanc
 			},
 			{
 				async probe(_cwd, _modelChoice, _profile, benchmark) {
+					probeCalls += 1;
 					return {
 						readiness: {
 							summary: "Repo checks supported.",
@@ -62,6 +66,7 @@ test("runQuestHeadless writes a completed benchmark contract and trace provenanc
 					};
 				},
 				async planner(_cwd, _goal, _modelChoice, _readiness, _profile, benchmark) {
+					plannerCalls += 1;
 					return {
 						plan: {
 							title: "Benchmark Quest",
@@ -98,9 +103,11 @@ test("runQuestHeadless writes a completed benchmark contract and trace provenanc
 					};
 				},
 				async worker(_quest, _feature, _milestone, _modelChoice, _workflows, _profile, benchmark) {
+					workerCalls += 1;
 					return makeRun("worker", "Finished the feature.", benchmark, { featureId: "f1", milestoneId: "m1" });
 				},
 				async validator(_quest, _milestone, _features, _modelChoice, _workflows, pass, _profile, benchmark) {
+					validatorCalls += 1;
 					return makeRun("validator", `Validator passed ${pass}.`, benchmark, { milestoneId: "m1", phase: pass });
 				},
 			},
@@ -108,106 +115,68 @@ test("runQuestHeadless writes a completed benchmark contract and trace provenanc
 
 		assert.equal(result.status, "completed");
 		assert.equal(result.benchmark?.benchmark, "terminal-bench");
-		assert.ok(result.traceBundleIds.length >= 5);
+		assert.equal(probeCalls, 0);
+		assert.equal(plannerCalls, 0);
+		assert.equal(validatorCalls, 0);
+		assert.equal(workerCalls, 1);
+		assert.equal(result.traceBundleIds.length, 1);
 		assert.ok(existsSync(result.artifactPaths.result));
 
 		const traces = await listQuestTraceBundles(repoDir);
 		assert.equal(traces.length, result.traceBundleIds.length);
+		assert.ok(traces.every((trace) => trace.role === "worker"));
 		assert.ok(traces.every((trace) => trace.benchmark?.benchmark === "terminal-bench"));
 	} finally {
 		await rm(repoDir, { recursive: true, force: true });
 	}
 });
 
-test("benchmark trace replays route into benchmark-specific datasets", async () => {
+test("benchmark trace bundles preserve slopcodebench provenance without replay datasets", async () => {
 	const repoDir = await mkdtemp(join(tmpdir(), "pi-quests-headless-replay-"));
 	try {
-		await runQuestHeadless(
+		let workerCalls = 0;
+		const result = await runQuestHeadless(
 			{
 				cwd: repoDir,
 				instruction: "Checkpoint task",
 				modelChoice: DEFAULT_MODEL,
 				benchmark: {
 					benchmark: "slopcodebench",
-					dataset: "slopcodebench-smoke",
+					dataset: "slopcodebench@official",
 					taskId: "trajectory-api",
 					checkpointId: "checkpoint-2",
-					runMode: "smoke",
-					adapterVersion: "quest-bench-v1",
+					runMode: "custom",
+					adapterVersion: "frontier-v2",
 				},
 			},
 			{
 				async probe(_cwd, _modelChoice, _profile, benchmark) {
-					return {
-						readiness: null,
-						servicesYaml: null,
-						run: makeRun("validator", "Readiness limited.", benchmark, { phase: "readiness" }),
-					};
+					throw new Error(`benchmark fast path should not call probe: ${benchmark?.taskId ?? "unknown"}`);
 				},
 				async planner(_cwd, _goal, _modelChoice, _readiness, _profile, benchmark) {
-					return {
-						plan: {
-							title: "Checkpoint Quest",
-							summary: "Checkpoint plan",
-							risks: [],
-							environment: [],
-							services: [],
-							validationSummary: "Validation stays limited.",
-							humanQaChecklist: ["Manual QA remains required."],
-							milestones: [
-								{
-									id: "m1",
-									order: 1,
-									title: "Checkpoint",
-									description: "Run the checkpoint",
-									successCriteria: ["Checkpoint validated."],
-									status: "pending",
-								},
-							],
-							features: [
-								{
-									id: "f1",
-									order: 1,
-									milestoneId: "m1",
-									title: "Implement checkpoint",
-									description: "Implement the checkpoint.",
-									preconditions: [],
-									fulfills: ["Checkpoint validated."],
-									status: "pending",
-								},
-							],
-						},
-						run: makeRun("orchestrator", "Planned checkpoint.", benchmark, { phase: "planning" }),
-					};
+					throw new Error(`benchmark fast path should not call planner: ${benchmark?.taskId ?? "unknown"}`);
 				},
 				async worker(_quest, _feature, _milestone, _modelChoice, _workflows, _profile, benchmark) {
+					workerCalls += 1;
 					return makeRun("worker", "Worker finished.", benchmark, { featureId: "f1", milestoneId: "m1" });
 				},
 				async validator(_quest, _milestone, _features, _modelChoice, _workflows, pass, _profile, benchmark) {
-					return makeRun("validator", "Validation stayed limited and blocked.", benchmark, {
-						milestoneId: "m1",
-						phase: pass,
-						ok: false,
-						exitCode: 1,
-						issues: ["Validation stayed limited."],
-					});
+					throw new Error(`benchmark fast path should not call validator ${pass}: ${benchmark?.taskId ?? "unknown"}`);
 				},
 			},
 		);
 
-		const replayDataset = await replayQuestRunIntoTrialDataset(repoDir, "validator-fixed");
-		assert.equal(replayDataset, null);
-
 		const traces = await listQuestTraceBundles(repoDir);
-		const validatorTrace = traces.find((trace) => trace.role === "validator" && trace.benchmark?.checkpointId === "checkpoint-2");
-		assert.ok(validatorTrace);
-
-		const replay = await replayQuestRunIntoTrialDataset(repoDir, validatorTrace.runId);
-		assert.ok(replay);
-		assert.equal(replay.kind, "slopcodebench-replays");
-
-		const persisted = await loadQuestEvalDataset(repoDir, replay.id);
-		assert.ok(persisted?.cases.some((testCase) => testCase.provenance.benchmark?.checkpointId === "checkpoint-2"));
+		assert.equal(result.status, "completed");
+		assert.equal(workerCalls, 1);
+		assert.equal(result.benchmark?.benchmark, "slopcodebench");
+		assert.equal(result.benchmark?.checkpointId, "checkpoint-2");
+		assert.ok(existsSync(result.artifactPaths.result));
+		const workerTrace = traces.find((trace) => trace.role === "worker" && trace.benchmark?.checkpointId === "checkpoint-2");
+		assert.ok(workerTrace);
+		assert.ok(traces.every((trace) => trace.benchmark?.benchmark === "slopcodebench"));
+		assert.ok(traces.some((trace) => trace.benchmark?.checkpointId === "checkpoint-2"));
+		assert.ok(traces.every((trace) => trace.role === "worker"));
 	} finally {
 		await rm(repoDir, { recursive: true, force: true });
 	}

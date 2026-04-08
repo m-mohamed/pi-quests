@@ -13,16 +13,7 @@ import type {
 	ValidationCriticality,
 	ValidationMethod,
 } from "./types.js";
-
-function unique<T>(items: T[]): T[] {
-	return [...new Set(items)];
-}
-
-function truncate(text: string, max = 140): string {
-	const compact = text.replace(/\s+/g, " ").trim();
-	if (compact.length <= max) return compact;
-	return `${compact.slice(0, max - 1)}…`;
-}
+import { unique, truncate } from "./utils.js";
 
 function inferValidationMethod(text: string): ValidationMethod {
 	const normalized = text.toLowerCase();

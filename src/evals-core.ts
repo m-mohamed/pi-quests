@@ -3,13 +3,7 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	applyQuestProfilePatch,
-	candidateWins,
-	chooseHeuristicCandidate,
 	defaultQuestProfile,
-	evaluateQuestDataset,
-	seedQuestDatasets,
-	traceBundleFromWorkerRun,
 } from "./trials-core.js";
 import { parseQuestPlanText, planningInstructions, revisionInstructions, synthesizeValidationAssertions } from "./plan-core.js";
 import { markQuestAborted, prepareQuestForResume } from "./runtime-core.js";
@@ -62,8 +56,8 @@ interface EvalCaseDefinition {
 }
 
 const DEFAULT_MODEL: ModelChoice = {
-	provider: "openai-codex",
-	model: "gpt-5.4",
+	provider: "zai",
+	model: "glm-5.1",
 	thinkingLevel: "high",
 };
 
@@ -191,7 +185,7 @@ function sampleQuest(cwd = "/tmp/arrow"): QuestState {
 		defaultModel: DEFAULT_MODEL,
 		roleModels: {
 			orchestrator: DEFAULT_MODEL,
-			worker: { provider: "openai-codex", model: "gpt-5.4-mini", thinkingLevel: "high" },
+			worker: DEFAULT_MODEL,
 			validator: DEFAULT_MODEL,
 		},
 		plan,
@@ -409,97 +403,31 @@ const evalCases: EvalCaseDefinition[] = [
 	},
 	{
 		id: "offline-core-default-profile",
-		title: "Default Quest profile passes seeded offline-core datasets",
+		title: "Default Quest profile stays frontier-native",
 		suite: "offline-core",
 		run: async () => {
 			const quest = sampleQuest();
 			const profile = defaultQuestProfile(quest.projectId);
-			const datasets = seedQuestDatasets(quest.projectId, []);
-			const scores = datasets
-				.filter((dataset) => dataset.kind === "core-regression" || dataset.kind === "held-out")
-				.map((dataset) => evaluateQuestDataset(profile, dataset));
-			const passed = scores.every((score) => score.failed === 0);
-			return result("offline-core", "offline-core-default-profile", "Default Quest profile passes seeded offline-core datasets", passed, passed ? "Default profile passes the seeded core and held-out datasets." : "Default profile failed one or more seeded offline-core cases.", { scores });
-		},
-	},
-	{
-		id: "offline-core-trace-replay-materialization",
-		title: "Interesting traces become replayable offline cases",
-		suite: "offline-core",
-		run: async () => {
-			const quest = sampleQuest();
-			const profile = defaultQuestProfile(quest.projectId);
-			const failingRun = {
-				id: "run-1",
-				role: "worker" as const,
-				featureId: "f2",
-				milestoneId: "m2",
-				startedAt: Date.now() - 10_000,
-				endedAt: Date.now(),
-				provider: "openai-codex",
-				model: "gpt-5.4-mini",
-				thinkingLevel: "high" as const,
-				exitCode: 1,
-				ok: false,
-				summary: "Docker was not running before browser validation and the run hit a context overflow.",
-				stderr: "docker not found; context length exceeded",
-				issues: ["Start Docker before validation"],
-				phase: "streaming",
-				latestToolName: "bash",
-				latestToolSummary: "docker compose up",
-				latestAssistantText: "Need to start Docker first.",
-				events: [],
-			};
-			const trace = traceBundleFromWorkerRun(quest, failingRun, profile);
-			const datasets = seedQuestDatasets(quest.projectId, [trace]);
-			const replay = datasets.find((dataset) => dataset.kind === "trace-replays");
-			const passed = Boolean(replay && replay.cases.length > 0 && replay.cases.some((testCase) => testCase.failureTags.includes("prerequisite_miss")));
-			return result("offline-core", "offline-core-trace-replay-materialization", "Interesting traces become replayable offline cases", passed, passed ? "Trace replay dataset materialized offline cases from an interesting trace." : "Trace replay materialization did not produce the expected replay cases.", { traceTags: trace.tags, replayCaseCount: replay?.cases.length ?? 0 });
-		},
-	},
-	{
-		id: "offline-core-heuristic-candidate-wins-spotcheck",
-		title: "Heuristic Trials candidates must win their targeted spot checks",
-		suite: "offline-core",
-		run: async () => {
-			const quest = sampleQuest();
-			const profile = defaultQuestProfile(quest.projectId);
-			const trace = traceBundleFromWorkerRun(
-				quest,
+			const passed =
+				profile.promptSurfaces.proposerPolicy.includes(".pi/quests/trials/candidates/") &&
+				profile.promptSurfaces.proposerPolicy.includes(".pi/quests/trials/community-stats.json") &&
+				Array.isArray(profile.toolAllowlist.proposer) &&
+				profile.toolAllowlist.proposer.includes("read") &&
+				profile.toolAllowlist.proposer.includes("grep") &&
+				!profile.toolAllowlist.proposer.includes("edit");
+			return result(
+				"offline-core",
+				"offline-core-default-profile",
+				"Default Quest profile stays frontier-native",
+				passed,
+				passed
+					? "Default profile points the proposer at canonical Trials artifacts and keeps it read-only."
+					: "Default profile lost canonical Trials proposer policy or read-only tool constraints.",
 				{
-					id: "run-2",
-					role: "worker",
-					featureId: "f2",
-					milestoneId: "m2",
-					startedAt: Date.now() - 10_000,
-					endedAt: Date.now(),
-					provider: "openai-codex",
-					model: "gpt-5.4-mini",
-					thinkingLevel: "high",
-					exitCode: 1,
-					ok: false,
-					summary: "Long evidence caused a context overflow before validation completed.",
-					stderr: "context overflow",
-					phase: "streaming",
-					events: [],
+					proposerTools: profile.toolAllowlist.proposer,
+					proposerPolicy: profile.promptSurfaces.proposerPolicy,
 				},
-				profile,
 			);
-			const datasets = seedQuestDatasets(quest.projectId, [trace]);
-			const candidate = chooseHeuristicCandidate(profile, [trace], datasets);
-			const passed = Boolean(candidate);
-			if (!candidate) {
-				return result("offline-core", "offline-core-heuristic-candidate-wins-spotcheck", "Heuristic Trials candidates must win their targeted spot checks", false, "Trials could not derive a heuristic candidate from an interesting trace.");
-			}
-			const candidateProfile = applyQuestProfilePatch(profile, candidate.patch);
-			const replayDataset = datasets.find((dataset) => dataset.kind === "trace-replays")!;
-			const baselineScores = [evaluateQuestDataset(profile, replayDataset, candidate.targetedCaseIds.length > 0 ? candidate.targetedCaseIds : undefined)];
-			const candidateScores = [evaluateQuestDataset(candidateProfile, replayDataset, candidate.targetedCaseIds.length > 0 ? candidate.targetedCaseIds : undefined)];
-			return result("offline-core", "offline-core-heuristic-candidate-wins-spotcheck", "Heuristic Trials candidates must win their targeted spot checks", passed && candidateWins(baselineScores, candidateScores), candidateWins(baselineScores, candidateScores) ? "Heuristic candidate improved its targeted replay cases." : "Heuristic candidate did not improve its targeted replay cases.", {
-				candidate: candidate.summary,
-				baselineScores,
-				candidateScores,
-			});
 		},
 	},
 ];

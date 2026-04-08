@@ -1,18 +1,47 @@
-import type { LiveRunSnapshot, QuestActiveRun, QuestFeature, QuestMilestone, QuestState, QuestTrialState } from "./types.js";
+import type { QuestStatus, QuestTrialStatus, QuestTrialState, LiveRunSnapshot, QuestActiveRun, QuestFeature, QuestMilestone, QuestState } from "./types.js";
+import { truncate } from "./utils.js";
+
+function statusColor(status: QuestStatus): QuestWidgetModel["statusColor"] {
+	switch (status) {
+		case "running":
+			return "accent";
+		case "completed":
+			return "success";
+		case "blocked":
+		case "aborted":
+			return "error";
+		case "paused":
+			return "warning";
+		default:
+			return "muted";
+	}
+}
+
+function trialsStatusColor(status: QuestTrialStatus): TrialsWidgetModel["statusColor"] {
+	switch (status) {
+		case "running":
+			return "accent";
+		case "stopped":
+			return "success";
+		case "blocked":
+			return "error";
+		case "idle":
+		default:
+			return "muted";
+	}
+}
 
 export interface QuestWidgetModel {
 	title: string;
-	status: string;
+	status: QuestStatus;
+	statusColor: "accent" | "success" | "warning" | "error" | "muted";
 	modeLabel: string;
 	focusLabel: string;
 	milestoneLabel: string;
 	featureLabel: string;
-	assertionsPassed: number;
-	assertionsTotal: number;
-	assertionsFailed: number;
-	assertionsLimited: number;
-	assertionsPending: number;
-	warningCount: number;
+	validationProgress: string;
+	validationStats: string;
+	warnings: number;
 	runLabel: string;
 	summary: string;
 }
@@ -20,14 +49,13 @@ export interface QuestWidgetModel {
 export interface TrialsWidgetModel {
 	target: string;
 	profileId: string;
-	status: string;
+	status: QuestTrialState["status"];
+	statusColor: "accent" | "success" | "warning" | "error" | "muted";
 	runLabel: string;
+	runStatus: string;
+	iterationLabel: string;
 	summary: string;
-}
-
-function truncate(text: string | undefined, max: number): string {
-	if (!text) return "none";
-	return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 3))}...`;
+	progress: string;
 }
 
 function currentMilestone(quest: QuestState): QuestMilestone | undefined {
@@ -108,23 +136,29 @@ export function buildQuestWidgetModel(quest: QuestState, liveRun: LiveRunSnapsho
 	const warnings = readinessWarningCount(quest) + assertions.limited;
 	const activeRun = questActiveRun(quest, liveRun);
 	const runLabel = activeRun
-		? `${activeRun.role}/${activeRun.phase}${liveRun?.latestToolName ? ` -> ${liveRun.latestToolName}` : ""}`
+		? `${activeRun.role}/${activeRun.phase}${liveRun?.latestToolName ? ` → ${liveRun.latestToolName}` : ""}`
 		: "idle";
+	
+	const validationProgress = assertions.total > 0 
+		? progressBar(assertions.passed, assertions.total)
+		: "∅";
+	const validationStats = assertions.total > 0
+		? `${assertions.passed}/${assertions.total} passed`
+		: "no assertions";
+	
 	return {
 		title: truncate(quest.plan?.title ?? quest.title, 84),
 		status: quest.status,
-		modeLabel: questModeEnabled ? "quest mode on" : "manual quest control",
+		statusColor: statusColor(quest.status),
+		modeLabel: questModeEnabled ? "quest on" : "manual",
 		focusLabel: questFocusLabel(quest, milestone, feature),
-		milestoneLabel: milestone ? truncate(milestone.title, 44) : "none",
-		featureLabel: feature ? truncate(feature.title, 44) : "none",
-		assertionsPassed: assertions.passed,
-		assertionsTotal: assertions.total,
-		assertionsFailed: assertions.failed,
-		assertionsLimited: assertions.limited,
-		assertionsPending: assertions.pending,
-		warningCount: warnings,
+		milestoneLabel: milestone ? truncate(milestone.title, 44) : "∅",
+		featureLabel: feature ? truncate(feature.title, 44) : "∅",
+		validationProgress,
+		validationStats,
+		warnings,
 		runLabel,
-		summary: truncate(quest.lastSummary ?? quest.lastError ?? "Waiting for the next quest event.", 96),
+		summary: truncate(quest.lastSummary ?? quest.lastError ?? "waiting for next event", 96),
 	};
 }
 
@@ -132,9 +166,9 @@ export function renderQuestWidgetLines(model: QuestWidgetModel): string[] {
 	return [
 		`QUEST // ${model.title}`,
 		`Status ${model.status}  |  ${model.modeLabel}  |  Run ${model.runLabel}`,
-		`Focus  ${model.focusLabel}`,
+		`Focus ${model.focusLabel}`,
 		`Milestone ${model.milestoneLabel}  |  Feature ${model.featureLabel}`,
-		`Validation ${progressBar(model.assertionsPassed, model.assertionsTotal)} ${model.assertionsPassed}/${model.assertionsTotal} passed  |  warnings ${model.warningCount}`,
+		`Validation ${model.validationProgress} ${model.validationStats}  |  ${model.warnings > 0 ? `⚠ ${model.warnings}` : "✓"}`,
 		`Summary ${model.summary}`,
 	];
 }
@@ -152,12 +186,21 @@ export function renderQuestActionLines(status: QuestWidgetModel["status"]): stri
 }
 
 export function buildTrialsWidgetModel(state: QuestTrialState, profileId: string, liveRun: LiveRunSnapshot | null): TrialsWidgetModel {
+	const runLabel = liveRun 
+		? `${liveRun.role}/${liveRun.phase}${liveRun.latestToolName ? ` → ${liveRun.latestToolName}` : ""}`
+		: "idle";
+	const runStatus = state.status === "running" ? "active" : state.status === "blocked" ? "blocked" : "idle";
+	
 	return {
 		target: state.target,
 		profileId,
 		status: state.status,
-		runLabel: liveRun ? `${liveRun.role}/${liveRun.phase}${liveRun.latestToolName ? ` -> ${liveRun.latestToolName}` : ""}` : "idle",
-		summary: truncate(state.lastSummary ?? "Trial loop idle.", 96),
+		statusColor: trialsStatusColor(state.status),
+		runLabel,
+		runStatus,
+		iterationLabel: state.currentCandidateId ? `cand ${state.currentCandidateId}` : "no candidate",
+		summary: truncate(state.lastSummary ?? "trials idle", 96),
+		progress: state.status === "running" ? "∫ running" : state.status === "blocked" ? "⊘ blocked" : "○ idle",
 	};
 }
 
@@ -170,5 +213,7 @@ export function renderTrialsWidgetLines(model: TrialsWidgetModel): string[] {
 }
 
 export function renderTrialsActionLines(): string[] {
-	return ["Actions /quest trials  |  /quest trials run  |  /quest trials stop  |  /quest trials profile"];
+	return [
+		"Actions /quest trials status  |  /quest trials prepare-benchmark  |  /quest trials analyze-community  |  /quest trials baseline  |  /quest trials run",
+	];
 }

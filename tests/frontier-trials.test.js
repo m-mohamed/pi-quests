@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { collectFrontierTrialStatus, prepareTrialBenchmark, runTrialBaseline, runTrialOptimization } from "../src/frontier-trials.js";
+import { getQuestTrialPaths } from "../src/state.js";
 
 const DEFAULT_MODEL = {
 	provider: "openai-codex",
@@ -12,50 +13,105 @@ const DEFAULT_MODEL = {
 	thinkingLevel: "high",
 };
 
-function fakeScorecard(dataset, split, tasks, meanScore, totalCost, totalDurationMs) {
-	const perTaskScore = tasks.length > 0 ? meanScore : 0;
+function fakeScorecard(split, meanScore, totalCost, totalDurationMs) {
+	const perItemScore = split.items.length > 0 ? meanScore : 0;
 	return {
-		split,
-		dataset,
+		family: split.family,
+		split: split.split,
+		dataset: split.dataset,
 		generatedAt: Date.now(),
-		taskCount: tasks.length,
-		passed: Math.round(tasks.length * meanScore),
-		failed: tasks.length - Math.round(tasks.length * meanScore),
-		totalScore: perTaskScore * tasks.length,
-		maxScore: tasks.length,
+		itemCount: split.items.length,
+		passed: Math.round(split.items.length * meanScore),
+		failed: split.items.length - Math.round(split.items.length * meanScore),
+		totalScore: perItemScore * split.items.length,
+		maxScore: split.items.length,
 		meanScore,
 		totalCost,
 		totalDurationMs,
-		tasks: tasks.map((task) => ({
-			taskId: task.path,
-			taskName: task.name,
-			dataset,
-			split,
-			status: perTaskScore >= 1 ? "passed" : perTaskScore > 0 ? "failed" : "error",
-			score: perTaskScore,
+		items: split.items.map((item) => ({
+			itemId: item.id,
+			itemName: item.name,
+			family: split.family,
+			dataset: split.dataset,
+			split: split.split,
+			status: perItemScore >= 1 ? "passed" : perItemScore > 0 ? "failed" : "error",
+			score: perItemScore,
 			maxScore: 1,
-			durationMs: Math.floor(totalDurationMs / Math.max(1, tasks.length)),
-			totalCost: totalCost / Math.max(1, tasks.length),
+			durationMs: Math.floor(totalDurationMs / Math.max(1, split.items.length)),
+			totalCost: totalCost / Math.max(1, split.items.length),
 			modelChoice: "openai-codex/gpt-5.4",
 			artifactPaths: [],
 		})),
 	};
 }
 
+async function seedCommunityDir(cwd) {
+	const paths = getQuestTrialPaths(cwd);
+	await mkdir(paths.communityTracesDir, { recursive: true });
+	await writeFile(join(paths.communityTracesDir, "placeholder.jsonl"), "{\"type\":\"session\"}\n", "utf-8");
+}
+
+async function createFakeSlopRepo(problemCount = 20) {
+	const repo = await mkdtemp(join(tmpdir(), "pi-quests-slop-repo-"));
+	for (let index = 0; index < problemCount; index += 1) {
+		const slug = `problem-${String(index + 1).padStart(2, "0")}`;
+		const problemDir = join(repo, "problems", slug);
+		await mkdir(problemDir, { recursive: true });
+		await writeFile(
+			join(problemDir, "config.yaml"),
+			[
+				`name: ${slug}`,
+				"category: cli",
+				"difficulty: medium",
+				`description: ${slug} description`,
+				"checkpoints:",
+				"  checkpoint_one:",
+				"    prompt: first",
+				"  checkpoint_two:",
+				"    prompt: second",
+				"",
+			].join("\n"),
+			"utf-8",
+		);
+	}
+	return repo;
+}
+
 test("prepareTrialBenchmark writes the deterministic 7/3 sample split", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-prepare-"));
 	try {
 		const prepared = await prepareTrialBenchmark(cwd, { dataset: "terminal-bench-sample@2.0" });
-		assert.equal(prepared.manifest.taskCount, 10);
-		assert.equal(prepared.searchSet.totalTasks, 7);
-		assert.equal(prepared.holdOutSet.totalTasks, 3);
-		assert.equal(prepared.searchSet.tasks.length, 7);
-		assert.equal(prepared.holdOutSet.tasks.length, 3);
-		assert.equal(prepared.searchSet.tasks.some((task) => task.name.includes("/")), false);
-		assert.equal(prepared.holdOutSet.tasks.some((task) => task.name.includes("/")), false);
-		assert.equal(new Set([...prepared.searchSet.tasks, ...prepared.holdOutSet.tasks].map((task) => task.name)).size, 10);
+		assert.equal(prepared.manifest.totalItems, 10);
+		assert.equal(prepared.searchSet.totalItems, 7);
+		assert.equal(prepared.holdOutSet.totalItems, 3);
+		assert.equal(prepared.searchSet.items.length, 7);
+		assert.equal(prepared.holdOutSet.items.length, 3);
+		assert.equal(prepared.searchSet.items.some((item) => item.name.includes("/")), false);
+		assert.equal(prepared.holdOutSet.items.some((item) => item.name.includes("/")), false);
+		assert.equal(new Set([...prepared.searchSet.items, ...prepared.holdOutSet.items].map((item) => item.name)).size, 10);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("prepareTrialBenchmark discovers slopcodebench manifests and writes a deterministic 14/6 split", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-slop-prepare-"));
+	const repo = await createFakeSlopRepo(20);
+	try {
+		const prepared = await prepareTrialBenchmark(cwd, {
+			benchmark: "slopcodebench",
+			dataset: "slopcodebench@official",
+			repo,
+		});
+		assert.equal(prepared.manifest.family, "slopcodebench");
+		assert.equal(prepared.manifest.totalItems, 20);
+		assert.equal(prepared.searchSet.totalItems, 14);
+		assert.equal(prepared.holdOutSet.totalItems, 6);
+		assert.ok(prepared.manifest.sourceFingerprint.length > 10);
+		assert.ok(prepared.searchSet.items.every((item) => item.family === "slopcodebench"));
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+		await rm(repo, { recursive: true, force: true });
 	}
 });
 
@@ -68,7 +124,7 @@ test("runTrialBaseline archives candidate 000 under the canonical trials layout"
 			{},
 			{
 				runBenchmarkSet: async (_cwd, _model, _profileId, split, candidateId) =>
-					fakeScorecard(split.dataset, split.split, split.tasks, 1, candidateId === "000" ? 2 : 1, split.split === "search" ? 700 : 300),
+					fakeScorecard(split, 1, candidateId === "000" ? 2 : 1, split.split === "search" ? 700 : 300),
 			},
 		);
 		const candidateSummaryPath = join(cwd, ".pi", "quests", "trials", "candidates", "000", "summary.json");
@@ -86,6 +142,7 @@ test("runTrialBaseline archives candidate 000 under the canonical trials layout"
 test("runTrialOptimization promotes a non-dominated proposer candidate and updates current/profile.json", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-run-"));
 	try {
+		await seedCommunityDir(cwd);
 		const result = await runTrialOptimization(
 			cwd,
 			DEFAULT_MODEL,
@@ -147,9 +204,9 @@ test("runTrialOptimization promotes a non-dominated proposer candidate and updat
 				}),
 				runBenchmarkSet: async (_cwd, _model, _profileId, split, candidateId) => {
 					if (candidateId === "000") {
-						return fakeScorecard(split.dataset, split.split, split.tasks, 0.5, 5, split.split === "search" ? 900 : 400);
+						return fakeScorecard(split, 0.5, 5, split.split === "search" ? 900 : 400);
 					}
-					return fakeScorecard(split.dataset, split.split, split.tasks, split.split === "search" ? 0.9 : 1, 2, split.split === "search" ? 500 : 250);
+					return fakeScorecard(split, split.split === "search" ? 0.9 : 1, 2, split.split === "search" ? 500 : 250);
 				},
 			},
 		);
@@ -169,6 +226,7 @@ test("runTrialOptimization promotes a non-dominated proposer candidate and updat
 test("runTrialOptimization rejects candidates that regress hold-out performance", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-reject-"));
 	try {
+		await seedCommunityDir(cwd);
 		await runTrialOptimization(
 			cwd,
 			DEFAULT_MODEL,
@@ -226,9 +284,9 @@ test("runTrialOptimization rejects candidates that regress hold-out performance"
 				}),
 				runBenchmarkSet: async (_cwd, _model, _profileId, split, candidateId) => {
 					if (candidateId === "000") {
-						return fakeScorecard(split.dataset, split.split, split.tasks, split.split === "search" ? 0.5 : 1, 5, 500);
+						return fakeScorecard(split, split.split === "search" ? 0.5 : 1, 5, 500);
 					}
-					return fakeScorecard(split.dataset, split.split, split.tasks, split.split === "search" ? 0.9 : 0.2, 1, 200);
+					return fakeScorecard(split, split.split === "search" ? 0.9 : 0.2, 1, 200);
 				},
 			},
 		);

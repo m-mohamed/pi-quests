@@ -77,7 +77,7 @@ test("quest widget model renders a structured quest panel", () => {
 
 	assert.equal(lines[0], "QUEST // Blue landing page");
 	assert.match(lines[1], /Status planning/);
-	assert.match(lines[1], /quest mode on/);
+	assert.match(lines[1], /quest on/);
 	assert.match(lines[3], /Milestone Landing page/);
 	assert.match(lines[4], /Validation \[/);
 	assert.match(lines[5], /Summary Dry-run validation readiness captured/);
@@ -90,18 +90,23 @@ test("trials widget model renders the trial panel", () => {
 			projectId: "project-ui",
 			target: "repo",
 			activeProfileId: "repo-project-ui",
+			benchmarkFamily: "terminal-bench",
+			benchmarkDataset: "terminal-bench-sample@2.0",
+			currentCandidateId: "001",
 			status: "running",
-			lastSummary: "Spot-checking replay cases.",
+			lastSummary: "Candidate 001 archived. Leader 001 is active on terminal-bench-sample@2.0.",
 			updatedAt: Date.now(),
 		},
 		"repo-project-ui",
-		{ role: "trial", phase: "spot-check", updatedAt: Date.now(), latestToolName: "quest_trials_apply_candidate" },
+		{ role: "trial", phase: "search-benchmark", updatedAt: Date.now(), latestToolName: "quest_trials_set_profile" },
 	);
 	const lines = renderTrialsWidgetLines(model);
 
 	assert.equal(lines[0], "TRIALS // target repo");
 	assert.match(lines[1], /Status running/);
 	assert.match(lines[1], /Profile repo-project-ui/);
-	assert.match(lines[2], /Spot-checking replay cases/);
-	assert.deepEqual(renderTrialsActionLines(), ["Actions /quest trials  |  /quest trials run  |  /quest trials stop  |  /quest trials profile"]);
+	assert.match(lines[2], /Candidate 001 archived/);
+	assert.deepEqual(renderTrialsActionLines(), [
+		"Actions /quest trials status  |  /quest trials prepare-benchmark  |  /quest trials analyze-community  |  /quest trials baseline  |  /quest trials run",
+	]);
 });

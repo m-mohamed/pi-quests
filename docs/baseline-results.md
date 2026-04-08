@@ -89,7 +89,7 @@ Canonical optimization root: `.pi/quests/trials/`
 - `community-traces/`
 - `community-stats.json`
 
-Legacy roots such as `.pi/quests/lab` and `.pi/quests/meta-harness` are migration inputs only.
+Runtime code reads only `.pi/quests/trials/` for frontier state.
 
 ## How to run the frontier pipeline
 

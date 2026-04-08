@@ -126,6 +126,32 @@ function fallbackPlan(goal: string, readiness: ValidationReadiness | null): Ques
 	};
 }
 
+function benchmarkFastPathReadiness(benchmark: QuestBenchmarkProvenance): ValidationReadiness {
+	return {
+		summary: `Benchmark mode for ${benchmark.benchmark}/${benchmark.dataset}: rely on the external verifier as the primary correctness sensor and keep internal quest validation minimal.`,
+		checks: [
+			{
+				id: "benchmark-verifier",
+				surface: "repo-checks",
+				description: "The benchmark harness verifier is authoritative for pass/fail scoring in benchmark mode.",
+				status: "supported",
+				commands: [],
+				evidence: [`${benchmark.benchmark}:${benchmark.dataset}:${benchmark.taskId}`],
+				notes: "Skip the exploratory readiness/planning passes and focus on task execution.",
+			},
+			{
+				id: "human-qa",
+				surface: "user-surface",
+				description: "User-surface QA remains limited during benchmark runs and is not used as a gate.",
+				status: "limited",
+				commands: [],
+				evidence: [],
+				notes: "Benchmark tasks are scored by the external verifier rather than internal UI review.",
+			},
+		],
+	};
+}
+
 function activeAssertionsForPass(
 	quest: QuestState,
 	milestoneId: string,
@@ -166,7 +192,12 @@ function currentMilestones(quest: QuestState): QuestMilestone[] {
 	return [...(quest.plan?.milestones ?? [])].sort((left, right) => left.order - right.order);
 }
 
-function nextSummary(status: QuestHeadlessRunResult["status"], quest: QuestState, validatorFindings: string[]): string {
+function nextSummary(
+	status: QuestHeadlessRunResult["status"],
+	quest: QuestState,
+	validatorFindings: string[],
+	benchmark?: QuestBenchmarkProvenance,
+): string {
 	switch (status) {
 		case "proposal_ready":
 			return "Quest proposal is ready for review.";
@@ -175,7 +206,9 @@ function nextSummary(status: QuestHeadlessRunResult["status"], quest: QuestState
 		case "blocked":
 			return quest.lastError ?? validatorFindings[0] ?? "Quest blocked during benchmark execution.";
 		case "completed":
-			return "Quest completed with explicit human QA still pending.";
+			return benchmark
+				? "Quest completed execution; the external benchmark verifier remains authoritative for pass/fail."
+				: "Quest completed with explicit human QA still pending.";
 		case "timeout":
 			return "Quest timed out before completion.";
 		default:
@@ -227,9 +260,13 @@ export async function runQuestHeadless(
 	const traceBundleIds: string[] = [];
 	const validatorFindings: string[] = [];
 	const startedAt = Date.now();
+	const benchmarkFastPath = Boolean(benchmark);
 
-	let readiness: ValidationReadiness | null = null;
-	if (!input.dryRun) {
+	let readiness: ValidationReadiness | null = benchmark ? benchmarkFastPathReadiness(benchmark) : null;
+	if (benchmarkFastPath && readiness) {
+		quest.validationReadiness = readiness;
+	}
+	if (!input.dryRun && !benchmarkFastPath) {
 		const probe = await executors.probe(input.cwd, input.modelChoice, profile, benchmark);
 		readiness = probe.readiness;
 		quest.validationReadiness = probe.readiness ?? quest.validationReadiness;
@@ -242,12 +279,12 @@ export async function runQuestHeadless(
 	}
 
 	let plan = fallbackPlan(input.instruction, readiness);
-	if (!input.dryRun) {
+	if (!input.dryRun && !benchmarkFastPath) {
 		const planningStartedAt = Date.now();
 		const planned = await executors.planner(input.cwd, input.instruction, input.modelChoice, readiness, profile, benchmark);
 		quest.recentRuns = trimRecentRuns([planned.run, ...quest.recentRuns]);
 		await writeWorkerRun(quest.cwd, quest.id, planned.run);
-		const planningTrace = traceBundleFromPlanningSession(
+			const planningTrace = traceBundleFromPlanningSession(
 			quest,
 			planned.run.events,
 			input.modelChoice,
@@ -257,8 +294,8 @@ export async function runQuestHeadless(
 			planningStartedAt,
 			Date.now(),
 			planned.run.latestAssistantText,
-			benchmark ? { ...benchmark, passed: planned.run.ok } : undefined,
-		);
+				benchmark ? { ...benchmark } : undefined,
+			);
 		traceBundleIds.push(planningTrace.id);
 		await writeQuestTraceBundle(quest.cwd, planningTrace);
 		if (planned.plan) plan = planned.plan;
@@ -275,15 +312,15 @@ export async function runQuestHeadless(
 	await saveQuest(quest);
 
 	if (!autoAccept || input.dryRun) {
-		const preliminary: QuestHeadlessRunResult = {
-			status: quest.status,
-			summary: nextSummary(quest.status, quest, validatorFindings),
-			questId: quest.id,
+			const preliminary: QuestHeadlessRunResult = {
+				status: quest.status,
+				summary: nextSummary(quest.status, quest, validatorFindings, benchmark),
+				questId: quest.id,
 			profileId: profile.id,
 			traceBundleIds,
 			validatorFindings,
 			artifactPaths: {},
-			benchmark: benchmark ? { ...benchmark, passed: false } : undefined,
+			benchmark: benchmark ? { ...benchmark } : undefined,
 		};
 		const resultFile = await persistResultFile(quest, preliminary);
 		preliminary.artifactPaths = resultArtifactPaths(quest, resultFile);
@@ -301,14 +338,14 @@ export async function runQuestHeadless(
 		if (deadline && Date.now() > deadline) {
 			const timeoutResult: QuestHeadlessRunResult = {
 				status: "timeout",
-				summary: nextSummary("timeout", quest, validatorFindings),
+				summary: nextSummary("timeout", quest, validatorFindings, benchmark),
 				questId: quest.id,
 				profileId: profile.id,
 				traceBundleIds,
 				validatorFindings,
 				timeoutReason: `Exceeded ${input.timeoutMs}ms before finishing the quest.`,
 				artifactPaths: {},
-				benchmark: benchmark ? { ...benchmark, passed: false } : undefined,
+				benchmark: benchmark ? { ...benchmark } : undefined,
 			};
 			const resultFile = await persistResultFile(quest, timeoutResult);
 			timeoutResult.artifactPaths = resultArtifactPaths(quest, resultFile);
@@ -338,13 +375,13 @@ export async function runQuestHeadless(
 				await saveQuest(quest);
 				const blockedResult: QuestHeadlessRunResult = {
 					status: quest.status,
-					summary: nextSummary(quest.status, quest, validatorFindings),
+					summary: nextSummary(quest.status, quest, validatorFindings, benchmark),
 					questId: quest.id,
 					profileId: profile.id,
 					traceBundleIds,
 					validatorFindings,
 					artifactPaths: {},
-					benchmark: benchmark ? { ...benchmark, passed: false } : undefined,
+					benchmark: benchmark ? { ...benchmark } : undefined,
 				};
 				const resultFile = await persistResultFile(quest, blockedResult);
 				blockedResult.artifactPaths = resultArtifactPaths(quest, resultFile);
@@ -354,6 +391,17 @@ export async function runQuestHeadless(
 		}
 
 		const milestoneFeatures = currentMilestoneFeatures(quest, milestone.id);
+		if (benchmarkFastPath) {
+			markAssertions(
+				quest,
+				(quest.validationState?.assertions ?? []).filter((assertion) => assertion.milestoneId === milestone.id),
+				"passed",
+				"Benchmark fast path: external benchmark verifier is authoritative.",
+			);
+			milestone.status = "completed";
+			await saveQuest(quest);
+			continue;
+		}
 		for (const pass of ["code_review", "user_surface"] as const) {
 			const validationRun = await executors.validator(
 				quest,
@@ -384,13 +432,13 @@ export async function runQuestHeadless(
 			await saveQuest(quest);
 			const blockedResult: QuestHeadlessRunResult = {
 				status: quest.status,
-				summary: nextSummary(quest.status, quest, validatorFindings),
+				summary: nextSummary(quest.status, quest, validatorFindings, benchmark),
 				questId: quest.id,
 				profileId: profile.id,
 				traceBundleIds,
 				validatorFindings,
 				artifactPaths: {},
-				benchmark: benchmark ? { ...benchmark, passed: false } : undefined,
+				benchmark: benchmark ? { ...benchmark } : undefined,
 			};
 			const resultFile = await persistResultFile(quest, blockedResult);
 			blockedResult.artifactPaths = resultArtifactPaths(quest, resultFile);
@@ -406,18 +454,20 @@ export async function runQuestHeadless(
 	quest.humanQaStatus = "pending";
 	quest.shipReadiness = "validated_waiting_for_human_qa";
 	quest.completedAt = Date.now();
-	quest.lastSummary = "Benchmark quest completed. Human QA remains explicit before any release claims or shipping.";
+	quest.lastSummary = benchmark
+		? "Benchmark quest completed execution. External verifier results remain authoritative for pass/fail."
+		: "Benchmark quest completed. Human QA remains explicit before any release claims or shipping.";
 	await saveQuest(quest);
 
 	const completedResult: QuestHeadlessRunResult = {
 		status: quest.status,
-		summary: nextSummary(quest.status, quest, validatorFindings),
+		summary: nextSummary(quest.status, quest, validatorFindings, benchmark),
 		questId: quest.id,
 		profileId: profile.id,
 		traceBundleIds,
 		validatorFindings,
 		artifactPaths: {},
-		benchmark: benchmark ? { ...benchmark, passed: true } : undefined,
+		benchmark: benchmark ? { ...benchmark } : undefined,
 	};
 	const resultFile = await persistResultFile(quest, completedResult);
 	completedResult.artifactPaths = resultArtifactPaths(quest, resultFile);

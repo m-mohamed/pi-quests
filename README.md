@@ -75,10 +75,10 @@ Typical flow:
 - `/quest model <orchestrator|worker|validator> <provider/model[:thinking]>`
 - `/quest trials`
 - `/quest trials status`
-- `/quest trials prepare-benchmark [dataset]`
+- `/quest trials prepare-benchmark [--benchmark terminal-bench|slopcodebench] [--dataset <id>] [--repo <path>]`
 - `/quest trials analyze-community [--force]`
-- `/quest trials baseline`
-- `/quest trials run`
+- `/quest trials baseline [--benchmark ...] [--dataset <id>] [--repo <path>]`
+- `/quest trials run [--iterations <n>] [--benchmark ...] [--dataset <id>] [--repo <path>]`
 - `/quest trials stop`
 - `/quest trials profile`
 - `/quests`
@@ -96,15 +96,13 @@ quest-headless run \
 
 The headless runner writes a machine-readable contract under `.pi/quests/<quest-id>/headless-run.json` and keeps benchmark provenance on Quest artifacts plus Harbor trial directories.
 
-Local smoke and development scripts:
+Local development substrate:
 
 ```bash
 npm run benchmark:local
 npm run benchmark:tbench:preflight
 npm run benchmark:tbench:sample -- --dry-run
 npm run benchmark:tbench:sample
-npm run benchmark:slop:smoke
-npm run benchmark:slop:local
 ```
 
 Official benchmark run entrypoints:
@@ -120,8 +118,6 @@ Benchmark targets:
 
 - **Terminal-Bench** via Harbor and the installed-agent adapter in `benchmarks/harbor/README.md`
 - **SlopCodeBench** through the official-run overlay described in `benchmarks/slopcodebench/README.md`
-
-The local `benchmark:slop:smoke` and `benchmark:slop:local` commands are development substrate only. Public SlopCodeBench claims should come from the official runner path, not the local JSON smoke fixtures.
 
 Quest is released methodology-first: the package, adapters, and reproducibility docs are public before any benchmark-number claims are made.
 
@@ -149,7 +145,7 @@ It keeps Quest execution and Quest optimization separate:
 
 1. normal `/quest` runs stay focused on the current repo task
 2. Trials ingest raw Pi community sessions from `.pi/quests/trials/community-traces/` and generate canonical aggregate stats in `.pi/quests/trials/community-stats.json`
-3. `/quest trials prepare-benchmark` writes explicit search and hold-out task lists under `.pi/quests/trials/`
+3. `/quest trials prepare-benchmark` writes explicit search and hold-out work-item lists under `.pi/quests/trials/`
 4. `/quest trials baseline` archives the current profile as candidate `000`
 5. `/quest trials run` asks the `proposer` role to patch only trial-owned profile surfaces, then scores each candidate on the search split and validates it on hold-out
 6. non-dominated candidates stay on the Pareto frontier, and the current frontier leader is promoted to `.pi/quests/trials/current/profile.json`
@@ -160,11 +156,11 @@ Trials do not mutate Quest runtime code during normal task execution, and they n
 
 - `/quest trials` opens Trials Control in interactive mode and prints a summary in print/RPC mode
 - `/quest trials status` prints the canonical benchmark/community/frontier status
-- `/quest trials prepare-benchmark [dataset]` writes the explicit search/hold-out split
+- `/quest trials prepare-benchmark [--benchmark ...] [--dataset <id>] [--repo <path>]` writes the explicit search/hold-out split
 - `/quest trials analyze-community [--force]` regenerates canonical Pi-native community stats
-- `/quest trials baseline` runs the current profile through Harbor and archives candidate `000`
-- `/quest trials run` runs the frontier optimization loop for the active profile
-- `/quest trials stop` stops the active trial run and preserves the current experiment report
+- `/quest trials baseline [--benchmark ...] [--dataset <id>] [--repo <path>]` archives candidate `000` for the active benchmark family
+- `/quest trials run [--iterations <n>] [--benchmark ...] [--dataset <id>] [--repo <path>]` runs the frontier optimization loop for the active profile
+- `/quest trials stop` stops the active trial run without changing the leader profile
 - `/quest trials profile` prints the active profile, adopted changes, and latest score summary
 
 ## Stored Artifacts
@@ -199,7 +195,7 @@ Trials store their own improvement artifacts under `.pi/quests/trials/`:
 - `community-traces/`
 - `community-stats.json`
 
-Legacy roots such as `.pi/quests/lab` and `.pi/quests/meta-harness` are migration inputs only. The live optimization runtime is canonical on `.pi/quests/trials/`.
+Trials are canonical on `.pi/quests/trials/`. Runtime code does not read any pre-frontier optimization roots.
 
 Quest artifacts are the source of truth. `pi.appendEntry()` is only used for session-local UI state such as quest mode and the last-opened Quest Control tab.
 
@@ -218,10 +214,10 @@ Quest Control uses Pi’s native custom UI surface through `ctx.ui.custom()` and
 Trials use the same native Pi custom UI surface and show:
 
 - active profile and optimization target
-- recent traces and their failure tags
-- dataset and experiment counts
-- last adopted changes
-- latest experiment score summaries and status
+- benchmark family and dataset
+- search and hold-out split counts
+- frontier leader and candidate count
+- community ingestion status
 
 ## Package Shape
 

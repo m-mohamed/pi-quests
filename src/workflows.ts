@@ -1,9 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { LearnedWorkflow, WorkerRunRecord } from "./types.js";
-
-function compact(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
-}
+import { compact } from "./utils.js";
 
 function uniqueByTitle(items: LearnedWorkflow[]): LearnedWorkflow[] {
 	const byTitle = new Map<string, LearnedWorkflow>();

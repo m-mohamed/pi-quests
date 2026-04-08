@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { runQuestHeadless, type QuestHeadlessRunInput } from "./headless-core.js";
 import type { ModelChoice, QuestBenchmarkName, QuestBenchmarkRunMode } from "./types.js";
 
-interface ParsedArgs {
+export interface ParsedArgs {
 	command: "help" | "run";
 	json?: boolean;
 	input?: QuestHeadlessRunInput;
@@ -18,8 +18,8 @@ function usage(): string {
 
 Options:
   --cwd <path>                     Working directory (default: current directory)
-  --model <provider/model>         Model to use (default: openai-codex/gpt-5.4)
-  --thinking <level>               Thinking level (default: high)
+  --model <provider/model>         Model to use (default: zai/glm-5.1)
+  --thinking <level>               Thinking level (default: high, or medium for --benchmark)
   --profile <id>                   Trials profile id
   --timeout-ms <ms>                Soft timeout budget in milliseconds
   --dry-run                        Stop after proposal generation
@@ -36,8 +36,8 @@ Examples:
   quest-headless run --instruction "Solve the task" --benchmark terminal-bench --dataset terminal-bench-sample@2.0 --task-id task-001 --run-mode sample --json`;
 }
 
-function parseModelChoice(modelSpec: string | undefined, thinkingLevel: string | undefined): ModelChoice {
-	const spec = modelSpec ?? "openai-codex/gpt-5.4";
+export function parseModelChoice(modelSpec: string | undefined, thinkingLevel: string | undefined): ModelChoice {
+	const spec = modelSpec ?? "zai/glm-5.1";
 	const splitAt = spec.indexOf("/");
 	if (splitAt <= 0 || splitAt === spec.length - 1) throw new Error(`Invalid model spec: ${spec}`);
 	return {
@@ -47,7 +47,7 @@ function parseModelChoice(modelSpec: string | undefined, thinkingLevel: string |
 	};
 }
 
-async function parseArgs(argv: string[]): Promise<ParsedArgs> {
+export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 	if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
 		return { command: "help" };
 	}
@@ -137,7 +137,7 @@ async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 		input: {
 			cwd,
 			instruction: instruction.trim(),
-			modelChoice: parseModelChoice(modelSpec, thinkingLevel),
+			modelChoice: parseModelChoice(modelSpec, thinkingLevel ?? (benchmarkName ? "medium" : undefined)),
 			profileId,
 			timeoutMs,
 			dryRun,

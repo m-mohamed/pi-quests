@@ -8,8 +8,8 @@ import { createQuest, loadActiveQuest, saveQuest } from "../src/state-core.js";
 
 const extensionDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MODEL = {
-	provider: "openai-codex",
-	model: "gpt-5.4",
+	provider: "zai",
+	model: "glm-5.1",
 	thinkingLevel: "high" as const,
 };
 
@@ -86,7 +86,7 @@ async function main() {
 		const version = await runCommand("pi", ["--version"]);
 		const versionText = `${version.stdout}\n${version.stderr}`;
 		assert(version.exitCode === 0, `pi --version failed: ${version.stderr}`);
-		assert(/0\.64\.\d+/.test(versionText), `expected Pi 0.64.x for this extension, got: ${versionText.trim()}`);
+		assert(/0\.65\.\d+/.test(versionText), `expected Pi 0.65.x for this extension, got: ${versionText.trim()}`);
 
 		const status = await runPi(agentDir, resolvedRepoDir, "/quest");
 		assert(status.exitCode === 0, `status command failed: ${status.stderr}`);

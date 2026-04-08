@@ -1,10 +1,5 @@
 import type { LiveRunSnapshot, QuestRole, WorkerEventRecord } from "./types.js";
-
-function truncate(text: string, max = 160): string {
-	const compact = text.replace(/\s+/g, " ").trim();
-	if (compact.length <= max) return compact;
-	return `${compact.slice(0, max - 1)}…`;
-}
+import { truncate } from "./utils.js";
 
 function asText(value: unknown): string {
 	if (!value) return "";

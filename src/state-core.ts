@@ -1,13 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, readdir, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { defaultQuestProfile, normalizeQuestProfile } from "./trials-core.js";
 import type {
 	LearnedWorkflow,
 	ModelChoice,
-	QuestEvalDataset,
-	QuestExperiment,
 	QuestTrialPaths,
 	QuestTrialState,
 	QuestConfig,
@@ -37,8 +35,6 @@ const SKILLS_DIR = "skills";
 const SHARED_SKILLS_DIR = "shared-skills";
 const SHARED_WORKFLOWS_FILE = "index.json";
 const TRIALS_DIR = "trials";
-const LEGACY_LAB_DIR = "lab";
-const LEGACY_META_HARNESS_DIR = "meta-harness";
 const TRIALS_STATE_FILE = "state.json";
 const TRIALS_CURRENT_DIR = "current";
 const TRIALS_CURRENT_PROFILE_FILE = "profile.json";
@@ -49,11 +45,8 @@ const TRIALS_FRONTIER_FILE = "frontier.json";
 const TRIALS_COMMUNITY_STATS_FILE = "community-stats.json";
 const TRIALS_COMMUNITY_TRACES_DIR = "community-traces";
 const TRIALS_PROFILES_DIR = "profiles";
-const TRIALS_DATASETS_DIR = "datasets";
 const TRIALS_TRACES_DIR = "traces";
-const TRIALS_EXPERIMENTS_DIR = "experiments";
-const TRIALS_BASELINES_DIR = "baselines";
-const TRIALS_REPORTS_DIR = "reports";
+const LEGACY_TRIAL_DIRS = ["datasets", "experiments", "baselines", "reports"] as const;
 const PRUNE_LOG_AGE_MS = 1000 * 60 * 60 * 24 * 14;
 const TERMINAL_STATUSES = new Set<QuestStatus>(["completed", "aborted"]);
 
@@ -162,11 +155,7 @@ export function getQuestTrialPaths(cwd: string): QuestTrialPaths {
 		communityStatsFile: join(rootDir, TRIALS_COMMUNITY_STATS_FILE),
 		communityTracesDir: join(rootDir, TRIALS_COMMUNITY_TRACES_DIR),
 		profilesDir: join(rootDir, TRIALS_PROFILES_DIR),
-		datasetsDir: join(rootDir, TRIALS_DATASETS_DIR),
 		tracesDir: join(rootDir, TRIALS_TRACES_DIR),
-		experimentsDir: join(rootDir, TRIALS_EXPERIMENTS_DIR),
-		baselinesDir: join(rootDir, TRIALS_BASELINES_DIR),
-		reportsDir: join(rootDir, TRIALS_REPORTS_DIR),
 	};
 }
 
@@ -270,11 +259,10 @@ async function ensureTrialRoot(cwd: string): Promise<QuestTrialPaths> {
 	await mkdir(paths.candidatesDir, { recursive: true });
 	await mkdir(paths.communityTracesDir, { recursive: true });
 	await mkdir(paths.profilesDir, { recursive: true });
-	await mkdir(paths.datasetsDir, { recursive: true });
 	await mkdir(paths.tracesDir, { recursive: true });
-	await mkdir(paths.experimentsDir, { recursive: true });
-	await mkdir(paths.baselinesDir, { recursive: true });
-	await mkdir(paths.reportsDir, { recursive: true });
+	for (const legacyDir of LEGACY_TRIAL_DIRS) {
+		await rm(join(paths.rootDir, legacyDir), { recursive: true, force: true });
+	}
 	return paths;
 }
 
@@ -561,24 +549,8 @@ function profileFile(paths: QuestTrialPaths, profileId: string): string {
 	return join(paths.profilesDir, `${profileId}.json`);
 }
 
-function datasetFile(paths: QuestTrialPaths, datasetId: string): string {
-	return join(paths.datasetsDir, `${datasetId}.json`);
-}
-
-function experimentFile(paths: QuestTrialPaths, experimentId: string): string {
-	return join(paths.experimentsDir, `${experimentId}.json`);
-}
-
 function traceFile(paths: QuestTrialPaths, traceId: string, endedAt: number): string {
 	return join(paths.tracesDir, `${endedAt}-${traceId}.json`);
-}
-
-function baselineFile(paths: QuestTrialPaths, experimentId: string): string {
-	return join(paths.baselinesDir, `${experimentId}.json`);
-}
-
-function reportFile(paths: QuestTrialPaths, reportId: string): string {
-	return join(paths.reportsDir, `${reportId}.json`);
 }
 
 function defaultTrialState(cwd: string): QuestTrialState {
@@ -587,7 +559,8 @@ function defaultTrialState(cwd: string): QuestTrialState {
 		projectId,
 		target: "repo",
 		activeProfileId: `repo-${projectId}`,
-		storageVersion: 2,
+		storageVersion: 3,
+		benchmarkFamily: "terminal-bench",
 		benchmarkDataset: "terminal-bench-sample@2.0",
 		benchmarkRunMode: "sample",
 		frontierCandidateIds: [],
@@ -596,106 +569,12 @@ function defaultTrialState(cwd: string): QuestTrialState {
 	};
 }
 
-function legacyLabPaths(cwd: string) {
-	const questsRootDir = join(cwd, QUESTS_ROOT_DIR);
-	const rootDir = join(questsRootDir, LEGACY_LAB_DIR);
-	return {
-		rootDir,
-		stateFile: join(rootDir, TRIALS_STATE_FILE),
-		profilesDir: join(rootDir, TRIALS_PROFILES_DIR),
-	};
-}
-
-function legacyMetaHarnessPaths(cwd: string) {
-	const questsRootDir = join(cwd, QUESTS_ROOT_DIR);
-	const rootDir = join(questsRootDir, LEGACY_META_HARNESS_DIR);
-	return {
-		rootDir,
-		searchSetFile: join(rootDir, TRIALS_SEARCH_SET_FILE),
-		holdOutSetFile: join(rootDir, TRIALS_HOLD_OUT_SET_FILE),
-		communityStatsFile: join(rootDir, "traces", TRIALS_COMMUNITY_STATS_FILE),
-		communityDir: join(rootDir, "traces", "community"),
-	};
-}
-
-function splitFileLooksConsistent(payload: unknown): boolean {
-	if (!payload || typeof payload !== "object") return false;
-	const split = payload as { totalTasks?: unknown; tasks?: unknown };
-	return Array.isArray(split.tasks) && typeof split.totalTasks === "number" && split.totalTasks === split.tasks.length;
-}
-
-async function migrateLegacyTrialStateIfNeeded(cwd: string, defaults: QuestTrialState): Promise<QuestTrialState | null> {
-	const legacyLab = legacyLabPaths(cwd);
-	if (!existsSync(legacyLab.stateFile)) return null;
-	try {
-		const raw = await readFile(legacyLab.stateFile, "utf-8");
-		const parsed = JSON.parse(raw) as Partial<QuestTrialState>;
-		const migrated: QuestTrialState = {
-			...defaults,
-			...parsed,
-			projectId: defaults.projectId,
-			activeProfileId: parsed.activeProfileId ?? defaults.activeProfileId,
-			target: parsed.target ?? defaults.target,
-			storageVersion: 2,
-			benchmarkDataset: parsed.benchmarkDataset ?? defaults.benchmarkDataset,
-			benchmarkRunMode: parsed.benchmarkRunMode ?? defaults.benchmarkRunMode,
-			frontierCandidateIds: parsed.frontierCandidateIds ?? defaults.frontierCandidateIds,
-		};
-		const legacyProfileFile = join(legacyLab.profilesDir, `${migrated.activeProfileId}.json`);
-		const paths = await ensureTrialRoot(cwd);
-		if (existsSync(legacyProfileFile) && !existsSync(paths.currentProfileFile)) {
-			const profileRaw = await readFile(legacyProfileFile, "utf-8");
-			await writeFile(paths.currentProfileFile, profileRaw.endsWith("\n") ? profileRaw : `${profileRaw}\n`, "utf-8");
-			await writeFile(profileFile(paths, migrated.activeProfileId), profileRaw.endsWith("\n") ? profileRaw : `${profileRaw}\n`, "utf-8");
-		}
-
-		const legacyMeta = legacyMetaHarnessPaths(cwd);
-		for (const [sourceFile, targetFile] of [
-			[legacyMeta.searchSetFile, paths.searchSetFile],
-			[legacyMeta.holdOutSetFile, paths.holdOutSetFile],
-		] as const) {
-			if (!existsSync(sourceFile) || existsSync(targetFile)) continue;
-			try {
-				const splitRaw = await readFile(sourceFile, "utf-8");
-				const splitPayload = JSON.parse(splitRaw);
-				if (!splitFileLooksConsistent(splitPayload)) continue;
-				await writeFile(targetFile, `${JSON.stringify(splitPayload, null, 2)}\n`, "utf-8");
-			} catch {
-				continue;
-			}
-		}
-		if (existsSync(legacyMeta.communityDir)) {
-			const currentEntries = await readdir(paths.communityTracesDir).catch(() => []);
-			if (currentEntries.length === 0) {
-				const legacyEntries = await readdir(legacyMeta.communityDir, { withFileTypes: true }).catch(() => []);
-				for (const entry of legacyEntries) {
-					const sourceEntry = join(legacyMeta.communityDir, entry.name);
-					let copySource = sourceEntry;
-					try {
-						copySource = await realpath(sourceEntry).catch(() => sourceEntry);
-						if (!existsSync(copySource)) continue;
-						await cp(copySource, join(paths.communityTracesDir, entry.name), { recursive: true, force: true });
-					} catch {
-						continue;
-					}
-				}
-			}
-		}
-		await writeFile(paths.stateFile, `${JSON.stringify(migrated, null, 2)}\n`, "utf-8");
-		return migrated;
-	} catch {
-		return null;
-	}
-}
-
 export async function loadQuestTrialState(cwd: string, options: { ensure?: boolean } = {}): Promise<QuestTrialState> {
 	const defaults = defaultTrialState(cwd);
 	const paths = getQuestTrialPaths(cwd);
+	if (options.ensure) await ensureTrialRoot(cwd);
 	if (!existsSync(paths.stateFile)) {
 		if (options.ensure) {
-			const migrated = await migrateLegacyTrialStateIfNeeded(cwd, defaults);
-			if (migrated) return migrated;
-			await ensureTrialRoot(cwd);
 			await writeFile(paths.stateFile, `${JSON.stringify(defaults, null, 2)}\n`, "utf-8");
 		}
 		return defaults;
@@ -703,17 +582,22 @@ export async function loadQuestTrialState(cwd: string, options: { ensure?: boole
 	try {
 		const raw = await readFile(paths.stateFile, "utf-8");
 		const parsed = JSON.parse(raw) as Partial<QuestTrialState>;
-		return {
+		const normalized: QuestTrialState = {
 			...defaults,
 			...parsed,
 			projectId: defaults.projectId,
 			activeProfileId: parsed.activeProfileId ?? defaults.activeProfileId,
 			target: parsed.target ?? defaults.target,
-			storageVersion: parsed.storageVersion ?? defaults.storageVersion,
+			storageVersion: defaults.storageVersion,
+			benchmarkFamily: parsed.benchmarkFamily ?? defaults.benchmarkFamily,
 			benchmarkDataset: parsed.benchmarkDataset ?? defaults.benchmarkDataset,
 			benchmarkRunMode: parsed.benchmarkRunMode ?? defaults.benchmarkRunMode,
 			frontierCandidateIds: parsed.frontierCandidateIds ?? defaults.frontierCandidateIds,
 		};
+		if (options.ensure && JSON.stringify(parsed) !== JSON.stringify(normalized)) {
+			await writeFile(paths.stateFile, `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
+		}
+		return normalized;
 	} catch {
 		return defaults;
 	}
@@ -806,90 +690,6 @@ export async function listQuestTraceBundles(cwd: string, limit = 48): Promise<Qu
 		}
 	}
 	return traces.sort((left, right) => right.endedAt - left.endedAt).slice(0, limit);
-}
-
-export async function loadQuestEvalDataset(cwd: string, datasetId: string): Promise<QuestEvalDataset | null> {
-	const paths = getQuestTrialPaths(cwd);
-	const file = datasetFile(paths, datasetId);
-	if (!existsSync(file)) return null;
-	try {
-		const raw = await readFile(file, "utf-8");
-		return JSON.parse(raw) as QuestEvalDataset;
-	} catch {
-		return null;
-	}
-}
-
-export async function saveQuestEvalDataset(cwd: string, dataset: QuestEvalDataset): Promise<void> {
-	const paths = await ensureTrialRoot(cwd);
-	dataset.updatedAt = Date.now();
-	await writeFile(datasetFile(paths, dataset.id), `${JSON.stringify(dataset, null, 2)}\n`, "utf-8");
-}
-
-export async function listQuestEvalDatasets(cwd: string): Promise<QuestEvalDataset[]> {
-	const paths = getQuestTrialPaths(cwd);
-	if (!existsSync(paths.datasetsDir)) return [];
-	const entries = await readdir(paths.datasetsDir);
-	const datasets: QuestEvalDataset[] = [];
-	for (const entry of entries) {
-		if (!entry.endsWith(".json")) continue;
-		try {
-			const raw = await readFile(join(paths.datasetsDir, entry), "utf-8");
-			datasets.push(JSON.parse(raw) as QuestEvalDataset);
-		} catch {
-			continue;
-		}
-	}
-	return datasets.sort((left, right) => left.kind.localeCompare(right.kind));
-}
-
-export async function saveQuestExperiment(cwd: string, experiment: QuestExperiment): Promise<void> {
-	const paths = await ensureTrialRoot(cwd);
-	experiment.updatedAt = Date.now();
-	await writeFile(experimentFile(paths, experiment.id), `${JSON.stringify(experiment, null, 2)}\n`, "utf-8");
-}
-
-export async function loadQuestExperiment(cwd: string, experimentId: string): Promise<QuestExperiment | null> {
-	const paths = getQuestTrialPaths(cwd);
-	const file = experimentFile(paths, experimentId);
-	if (!existsSync(file)) return null;
-	try {
-		const raw = await readFile(file, "utf-8");
-		return JSON.parse(raw) as QuestExperiment;
-	} catch {
-		return null;
-	}
-}
-
-export async function listQuestExperiments(cwd: string, limit = 24): Promise<QuestExperiment[]> {
-	const paths = getQuestTrialPaths(cwd);
-	if (!existsSync(paths.experimentsDir)) return [];
-	const entries = await readdir(paths.experimentsDir);
-	const experiments: QuestExperiment[] = [];
-	for (const entry of entries) {
-		if (!entry.endsWith(".json")) continue;
-		try {
-			const raw = await readFile(join(paths.experimentsDir, entry), "utf-8");
-			experiments.push(JSON.parse(raw) as QuestExperiment);
-		} catch {
-			continue;
-		}
-	}
-	return experiments.sort((left, right) => right.updatedAt - left.updatedAt).slice(0, limit);
-}
-
-export async function saveQuestBaselineProfile(cwd: string, experimentId: string, profile: QuestProfile): Promise<string> {
-	const paths = await ensureTrialRoot(cwd);
-	const file = baselineFile(paths, experimentId);
-	await writeFile(file, `${JSON.stringify(profile, null, 2)}\n`, "utf-8");
-	return file;
-}
-
-export async function saveQuestTrialReport(cwd: string, reportId: string, payload: unknown): Promise<string> {
-	const paths = await ensureTrialRoot(cwd);
-	const file = reportFile(paths, reportId);
-	await writeFile(file, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
-	return file;
 }
 
 export async function questDirStats(cwd: string, questId: string): Promise<{ hasEvents: boolean; runFiles: number }> {

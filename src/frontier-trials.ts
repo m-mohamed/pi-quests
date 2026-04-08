@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { cp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyQuestProfilePatch } from "./trials-core.js";
 import { getQuestTrialPaths, loadQuestProfile, loadQuestTrialState, saveQuestProfile, saveQuestTrialState } from "./state.js";
@@ -11,13 +12,16 @@ import type {
 	CommunityStats,
 	LiveRunSnapshot,
 	ModelChoice,
-	QuestBenchmarkTaskDescriptor,
-	QuestBenchmarkTaskManifest,
-	QuestBenchmarkTaskSplit,
+	QuestBenchmarkManifest,
+	QuestBenchmarkProvenance,
+	QuestBenchmarkRunMode,
+	QuestBenchmarkSplit,
+	QuestBenchmarkWorkItem,
 	QuestCandidateScorecard,
 	QuestCandidateSummary,
-	QuestCandidateTaskResult,
+	QuestCandidateWorkItemResult,
 	QuestExperimentCandidate,
+	QuestFrontierBenchmarkFamily,
 	QuestFrontierState,
 	QuestProfile,
 } from "./types.js";
@@ -25,21 +29,19 @@ import type {
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_SAMPLE_SEED = 42;
 const DEFAULT_SAMPLE_HOLD_OUT_COUNT = 3;
-
-interface FrontierTrialDependencies {
-	analyzeCommunity?: typeof analyzeCommunityTraces;
-	proposeCandidate?: typeof executeTrialProposerAgent;
-	runBenchmarkSet?: typeof runBenchmarkSet;
-	now?: () => number;
-}
+const SOURCE_FINGERPRINT_ALGORITHM = "sha1";
+const FRONTIER_ADAPTER_VERSION = "frontier-v2";
 
 interface PrepareBenchmarkOptions {
+	benchmark?: QuestFrontierBenchmarkFamily;
 	dataset?: string;
-	runMode?: "sample" | "full" | "custom";
+	repo?: string;
+	runMode?: QuestBenchmarkRunMode;
 	seed?: number;
+	force?: boolean;
 }
 
-interface BaselineOptions {
+interface BaselineOptions extends PrepareBenchmarkOptions {
 	force?: boolean;
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>;
 	onProcessStart?: (pid: number) => void | Promise<void>;
@@ -49,25 +51,111 @@ interface RunOptions extends BaselineOptions {
 	iterations?: number;
 }
 
+type RunBenchmarkSetFn = (
+	cwd: string,
+	modelChoice: ModelChoice,
+	profileId: string,
+	split: QuestBenchmarkSplit,
+	candidateId: string,
+	options?: { repo?: string; onProcessStart?: (pid: number) => void | Promise<void> },
+) => Promise<QuestCandidateScorecard>;
+
+interface FrontierTrialDependencies {
+	analyzeCommunity?: typeof analyzeCommunityTraces;
+	proposeCandidate?: typeof executeTrialProposerAgent;
+	runBenchmarkSet?: RunBenchmarkSetFn;
+	now?: () => number;
+}
+
 export interface FrontierTrialStatus {
 	state: Awaited<ReturnType<typeof loadQuestTrialState>>;
 	profile: QuestProfile;
-	searchSet: QuestBenchmarkTaskSplit | null;
-	holdOutSet: QuestBenchmarkTaskSplit | null;
+	searchSet: QuestBenchmarkSplit | null;
+	holdOutSet: QuestBenchmarkSplit | null;
 	frontier: QuestFrontierState | null;
 	communityStats: CommunityStats | null;
 	leader: QuestCandidateSummary | null;
 }
 
+interface BenchmarkAdapter {
+	family: QuestFrontierBenchmarkFamily;
+	defaultDataset: string;
+	resolveRunMode(dataset: string, requested?: QuestBenchmarkRunMode): QuestBenchmarkRunMode;
+	discoverManifest(options: {
+		dataset: string;
+		runMode: QuestBenchmarkRunMode;
+		repo?: string;
+		now: number;
+	}): Promise<QuestBenchmarkManifest>;
+	runSplit(options: {
+		cwd: string;
+		modelChoice: ModelChoice;
+		profileId: string;
+		split: QuestBenchmarkSplit;
+		candidateId: string;
+		repo?: string;
+		onProcessStart?: (pid: number) => void | Promise<void>;
+	}): Promise<QuestCandidateScorecard>;
+}
+
 interface HarborTaskResultRecord {
 	taskName: string;
-	trialName: string;
 	trialDir: string;
-	result: Record<string, any>;
+	result: Record<string, unknown>;
+}
+
+interface SlopCheckpointResult {
+	problem: string;
+	checkpoint: string;
+	path?: string;
+	state?: string;
+	pass_rate?: number;
+	core_pass_rate?: number;
+	checkpoint_pass_rate?: number;
+	cost?: number;
+	elapsed?: number;
+	duration?: number;
+	started?: string;
+	ended?: string;
+	steps?: number;
+	total_tests?: number;
+	passed_tests?: number;
+	core_total?: number;
+	core_passed?: number;
+}
+
+interface SlopRunSummary {
+	model?: string;
+	num_problems?: number;
+	num_checkpoints?: number;
+	solve_rates?: Record<string, unknown>;
+	costs?: Record<string, unknown>;
+	time?: Record<string, unknown>;
+	tokens?: Record<string, unknown>;
+	pass_rates?: Record<string, unknown>;
+	cc?: Record<string, unknown>;
+	ratios?: Record<string, unknown>;
+	delta?: Record<string, unknown>;
+	composite_scores?: Record<string, unknown>;
+}
+
+interface RawTerminalBenchTask {
+	name?: string;
+	path?: string;
+	gitUrl?: string;
+	gitCommitId?: string;
 }
 
 function jsonWithNewline(value: unknown): string {
 	return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function now(deps?: FrontierTrialDependencies): number {
+	return deps?.now?.() ?? Date.now();
+}
+
+function hashFingerprint(value: string): string {
+	return createHash(SOURCE_FINGERPRINT_ALGORITHM).update(value).digest("hex");
 }
 
 function formatCandidateId(value: number): string {
@@ -140,42 +228,141 @@ function deterministicShuffle<T>(items: T[], seed: number): T[] {
 	return next;
 }
 
-function benchmarkRunModeForDataset(dataset: string): "sample" | "full" | "custom" {
+function defaultDatasetForFamily(family: QuestFrontierBenchmarkFamily): string {
+	return family === "slopcodebench" ? "slopcodebench@official" : "terminal-bench-sample@2.0";
+}
+
+function sortWorkItems(items: QuestBenchmarkWorkItem[]): QuestBenchmarkWorkItem[] {
+	return [...items].sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+}
+
+function splitCounts(totalItems: number): { search: number; holdOut: number } {
+	if (totalItems <= 1) return { search: totalItems, holdOut: 0 };
+	if (totalItems <= DEFAULT_SAMPLE_HOLD_OUT_COUNT) return { search: totalItems - 1, holdOut: 1 };
+	if (totalItems === 10) return { search: 7, holdOut: 3 };
+	const holdOut = Math.max(1, Math.round(totalItems * 0.3));
+	return { search: Math.max(1, totalItems - holdOut), holdOut: totalItems - Math.max(1, totalItems - holdOut) };
+}
+
+function normalizeFrontierFamily(value: unknown): QuestFrontierBenchmarkFamily {
+	return value === "slopcodebench" ? "slopcodebench" : "terminal-bench";
+}
+
+function normalizeWorkItem(raw: any, fallback: { family: QuestFrontierBenchmarkFamily; dataset: string }): QuestBenchmarkWorkItem {
+	const family = normalizeFrontierFamily(raw?.family ?? raw?.benchmark ?? fallback.family);
+	const dataset = typeof raw?.dataset === "string" && raw.dataset.trim() ? raw.dataset : fallback.dataset;
+	const path = typeof raw?.path === "string" && raw.path.trim() ? raw.path : undefined;
+	const id = String(raw?.id ?? path ?? raw?.name ?? "");
+	const name = String(raw?.name ?? id);
+	return {
+		id,
+		name,
+		family,
+		dataset,
+		path,
+		metadata: raw?.metadata && typeof raw.metadata === "object" ? raw.metadata : undefined,
+	};
+}
+
+function normalizeStoredSplit(raw: any): QuestBenchmarkSplit | null {
+	if (!raw || typeof raw !== "object") return null;
+	const family = normalizeFrontierFamily(raw.family ?? raw.benchmark);
+	const dataset = typeof raw.dataset === "string" && raw.dataset.trim() ? raw.dataset : defaultDatasetForFamily(family);
+	const rawItems = Array.isArray(raw.items) ? raw.items : Array.isArray(raw.tasks) ? raw.tasks : null;
+	if (!rawItems) return null;
+	const items = rawItems.map((item: any) => normalizeWorkItem(item, { family, dataset }));
+	return {
+		id: String(raw.id ?? `${family}-${dataset}-${raw.split ?? "search"}`),
+		family,
+		dataset,
+		split: raw.split === "hold-out" ? "hold-out" : "search",
+		createdAt: Number(raw.createdAt ?? Date.now()),
+		seed: Number(raw.seed ?? DEFAULT_SAMPLE_SEED),
+		sourceManifestId: String(raw.sourceManifestId ?? raw.id ?? `${family}-${dataset}`),
+		sourceFingerprint:
+			typeof raw.sourceFingerprint === "string" && raw.sourceFingerprint.trim()
+				? raw.sourceFingerprint
+				: hashFingerprint(JSON.stringify(items.map((item: QuestBenchmarkWorkItem) => ({ id: item.id, name: item.name, path: item.path })))),
+		totalItems: Number(raw.totalItems ?? raw.totalTasks ?? items.length),
+		items,
+		notes: Array.isArray(raw.notes) ? raw.notes.map(String) : undefined,
+	};
+}
+
+async function loadSplit(file: string): Promise<QuestBenchmarkSplit | null> {
+	const raw = await readJsonFile<any>(file);
+	return normalizeStoredSplit(raw);
+}
+
+async function writeSplit(file: string, split: QuestBenchmarkSplit): Promise<void> {
+	await writeJsonFile(file, split);
+}
+
+function terminalBenchRunMode(dataset: string, requested?: QuestBenchmarkRunMode): QuestBenchmarkRunMode {
+	if (requested) return requested;
 	if (dataset.includes("sample")) return "sample";
 	if (dataset === "terminal-bench@2.0") return "full";
 	return "custom";
 }
 
-function normalizeTaskName(dataset: string, task: QuestBenchmarkTaskDescriptor): string {
-	if (!dataset.startsWith("terminal-bench")) return task.name;
-	const segments = task.name.split("/").filter(Boolean);
-	return segments[segments.length - 1] ?? task.name;
+function slopRunMode(_dataset: string, requested?: QuestBenchmarkRunMode): QuestBenchmarkRunMode {
+	return requested ?? "custom";
 }
 
-function normalizeManifest(manifest: QuestBenchmarkTaskManifest): QuestBenchmarkTaskManifest {
+function normalizeTerminalBenchTaskName(dataset: string, rawName: string): string {
+	if (!dataset.startsWith("terminal-bench")) return rawName;
+	const segments = rawName.split("/").filter(Boolean);
+	return segments[segments.length - 1] ?? rawName;
+}
+
+function normalizeTerminalBenchManifest(raw: any, dataset: string, runMode: QuestBenchmarkRunMode, source: QuestBenchmarkManifest["source"]): QuestBenchmarkManifest {
+	const rawItems = Array.isArray(raw?.items) ? raw.items : Array.isArray(raw?.tasks) ? raw.tasks : [];
+	const items = rawItems.map((task: RawTerminalBenchTask) => {
+		const path = String(task.path ?? task.name ?? "");
+		const name = normalizeTerminalBenchTaskName(dataset, String(task.name ?? path));
+		return {
+			id: path || name,
+			name,
+			family: "terminal-bench" as const,
+			dataset,
+			path: path || undefined,
+			metadata:
+				task.gitUrl || task.gitCommitId
+					? {
+							gitUrl: task.gitUrl,
+							gitCommitId: task.gitCommitId,
+						}
+					: undefined,
+		};
+	});
 	return {
-		...manifest,
-		tasks: manifest.tasks.map((task) => ({
-			...task,
-			name: normalizeTaskName(manifest.dataset, task),
-		})),
+		id: String(raw?.id ?? dataset),
+		family: "terminal-bench",
+		dataset,
+		runMode,
+		createdAt: Number(raw?.createdAt ?? Date.now()),
+		totalItems: Number(raw?.totalItems ?? raw?.taskCount ?? items.length),
+		seed: typeof raw?.seed === "number" ? raw.seed : undefined,
+		source: (raw?.source as QuestBenchmarkManifest["source"]) ?? source,
+		sourceFingerprint:
+			typeof raw?.sourceFingerprint === "string" && raw.sourceFingerprint.trim()
+				? raw.sourceFingerprint
+				: hashFingerprint(
+						JSON.stringify(
+							items.map((item: QuestBenchmarkWorkItem) => ({
+								id: item.id,
+								name: item.name,
+								path: item.path,
+								metadata: item.metadata,
+							})),
+						),
+					),
+		items: sortWorkItems(items),
+		notes: Array.isArray(raw?.notes) ? raw.notes.map(String) : undefined,
 	};
 }
 
-function splitNeedsRefresh(split: QuestBenchmarkTaskSplit | null, dataset: string): boolean {
-	if (!split) return true;
-	if (split.dataset !== dataset) return true;
-	return split.tasks.some((task) => task.name.includes("/"));
-}
-
-function splitCounts(taskCount: number): { search: number; holdOut: number } {
-	if (taskCount <= DEFAULT_SAMPLE_HOLD_OUT_COUNT) return { search: Math.max(1, taskCount - 1), holdOut: Math.min(1, taskCount) };
-	if (taskCount === 10) return { search: 7, holdOut: 3 };
-	const holdOut = Math.max(1, Math.round(taskCount * 0.3));
-	return { search: Math.max(1, taskCount - holdOut), holdOut };
-}
-
-function vendoredManifestFile(dataset: string): string {
+function vendoredTerminalBenchManifestFile(dataset: string): string {
 	return join(PACKAGE_ROOT, "benchmarks", "harbor", "manifests", `${dataset}.json`);
 }
 
@@ -190,7 +377,7 @@ async function resolveHarborPython(): Promise<string> {
 	return pythonPath;
 }
 
-async function loadRegistryManifest(dataset: string, runMode: "sample" | "full" | "custom"): Promise<QuestBenchmarkTaskManifest> {
+async function loadTerminalBenchRegistryManifest(dataset: string, runMode: QuestBenchmarkRunMode): Promise<QuestBenchmarkManifest> {
 	const python = await resolveHarborPython();
 	const script = `
 import json
@@ -200,6 +387,7 @@ dataset = ${JSON.stringify(dataset)}
 client = RegistryClientFactory.create()
 metadata = client.get_dataset_metadata(dataset)
 payload = {
+    "id": dataset,
     "tasks": [
         {
             "name": task.name,
@@ -212,61 +400,609 @@ payload = {
 }
 print(json.dumps(payload))
 `;
-	const result = await new Promise<string>((resolvePromise, reject) => {
+	const stdout = await new Promise<string>((resolvePromise, reject) => {
 		const proc = spawn(python, ["-c", script], {
 			cwd: PACKAGE_ROOT,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
-		let stdout = "";
+		let output = "";
 		let stderr = "";
 		proc.stdout.on("data", (chunk) => {
-			stdout += String(chunk);
+			output += String(chunk);
 		});
 		proc.stderr.on("data", (chunk) => {
 			stderr += String(chunk);
 		});
 		proc.on("close", (code) => {
 			if ((code ?? 1) === 0) {
-				resolvePromise(stdout);
+				resolvePromise(output);
 				return;
 			}
 			reject(new Error(stderr || `Harbor metadata loader exited with code ${code ?? 1}`));
 		});
 		proc.on("error", reject);
 	});
-	const parsed = JSON.parse(result) as { tasks: QuestBenchmarkTaskDescriptor[] };
+	return normalizeTerminalBenchManifest(JSON.parse(stdout) as Record<string, unknown>, dataset, runMode, "registry");
+}
+
+async function discoverTerminalBenchManifest(options: {
+	dataset: string;
+	runMode: QuestBenchmarkRunMode;
+	now: number;
+}): Promise<QuestBenchmarkManifest> {
+	const vendored = await readJsonFile<Record<string, unknown>>(vendoredTerminalBenchManifestFile(options.dataset));
+	if (vendored) return normalizeTerminalBenchManifest(vendored, options.dataset, options.runMode, "vendored");
+	return loadTerminalBenchRegistryManifest(options.dataset, options.runMode);
+}
+
+function rewardScore(rewards: Record<string, number> | undefined): { score: number; maxScore: number } {
+	if (!rewards || Object.keys(rewards).length === 0) return { score: 0, maxScore: 1 };
+	if (typeof rewards.reward === "number") return { score: Number(rewards.reward), maxScore: 1 };
 	return {
-		id: dataset,
-		benchmark: "terminal-bench",
-		dataset,
-		runMode,
-		createdAt: Date.now(),
-		taskCount: parsed.tasks.length,
-		source: "registry",
-		tasks: parsed.tasks,
-		notes: ["Loaded from Harbor registry metadata."],
+		score: Object.values(rewards).reduce((total, value) => total + Number(value || 0), 0),
+		maxScore: Math.max(1, Object.keys(rewards).length),
 	};
 }
 
-async function loadBenchmarkManifest(dataset: string, runMode: "sample" | "full" | "custom"): Promise<QuestBenchmarkTaskManifest> {
-	const vendoredFile = vendoredManifestFile(dataset);
-	const vendored = await readJsonFile<QuestBenchmarkTaskManifest>(vendoredFile);
-	if (vendored) {
-		return normalizeManifest({
-			...vendored,
-			runMode,
-			taskCount: vendored.tasks.length,
+function parseDateOrZero(value: string | undefined): number {
+	if (!value) return 0;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function discoverHarborResults(root: string): Promise<HarborTaskResultRecord[]> {
+	const discovered: HarborTaskResultRecord[] = [];
+	async function walk(dir: string): Promise<void> {
+		const entries = await readdir(dir, { withFileTypes: true });
+		for (const entry of entries) {
+			const next = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				await walk(next);
+				continue;
+			}
+			if (!entry.isFile() || entry.name !== "result.json") continue;
+			const parsed = await readJsonFile<Record<string, unknown>>(next);
+			if (!parsed?.task_name) continue;
+			const trialUri = typeof parsed.trial_uri === "string" ? parsed.trial_uri : "";
+			const trialDir = trialUri.startsWith("file://") ? decodeURIComponent(trialUri.replace(/^file:\/\//, "")) : dirname(next);
+			discovered.push({
+				taskName: String(parsed.task_name),
+				trialDir,
+				result: parsed,
+			});
+		}
+	}
+	if (existsSync(root)) await walk(root);
+	return discovered;
+}
+
+function harborModelChoiceLabel(result: Record<string, unknown>, fallback: string): string {
+	const info = (result.agent_info as { model_info?: { provider?: string; name?: string } } | undefined)?.model_info;
+	if (info?.provider && info?.name) return `${info.provider}/${info.name}`;
+	return fallback;
+}
+
+function benchmarkProvenance(
+	family: QuestFrontierBenchmarkFamily,
+	dataset: string,
+	runMode: QuestBenchmarkRunMode,
+	itemId: string,
+	model: string,
+	score: number,
+	passed: boolean,
+	checkpointId?: string,
+): QuestBenchmarkProvenance {
+	return {
+		benchmark: family,
+		dataset,
+		taskId: itemId,
+		checkpointId,
+		runMode,
+		adapterVersion: FRONTIER_ADAPTER_VERSION,
+		recordedAt: Date.now(),
+		model,
+		score,
+		passed,
+	};
+}
+
+async function parseHarborScorecard(
+	jobsDir: string,
+	items: QuestBenchmarkWorkItem[],
+	dataset: string,
+	split: "search" | "hold-out",
+	fallbackModel: string,
+	runMode: QuestBenchmarkRunMode,
+): Promise<QuestCandidateScorecard> {
+	const trialResults = await discoverHarborResults(jobsDir);
+	const byTask = new Map<string, HarborTaskResultRecord>();
+	for (const trialResult of trialResults) {
+		const previous = byTask.get(trialResult.taskName);
+		const previousFinishedAt = previous ? parseDateOrZero(previous.result.finished_at as string | undefined) : -1;
+		const nextFinishedAt = parseDateOrZero(trialResult.result.finished_at as string | undefined);
+		if (!previous || nextFinishedAt >= previousFinishedAt) byTask.set(trialResult.taskName, trialResult);
+	}
+
+	const results: QuestCandidateWorkItemResult[] = [];
+	for (const item of items) {
+		const trial = byTask.get(item.name);
+		if (!trial) {
+			results.push({
+				itemId: item.id,
+				itemName: item.name,
+				family: "terminal-bench",
+				dataset,
+				split,
+				status: "error",
+				score: 0,
+				maxScore: 1,
+				durationMs: 0,
+				totalCost: 0,
+				modelChoice: fallbackModel,
+				artifactPaths: [],
+				failureReason: "Harbor did not produce a result for this task.",
+				benchmark: benchmarkProvenance("terminal-bench", dataset, runMode, item.id, fallbackModel, 0, false),
+			});
+			continue;
+		}
+		const rewards = trial.result.verifier_result && typeof trial.result.verifier_result === "object"
+			? ((trial.result.verifier_result as { rewards?: Record<string, number> }).rewards ?? undefined)
+			: undefined;
+		const { score, maxScore } = rewardScore(rewards);
+		const startedAt = parseDateOrZero(trial.result.started_at as string | undefined);
+		const finishedAt = parseDateOrZero(trial.result.finished_at as string | undefined);
+		const durationMs = startedAt > 0 && finishedAt >= startedAt ? finishedAt - startedAt : 0;
+		const failureReason =
+			typeof (trial.result.exception_info as { exception_message?: string } | undefined)?.exception_message === "string"
+				? (trial.result.exception_info as { exception_message?: string }).exception_message
+				: undefined;
+		const model = harborModelChoiceLabel(trial.result, fallbackModel);
+		const questOutputFile = join(trial.trialDir, "artifacts", "quest-headless-output.json");
+		const questOutput = await readJsonFile<{ data?: { benchmark?: QuestBenchmarkProvenance } }>(questOutputFile);
+		const status = failureReason ? "error" : score >= maxScore ? "passed" : "failed";
+		results.push({
+			itemId: item.id,
+			itemName: item.name,
+			family: "terminal-bench",
+			dataset,
+			split,
+			status,
+			score,
+			maxScore,
+			durationMs,
+			totalCost: Number((trial.result.agent_result as { cost_usd?: number } | undefined)?.cost_usd ?? 0),
+			modelChoice: model,
+			trialDir: trial.trialDir,
+			questOutputFile: existsSync(questOutputFile) ? questOutputFile : undefined,
+			artifactPaths: [],
+			failureReason,
+			rewardValues: rewards,
+			benchmarkMetrics: rewards ? { rewardValues: rewards } : undefined,
+			benchmark: questOutput?.data?.benchmark ?? benchmarkProvenance("terminal-bench", dataset, runMode, item.id, model, score, status === "passed"),
 		});
 	}
-	return normalizeManifest(await loadRegistryManifest(dataset, runMode));
+
+	const totalScore = results.reduce((total, item) => total + item.score, 0);
+	const maxScore = results.reduce((total, item) => total + item.maxScore, 0);
+	const totalCost = results.reduce((total, item) => total + item.totalCost, 0);
+	const totalDurationMs = results.reduce((total, item) => total + item.durationMs, 0);
+	return {
+		family: "terminal-bench",
+		split,
+		dataset,
+		generatedAt: Date.now(),
+		itemCount: items.length,
+		passed: results.filter((item) => item.status === "passed").length,
+		failed: results.filter((item) => item.status !== "passed").length,
+		totalScore,
+		maxScore,
+		meanScore: items.length > 0 ? totalScore / items.length : 0,
+		totalCost,
+		totalDurationMs,
+		items: results,
+	};
 }
 
-async function loadTaskSplit(file: string): Promise<QuestBenchmarkTaskSplit | null> {
-	return readJsonFile<QuestBenchmarkTaskSplit>(file);
+async function runTerminalBenchSplit(options: {
+	cwd: string;
+	modelChoice: ModelChoice;
+	profileId: string;
+	split: QuestBenchmarkSplit;
+	candidateId: string;
+	onProcessStart?: (pid: number) => void | Promise<void>;
+}): Promise<QuestCandidateScorecard> {
+	const jobsDir = benchmarkRoot(options.cwd, options.candidateId, options.split.split);
+	await mkdir(jobsDir, { recursive: true });
+	const args = [
+		"--import",
+		"tsx",
+		resolve(PACKAGE_ROOT, "benchmarks", "harbor", "run.ts"),
+		"--dataset",
+		options.split.dataset,
+		"--run-mode",
+		terminalBenchRunMode(options.split.dataset),
+		"--jobs-dir",
+		jobsDir,
+		"--profile",
+		options.profileId,
+		"--model",
+		`${options.modelChoice.provider}/${options.modelChoice.model}`,
+	];
+	for (const item of options.split.items) args.push("--include-task-name", item.name);
+	await new Promise<void>((resolvePromise, reject) => {
+		const proc = spawn(process.execPath, args, {
+			cwd: PACKAGE_ROOT,
+			stdio: "inherit",
+			env: process.env,
+		});
+		if (typeof proc.pid === "number" && options.onProcessStart) {
+			void Promise.resolve(options.onProcessStart(proc.pid));
+		}
+		proc.on("close", (code) => {
+			if ((code ?? 1) === 0) {
+				resolvePromise();
+				return;
+			}
+			reject(new Error(`Harbor benchmark run failed with exit code ${code ?? 1}.`));
+		});
+		proc.on("error", reject);
+	});
+	return parseHarborScorecard(
+		jobsDir,
+		options.split.items,
+		options.split.dataset,
+		options.split.split,
+		`${options.modelChoice.provider}/${options.modelChoice.model}`,
+		terminalBenchRunMode(options.split.dataset),
+	);
 }
 
-async function writeTaskSplit(file: string, split: QuestBenchmarkTaskSplit): Promise<void> {
-	await writeJsonFile(file, split);
+async function resolveSlopCodeBenchRepo(explicitRepo?: string): Promise<string> {
+	const candidate = explicitRepo?.trim() || process.env.SLOPCODEBENCH_REPO?.trim() || (existsSync("/tmp/slop-code-bench") ? "/tmp/slop-code-bench" : "");
+	if (!candidate) {
+		throw new Error("SlopCodeBench repo not found. Pass --repo <path>, set SLOPCODEBENCH_REPO, or create /tmp/slop-code-bench.");
+	}
+	const resolved = resolve(candidate);
+	if (!existsSync(resolved)) {
+		throw new Error(`SlopCodeBench repo does not exist: ${resolved}`);
+	}
+	return realpath(resolved).catch(() => resolved);
+}
+
+function extractYamlScalar(text: string, key: string): string | undefined {
+	const match = text.match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
+	if (!match?.[1]) return undefined;
+	return match[1].trim().replace(/^['"]|['"]$/g, "");
+}
+
+function countCheckpointDefinitions(text: string): number {
+	return (text.match(/^ {2}checkpoint_[^:]+:/gm) ?? []).length;
+}
+
+async function discoverSlopManifest(options: {
+	dataset: string;
+	runMode: QuestBenchmarkRunMode;
+	repo?: string;
+	now: number;
+}): Promise<QuestBenchmarkManifest> {
+	const repo = await resolveSlopCodeBenchRepo(options.repo);
+	const problemsDir = join(repo, "problems");
+	if (!existsSync(problemsDir)) {
+		throw new Error(`SlopCodeBench problems directory is missing: ${problemsDir}`);
+	}
+	const entries = await readdir(problemsDir, { withFileTypes: true });
+	const items: QuestBenchmarkWorkItem[] = [];
+	const fingerprintParts: string[] = [];
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const configPath = join(problemsDir, entry.name, "config.yaml");
+		if (!existsSync(configPath)) continue;
+		const configText = await readFile(configPath, "utf-8");
+		const name = extractYamlScalar(configText, "name") ?? entry.name;
+		const category = extractYamlScalar(configText, "category");
+		const difficulty = extractYamlScalar(configText, "difficulty");
+		const description = extractYamlScalar(configText, "description");
+		const checkpointCount = countCheckpointDefinitions(configText);
+		items.push({
+			id: name,
+			name,
+			family: "slopcodebench",
+			dataset: options.dataset,
+			path: join(problemsDir, entry.name),
+			metadata: {
+				repo,
+				configPath,
+				category,
+				difficulty,
+				description,
+				checkpointCount,
+			},
+		});
+		fingerprintParts.push(`${entry.name}\n${configText}`);
+	}
+	const sorted = sortWorkItems(items);
+	return {
+		id: options.dataset,
+		family: "slopcodebench",
+		dataset: options.dataset,
+		runMode: options.runMode,
+		createdAt: options.now,
+		totalItems: sorted.length,
+		source: "discovered",
+		sourceFingerprint: hashFingerprint(fingerprintParts.sort().join("\n---\n")),
+		items: sorted,
+		notes: [`Discovered from ${repo}.`],
+	};
+}
+
+async function findLatestResultJson(root: string): Promise<string | null> {
+	let latestFile: string | null = null;
+	let latestMtimeMs = -1;
+	async function walk(dir: string): Promise<void> {
+		const entries = await readdir(dir, { withFileTypes: true });
+		for (const entry of entries) {
+			const next = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				await walk(next);
+				continue;
+			}
+			if (!entry.isFile() || entry.name !== "result.json") continue;
+			const info = await stat(next);
+			if (info.mtimeMs >= latestMtimeMs) {
+				latestFile = next;
+				latestMtimeMs = info.mtimeMs;
+			}
+		}
+	}
+	if (!existsSync(root)) return null;
+	await walk(root);
+	return latestFile;
+}
+
+async function runOfficialSlopCodeBench(options: {
+	repo: string;
+	problems: string[];
+	modelChoice: ModelChoice;
+	outputDir: string;
+	onProcessStart?: (pid: number) => void | Promise<void>;
+}): Promise<string> {
+	const args = [
+		"--import",
+		"tsx",
+		resolve(PACKAGE_ROOT, "benchmarks", "slopcodebench", "official-run.ts"),
+		"--repo",
+		options.repo,
+		"--model",
+		`${options.modelChoice.provider}/${options.modelChoice.model}`,
+		"--output-dir",
+		options.outputDir,
+	];
+	for (const problem of options.problems) args.push("--problem", problem);
+	await new Promise<void>((resolvePromise, reject) => {
+		const proc = spawn(process.execPath, args, {
+			cwd: PACKAGE_ROOT,
+			stdio: "inherit",
+			env: process.env,
+		});
+		if (typeof proc.pid === "number" && options.onProcessStart) {
+			void Promise.resolve(options.onProcessStart(proc.pid));
+		}
+		proc.on("close", (code) => {
+			if ((code ?? 1) === 0) {
+				resolvePromise();
+				return;
+			}
+			reject(new Error(`SlopCodeBench official run failed with exit code ${code ?? 1}.`));
+		});
+		proc.on("error", reject);
+	});
+	const latestResult = await findLatestResultJson(options.outputDir);
+	if (!latestResult) {
+		throw new Error(`SlopCodeBench did not produce a result.json under ${options.outputDir}`);
+	}
+	return dirname(latestResult);
+}
+
+async function parseSlopCheckpointResults(file: string): Promise<Map<string, SlopCheckpointResult[]>> {
+	const grouped = new Map<string, SlopCheckpointResult[]>();
+	if (!existsSync(file)) return grouped;
+	const lines = (await readFile(file, "utf-8")).split("\n").map((line) => line.trim()).filter(Boolean);
+	for (const line of lines) {
+		try {
+			const parsed = JSON.parse(line) as SlopCheckpointResult;
+			if (!parsed.problem) continue;
+			const bucket = grouped.get(parsed.problem) ?? [];
+			bucket.push(parsed);
+			grouped.set(parsed.problem, bucket);
+		} catch {
+			continue;
+		}
+	}
+	return grouped;
+}
+
+function secondsToMs(value: number | undefined): number {
+	const numeric = Number(value ?? 0);
+	return Number.isFinite(numeric) ? Math.max(0, Math.round(numeric * 1000)) : 0;
+}
+
+async function findQuestHeadlessOutput(dir: string): Promise<string | undefined> {
+	if (!existsSync(dir)) return undefined;
+	const entries = await readdir(dir, { withFileTypes: true });
+	for (const entry of entries) {
+		const next = join(dir, entry.name);
+		if (entry.isDirectory()) {
+			const nested = await findQuestHeadlessOutput(next);
+			if (nested) return nested;
+			continue;
+		}
+		if (entry.isFile() && entry.name === "quest-headless-output.json") return next;
+	}
+	return undefined;
+}
+
+async function parseSlopScorecard(
+	runRoot: string,
+	items: QuestBenchmarkWorkItem[],
+	dataset: string,
+	split: "search" | "hold-out",
+	fallbackModel: string,
+	runMode: QuestBenchmarkRunMode,
+): Promise<QuestCandidateScorecard> {
+	const runSummary = (await readJsonFile<SlopRunSummary>(join(runRoot, "result.json"))) ?? {};
+	const grouped = await parseSlopCheckpointResults(join(runRoot, "checkpoint_results.jsonl"));
+	const results: QuestCandidateWorkItemResult[] = [];
+	for (const item of items) {
+		const checkpoints = grouped.get(item.id) ?? grouped.get(item.name) ?? [];
+		const problemDir = join(runRoot, item.id);
+		if (checkpoints.length === 0) {
+			results.push({
+				itemId: item.id,
+				itemName: item.name,
+				family: "slopcodebench",
+				dataset,
+				split,
+				status: "error",
+				score: 0,
+				maxScore: 1,
+				durationMs: 0,
+				totalCost: 0,
+				modelChoice: runSummary.model ?? fallbackModel,
+				trialDir: existsSync(problemDir) ? problemDir : undefined,
+				artifactPaths: [],
+				failureReason: "Official SlopCodeBench run did not produce checkpoint results for this problem.",
+				benchmark: benchmarkProvenance("slopcodebench", dataset, runMode, item.id, runSummary.model ?? fallbackModel, 0, false),
+			});
+			continue;
+		}
+		const score = checkpoints.reduce((total, checkpoint) => total + Number(checkpoint.pass_rate ?? checkpoint.checkpoint_pass_rate ?? 0), 0) / checkpoints.length;
+		const solvedCheckpoints = checkpoints.filter((checkpoint) => Number(checkpoint.pass_rate ?? checkpoint.checkpoint_pass_rate ?? 0) >= 1).length;
+		const totalCost = checkpoints.reduce((total, checkpoint) => total + Number(checkpoint.cost ?? 0), 0);
+		const durationMs = checkpoints.reduce((total, checkpoint) => {
+			if (typeof checkpoint.elapsed === "number") return total + secondsToMs(checkpoint.elapsed);
+			if (typeof checkpoint.duration === "number") return total + secondsToMs(checkpoint.duration);
+			const startedAt = parseDateOrZero(checkpoint.started);
+			const endedAt = parseDateOrZero(checkpoint.ended);
+			return total + (startedAt > 0 && endedAt >= startedAt ? endedAt - startedAt : 0);
+		}, 0);
+		const status: QuestCandidateWorkItemResult["status"] = solvedCheckpoints === checkpoints.length ? "passed" : "failed";
+		const questOutputFile = existsSync(problemDir) ? await findQuestHeadlessOutput(problemDir) : undefined;
+		results.push({
+			itemId: item.id,
+			itemName: item.name,
+			family: "slopcodebench",
+			dataset,
+			split,
+			status,
+			score,
+			maxScore: 1,
+			durationMs,
+			totalCost,
+			modelChoice: runSummary.model ?? fallbackModel,
+			trialDir: existsSync(problemDir) ? problemDir : undefined,
+			questOutputFile,
+			artifactPaths: [],
+			benchmarkMetrics: {
+				checkpointCount: checkpoints.length,
+				solvedCheckpoints,
+				passRateMean: score,
+				corePassRateMean:
+					checkpoints.reduce((total, checkpoint) => total + Number(checkpoint.core_pass_rate ?? 0), 0) / checkpoints.length,
+				totalTests: checkpoints.reduce((total, checkpoint) => total + Number(checkpoint.total_tests ?? 0), 0),
+				passedTests: checkpoints.reduce((total, checkpoint) => total + Number(checkpoint.passed_tests ?? 0), 0),
+			},
+			benchmark: benchmarkProvenance("slopcodebench", dataset, runMode, item.id, runSummary.model ?? fallbackModel, score, status === "passed"),
+		});
+	}
+
+	const totalScore = results.reduce((total, item) => total + item.score, 0);
+	const maxScore = results.reduce((total, item) => total + item.maxScore, 0);
+	const totalCost = results.reduce((total, item) => total + item.totalCost, 0);
+	const totalDurationMs = results.reduce((total, item) => total + item.durationMs, 0);
+	return {
+		family: "slopcodebench",
+		split,
+		dataset,
+		generatedAt: Date.now(),
+		itemCount: items.length,
+		passed: results.filter((item) => item.status === "passed").length,
+		failed: results.filter((item) => item.status !== "passed").length,
+		totalScore,
+		maxScore,
+		meanScore: items.length > 0 ? totalScore / items.length : 0,
+		totalCost,
+		totalDurationMs,
+		benchmarkMetrics: {
+			runRoot,
+			model: runSummary.model ?? fallbackModel,
+			numProblems: runSummary.num_problems,
+			numCheckpoints: runSummary.num_checkpoints,
+			solveRates: runSummary.solve_rates,
+			costs: runSummary.costs,
+			time: runSummary.time,
+			tokens: runSummary.tokens,
+			passRates: runSummary.pass_rates,
+		},
+		items: results,
+	};
+}
+
+async function runSlopCodeBenchSplit(options: {
+	cwd: string;
+	modelChoice: ModelChoice;
+	profileId: string;
+	split: QuestBenchmarkSplit;
+	candidateId: string;
+	repo?: string;
+	onProcessStart?: (pid: number) => void | Promise<void>;
+}): Promise<QuestCandidateScorecard> {
+	const repo = await resolveSlopCodeBenchRepo(options.repo);
+	const outputDir = benchmarkRoot(options.cwd, options.candidateId, options.split.split);
+	await mkdir(outputDir, { recursive: true });
+	const runRoot = await runOfficialSlopCodeBench({
+		repo,
+		problems: options.split.items.map((item) => item.id),
+		modelChoice: options.modelChoice,
+		outputDir,
+		onProcessStart: options.onProcessStart,
+	});
+	return parseSlopScorecard(
+		runRoot,
+		options.split.items,
+		options.split.dataset,
+		options.split.split,
+		`${options.modelChoice.provider}/${options.modelChoice.model}`,
+		slopRunMode(options.split.dataset),
+	);
+}
+
+const BENCHMARK_ADAPTERS: Record<QuestFrontierBenchmarkFamily, BenchmarkAdapter> = {
+	"terminal-bench": {
+		family: "terminal-bench",
+		defaultDataset: "terminal-bench-sample@2.0",
+		resolveRunMode: terminalBenchRunMode,
+		discoverManifest: discoverTerminalBenchManifest,
+		runSplit: runTerminalBenchSplit,
+	},
+	slopcodebench: {
+		family: "slopcodebench",
+		defaultDataset: "slopcodebench@official",
+		resolveRunMode: slopRunMode,
+		discoverManifest: discoverSlopManifest,
+		runSplit: runSlopCodeBenchSplit,
+	},
+};
+
+async function loadFrontierState(cwd: string): Promise<QuestFrontierState | null> {
+	return readJsonFile<QuestFrontierState>(getQuestTrialPaths(cwd).frontierFile);
+}
+
+async function saveFrontierState(cwd: string, frontier: QuestFrontierState): Promise<void> {
+	await writeJsonFile(getQuestTrialPaths(cwd).frontierFile, frontier);
+}
+
+async function loadCandidateSummary(cwd: string, candidateId: string): Promise<QuestCandidateSummary | null> {
+	return readJsonFile<QuestCandidateSummary>(candidateSummaryFile(cwd, candidateId));
 }
 
 async function nextCandidateId(cwd: string): Promise<string> {
@@ -278,28 +1014,12 @@ async function nextCandidateId(cwd: string): Promise<string> {
 		.map((entry) => Number(entry.name))
 		.filter((value) => Number.isFinite(value))
 		.sort((left, right) => left - right);
-	if (numericIds.length === 0) return "000";
-	return formatCandidateId(numericIds[numericIds.length - 1] + 1);
+	return numericIds.length === 0 ? "000" : formatCandidateId(numericIds[numericIds.length - 1] + 1);
 }
 
-function initialFrontier(): QuestFrontierState {
-	return {
-		generatedAt: Date.now(),
-		frontierCandidateIds: [],
-	};
-}
-
-async function loadFrontierState(cwd: string): Promise<QuestFrontierState | null> {
-	const frontier = await readJsonFile<QuestFrontierState>(getQuestTrialPaths(cwd).frontierFile);
-	return frontier;
-}
-
-async function saveFrontierState(cwd: string, frontier: QuestFrontierState): Promise<void> {
-	await writeJsonFile(getQuestTrialPaths(cwd).frontierFile, frontier);
-}
-
-async function loadCandidateSummary(cwd: string, candidateId: string): Promise<QuestCandidateSummary | null> {
-	return readJsonFile<QuestCandidateSummary>(candidateSummaryFile(cwd, candidateId));
+async function resetCandidateDir(cwd: string, candidateId: string): Promise<void> {
+	await rm(candidateDir(cwd, candidateId), { recursive: true, force: true });
+	await mkdir(candidateDir(cwd, candidateId), { recursive: true });
 }
 
 async function saveCandidateArtifacts(
@@ -312,7 +1032,6 @@ async function saveCandidateArtifacts(
 	summary: QuestCandidateSummary,
 ): Promise<void> {
 	await mkdir(candidateDir(cwd, candidateId), { recursive: true });
-	await mkdir(candidateTracesRoot(cwd, candidateId), { recursive: true });
 	await writeJsonFile(candidateProfileFile(cwd, candidateId), profile);
 	await writeJsonFile(candidatePatchFile(cwd, candidateId), patch);
 	await writeJsonFile(candidateScoreFile(cwd, candidateId), searchScore);
@@ -324,242 +1043,63 @@ async function stageBenchmarkProfile(cwd: string, profile: QuestProfile): Promis
 	await writeJsonFile(join(getQuestTrialPaths(cwd).profilesDir, `${profile.id}.json`), profile);
 }
 
-function parseDateOrZero(value: string | undefined): number {
-	if (!value) return 0;
-	const parsed = Date.parse(value);
-	return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function rewardScore(rewards: Record<string, number> | undefined): { score: number; maxScore: number } {
-	if (!rewards || Object.keys(rewards).length === 0) return { score: 0, maxScore: 1 };
-	if (typeof rewards.reward === "number") {
-		return { score: Number(rewards.reward), maxScore: 1 };
-	}
-	const score = Object.values(rewards).reduce((total, value) => total + Number(value || 0), 0);
-	return { score, maxScore: Math.max(1, Object.keys(rewards).length) };
-}
-
-async function discoverTrialResults(jobsDir: string): Promise<HarborTaskResultRecord[]> {
-	const discovered: HarborTaskResultRecord[] = [];
-
-	async function walk(dir: string): Promise<void> {
-		const entries = await readdir(dir, { withFileTypes: true });
-		for (const entry of entries) {
-			const entryPath = join(dir, entry.name);
-			if (entry.isDirectory()) {
-				await walk(entryPath);
-				continue;
-			}
-			if (!entry.isFile() || entry.name !== "result.json") continue;
-			const parsed = await readJsonFile<Record<string, any>>(entryPath);
-			if (!parsed?.task_name || !parsed?.trial_name) continue;
-			const trialUri = typeof parsed.trial_uri === "string" ? parsed.trial_uri : "";
-			const trialDir =
-				trialUri.startsWith("file://")
-					? decodeURIComponent(trialUri.replace(/^file:\/\//, ""))
-					: dirname(entryPath);
-			discovered.push({
-				taskName: String(parsed.task_name),
-				trialName: String(parsed.trial_name),
-				trialDir,
-				result: parsed,
-			});
-		}
-	}
-
-	if (existsSync(jobsDir)) await walk(jobsDir);
-	return discovered;
-}
-
-function modelChoiceLabel(result: Record<string, any>, fallback: string): string {
-	const info = result.agent_info?.model_info;
-	if (info?.provider && info?.name) return `${info.provider}/${info.name}`;
-	return fallback;
-}
-
-async function parseHarborScorecard(
-	jobsDir: string,
-	tasks: QuestBenchmarkTaskDescriptor[],
-	dataset: string,
-	split: "search" | "hold-out",
-	fallbackModel: string,
-): Promise<QuestCandidateScorecard> {
-	const trialResults = await discoverTrialResults(jobsDir);
-	const byTask = new Map<string, HarborTaskResultRecord>();
-
-	for (const trialResult of trialResults) {
-		const previous = byTask.get(trialResult.taskName);
-		const previousFinishedAt = previous ? parseDateOrZero(previous.result.finished_at) : -1;
-		const nextFinishedAt = parseDateOrZero(trialResult.result.finished_at);
-		if (!previous || nextFinishedAt >= previousFinishedAt) byTask.set(trialResult.taskName, trialResult);
-	}
-
-	const results: QuestCandidateTaskResult[] = [];
-	for (const task of tasks) {
-		const trial = byTask.get(task.name);
-		if (!trial) {
-			results.push({
-				taskId: task.path,
-				taskName: task.name,
-				dataset,
-				split,
-				status: "error",
-				score: 0,
-				maxScore: 1,
-				durationMs: 0,
-				totalCost: 0,
-				modelChoice: fallbackModel,
-				artifactPaths: [],
-				failureReason: "Harbor did not produce a trial result for this task.",
-			});
-			continue;
-		}
-
-		const rewards = trial.result.verifier_result?.rewards as Record<string, number> | undefined;
-		const { score, maxScore } = rewardScore(rewards);
-		const startedAt = parseDateOrZero(trial.result.started_at);
-		const finishedAt = parseDateOrZero(trial.result.finished_at);
-		const durationMs = startedAt > 0 && finishedAt >= startedAt ? finishedAt - startedAt : 0;
-		const exceptionMessage = trial.result.exception_info?.exception_message as string | undefined;
-		const questOutput = await readJsonFile<{ data?: { benchmark?: QuestCandidateTaskResult["benchmark"] } }>(
-			join(trial.trialDir, "artifacts", "quest-headless-output.json"),
-		);
-		results.push({
-			taskId: task.path,
-			taskName: task.name,
-			dataset,
-			split,
-			status: exceptionMessage ? "error" : score >= maxScore ? "passed" : "failed",
-			score,
-			maxScore,
-			durationMs,
-			totalCost: Number(trial.result.agent_result?.cost_usd ?? 0),
-			modelChoice: modelChoiceLabel(trial.result, fallbackModel),
-			trialDir: trial.trialDir,
-			questOutputFile: join(trial.trialDir, "artifacts", "quest-headless-output.json"),
-			artifactPaths: [],
-			failureReason: exceptionMessage,
-			rewardValues: rewards,
-			benchmark: questOutput?.data?.benchmark,
-		});
-	}
-
-	const totalScore = results.reduce((total, item) => total + item.score, 0);
-	const maxScore = results.reduce((total, item) => total + item.maxScore, 0);
-	const totalCost = results.reduce((total, item) => total + item.totalCost, 0);
-	const totalDurationMs = results.reduce((total, item) => total + item.durationMs, 0);
-	return {
-		split,
-		dataset,
-		generatedAt: Date.now(),
-		taskCount: tasks.length,
-		passed: results.filter((item) => item.status === "passed").length,
-		failed: results.filter((item) => item.status !== "passed").length,
-		totalScore,
-		maxScore,
-		meanScore: tasks.length > 0 ? totalScore / tasks.length : 0,
-		totalCost,
-		totalDurationMs,
-		tasks: results,
-	};
-}
-
-function taskTraceDestination(cwd: string, candidateId: string, taskName: string): string {
-	const safeSegments = taskName
-		.split("/")
+function safeTraceSegments(itemId: string): string[] {
+	return itemId
+		.split(/[\\/]+/)
 		.filter(Boolean)
 		.map((segment) => segment.replace(/[^a-zA-Z0-9._-]+/g, "-"));
-	return join(candidateTracesRoot(cwd, candidateId), ...safeSegments);
+}
+
+function traceDestination(cwd: string, candidateId: string, itemId: string): string {
+	return join(candidateTracesRoot(cwd, candidateId), ...safeTraceSegments(itemId));
 }
 
 async function archiveScorecardArtifacts(cwd: string, candidateId: string, scorecard: QuestCandidateScorecard): Promise<QuestCandidateScorecard> {
-	const nextTasks: QuestCandidateTaskResult[] = [];
-	for (const task of scorecard.tasks) {
-		if (!task.trialDir || !existsSync(task.trialDir)) {
-			nextTasks.push(task);
+	const nextItems: QuestCandidateWorkItemResult[] = [];
+	for (const item of scorecard.items) {
+		if (!item.trialDir || !existsSync(item.trialDir)) {
+			nextItems.push(item);
 			continue;
 		}
-		const destination = taskTraceDestination(cwd, candidateId, task.taskName);
+		const destination = traceDestination(cwd, candidateId, item.itemId);
 		await mkdir(dirname(destination), { recursive: true });
-		await cp(task.trialDir, destination, { recursive: true, force: true });
-		const copiedQuestOutput = task.questOutputFile ? join(destination, "artifacts", "quest-headless-output.json") : undefined;
-		nextTasks.push({
-			...task,
+		await rm(destination, { recursive: true, force: true });
+		await cp(item.trialDir, destination, { recursive: true, force: true });
+		const copiedQuestOutput =
+			item.questOutputFile && basename(item.questOutputFile)
+				? await findQuestHeadlessOutput(destination)
+				: undefined;
+		nextItems.push({
+			...item,
 			trialDir: destination,
-			questOutputFile: copiedQuestOutput && existsSync(copiedQuestOutput) ? copiedQuestOutput : undefined,
+			questOutputFile: copiedQuestOutput,
 			artifactPaths: [destination],
 		});
 	}
 	return {
 		...scorecard,
-		tasks: nextTasks,
+		items: nextItems,
 	};
-}
-
-async function runHarborSet(
-	modelChoice: ModelChoice,
-	dataset: string,
-	runMode: string,
-	profileId: string,
-	taskNames: string[],
-	jobsDir: string,
-	onProcessStart?: (pid: number) => void | Promise<void>,
-): Promise<void> {
-	const args = [
-		"--import",
-		"tsx",
-		resolve(PACKAGE_ROOT, "benchmarks", "harbor", "run.ts"),
-		"--dataset",
-		dataset,
-		"--run-mode",
-		runMode,
-		"--jobs-dir",
-		jobsDir,
-		"--profile",
-		profileId,
-		"--model",
-		`${modelChoice.provider}/${modelChoice.model}`,
-	];
-	for (const taskName of taskNames) args.push("--include-task-name", taskName);
-
-	await new Promise<void>((resolvePromise, reject) => {
-		const proc = spawn(process.execPath, args, {
-			cwd: PACKAGE_ROOT,
-			stdio: "inherit",
-			env: process.env,
-		});
-		if (typeof proc.pid === "number" && onProcessStart) {
-			void Promise.resolve(onProcessStart(proc.pid));
-		}
-		proc.on("close", (code) => {
-			if ((code ?? 1) === 0) {
-				resolvePromise();
-				return;
-			}
-			reject(new Error(`Harbor benchmark run failed with exit code ${code ?? 1}.`));
-		});
-		proc.on("error", reject);
-	});
 }
 
 async function runBenchmarkSet(
 	cwd: string,
 	modelChoice: ModelChoice,
 	profileId: string,
-	split: QuestBenchmarkTaskSplit,
+	split: QuestBenchmarkSplit,
 	candidateId: string,
-	onProcessStart?: (pid: number) => void | Promise<void>,
+	options: { repo?: string; onProcessStart?: (pid: number) => void | Promise<void> } = {},
 ): Promise<QuestCandidateScorecard> {
-	const jobsDir = benchmarkRoot(cwd, candidateId, split.split);
-	await mkdir(jobsDir, { recursive: true });
-	await runHarborSet(modelChoice, split.dataset, benchmarkRunModeForDataset(split.dataset), profileId, split.tasks.map((task) => task.name), jobsDir, onProcessStart);
-	const scorecard = await parseHarborScorecard(
-		jobsDir,
-		split.tasks,
-		split.dataset,
-		split.split,
-		`${modelChoice.provider}/${modelChoice.model}`,
-	);
+	const adapter = BENCHMARK_ADAPTERS[split.family];
+	const scorecard = await adapter.runSplit({
+		cwd,
+		modelChoice,
+		profileId,
+		split,
+		candidateId,
+		repo: options.repo,
+		onProcessStart: options.onProcessStart,
+	});
 	return archiveScorecardArtifacts(cwd, candidateId, scorecard);
 }
 
@@ -586,7 +1126,18 @@ function compareLeader(left: QuestCandidateSummary, right: QuestCandidateSummary
 	return left.candidateId.localeCompare(right.candidateId);
 }
 
-async function recomputeFrontier(cwd: string): Promise<{ frontier: QuestFrontierState; leader: QuestCandidateSummary | null }> {
+function initialFrontier(): QuestFrontierState {
+	return {
+		generatedAt: Date.now(),
+		frontierCandidateIds: [],
+	};
+}
+
+async function recomputeFrontier(
+	cwd: string,
+	family: QuestFrontierBenchmarkFamily,
+	dataset: string,
+): Promise<{ frontier: QuestFrontierState; leader: QuestCandidateSummary | null }> {
 	const paths = getQuestTrialPaths(cwd);
 	if (!existsSync(paths.candidatesDir)) return { frontier: initialFrontier(), leader: null };
 	const entries = await readdir(paths.candidatesDir, { withFileTypes: true });
@@ -594,82 +1145,31 @@ async function recomputeFrontier(cwd: string): Promise<{ frontier: QuestFrontier
 	for (const entry of entries) {
 		if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
 		const summary = await loadCandidateSummary(cwd, entry.name);
-		if (!summary || summary.status === "rejected") continue;
+		if (!summary) continue;
+		if (summary.status === "rejected") continue;
+		if (summary.searchScore?.family !== family || summary.searchScore?.dataset !== dataset) continue;
 		summaries.push(summary);
 	}
-
 	const frontierCandidates = summaries.filter((candidate) => !summaries.some((other) => other.candidateId !== candidate.candidateId && dominates(other, candidate)));
 	frontierCandidates.sort(compareLeader);
 	const frontierIds = frontierCandidates.map((candidate) => candidate.candidateId);
-	const leader = frontierCandidates[0] ?? null;
 	for (const summary of summaries) {
 		const paretoOptimal = frontierIds.includes(summary.candidateId);
-		const status = paretoOptimal ? "frontier" : "archived";
 		await writeJsonFile(candidateSummaryFile(cwd, summary.candidateId), {
 			...summary,
 			paretoOptimal,
-			status,
+			status: paretoOptimal ? "frontier" : "archived",
 			frontierRank: paretoOptimal ? frontierIds.indexOf(summary.candidateId) + 1 : undefined,
 		});
 	}
-
+	const leader = frontierIds.length > 0 ? await loadCandidateSummary(cwd, frontierIds[0]) : null;
 	const frontier: QuestFrontierState = {
 		generatedAt: Date.now(),
 		leaderCandidateId: leader?.candidateId,
 		frontierCandidateIds: frontierIds,
 	};
 	await saveFrontierState(cwd, frontier);
-	return { frontier, leader: leader ? await loadCandidateSummary(cwd, leader.candidateId) : null };
-}
-
-async function ensurePreparedBenchmark(cwd: string, options: PrepareBenchmarkOptions = {}): Promise<{
-	state: Awaited<ReturnType<typeof loadQuestTrialState>>;
-	searchSet: QuestBenchmarkTaskSplit;
-	holdOutSet: QuestBenchmarkTaskSplit;
-}> {
-	const state = await loadQuestTrialState(cwd, { ensure: true });
-	const dataset = options.dataset ?? state.benchmarkDataset ?? "terminal-bench-sample@2.0";
-	const runMode = options.runMode ?? benchmarkRunModeForDataset(dataset);
-	const existingSearch = await loadTaskSplit(getQuestTrialPaths(cwd).searchSetFile);
-	const existingHoldOut = await loadTaskSplit(getQuestTrialPaths(cwd).holdOutSetFile);
-	if (existingSearch && existingHoldOut && !splitNeedsRefresh(existingSearch, dataset) && !splitNeedsRefresh(existingHoldOut, dataset)) {
-		state.benchmarkDataset = dataset;
-		state.benchmarkRunMode = runMode;
-		await saveQuestTrialState(cwd, state);
-		return { state, searchSet: existingSearch, holdOutSet: existingHoldOut };
-	}
-	const prepared = await prepareTrialBenchmark(cwd, { dataset, runMode, seed: options.seed });
-	return prepared;
-}
-
-async function ensureCommunityStats(
-	cwd: string,
-	deps: FrontierTrialDependencies,
-	force = false,
-): Promise<CommunityStats> {
-	if (!force) {
-		const existing = await loadCommunityStats(cwd);
-		if (existing) return existing;
-	}
-	const paths = getQuestTrialPaths(cwd);
-	if (!existsSync(paths.communityTracesDir)) {
-		throw new Error(`Community traces directory is missing: ${paths.communityTracesDir}`);
-	}
-	const analyze = deps.analyzeCommunity ?? analyzeCommunityTraces;
-	const stats = await analyze(paths.communityTracesDir);
-	if (stats.totalFiles === 0) {
-		throw new Error(`Community traces directory is empty: ${paths.communityTracesDir}`);
-	}
-	await writeCommunityStats(cwd, stats);
-	return stats;
-}
-
-function passesHoldOutGate(candidate: QuestCandidateSummary, leader: QuestCandidateSummary | null): boolean {
-	if (!candidate.holdOutScore) return false;
-	if (!leader?.holdOutScore) return true;
-	if (candidate.holdOutScore.meanScore < leader.holdOutScore.meanScore) return false;
-	if (candidate.holdOutScore.totalScore < leader.holdOutScore.totalScore) return false;
-	return true;
+	return { frontier, leader };
 }
 
 function baselineSummary(candidateId: string, profile: QuestProfile, searchScore: QuestCandidateScorecard, holdOutScore: QuestCandidateScorecard): QuestCandidateSummary {
@@ -678,15 +1178,14 @@ function baselineSummary(candidateId: string, profile: QuestProfile, searchScore
 		profileId: profile.id,
 		createdAt: Date.now(),
 		source: "baseline",
-		status: "frontier",
+		status: "accepted",
 		summary: `Baseline candidate ${candidateId} for ${searchScore.dataset}`,
-		rationale: "Archive the current profile as the first benchmarked frontier candidate.",
+		rationale: "Archive the current profile as the baseline frontier candidate for the active benchmark family.",
 		targetedTags: [],
 		promptSurfaceIds: [],
 		searchScore,
 		holdOutScore,
-		paretoOptimal: true,
-		frontierRank: 1,
+		paretoOptimal: false,
 	};
 }
 
@@ -712,9 +1211,17 @@ function candidateSummaryFromProposal(
 		promptSurfaceIds: proposal.promptSurfaceIds,
 		searchScore,
 		holdOutScore,
-		paretoOptimal: status === "frontier",
+		paretoOptimal: false,
 		failureReason,
 	};
+}
+
+function passesHoldOutGate(candidate: QuestCandidateSummary, leader: QuestCandidateSummary | null): boolean {
+	if (!candidate.holdOutScore) return false;
+	if (!leader?.holdOutScore) return true;
+	if (candidate.holdOutScore.meanScore < leader.holdOutScore.meanScore) return false;
+	if (candidate.holdOutScore.totalScore < leader.holdOutScore.totalScore) return false;
+	return true;
 }
 
 async function promoteLeaderProfile(cwd: string, leader: QuestCandidateSummary | null): Promise<QuestProfile | null> {
@@ -725,52 +1232,114 @@ async function promoteLeaderProfile(cwd: string, leader: QuestCandidateSummary |
 	return profile;
 }
 
-export async function prepareTrialBenchmark(cwd: string, options: PrepareBenchmarkOptions = {}): Promise<{
+function splitMatchesManifest(split: QuestBenchmarkSplit | null, manifest: QuestBenchmarkManifest): boolean {
+	if (!split) return false;
+	return split.family === manifest.family && split.dataset === manifest.dataset && split.sourceFingerprint === manifest.sourceFingerprint;
+}
+
+async function ensurePreparedBenchmark(
+	cwd: string,
+	options: PrepareBenchmarkOptions = {},
+	deps: FrontierTrialDependencies = {},
+): Promise<{
 	state: Awaited<ReturnType<typeof loadQuestTrialState>>;
-	searchSet: QuestBenchmarkTaskSplit;
-	holdOutSet: QuestBenchmarkTaskSplit;
-	manifest: QuestBenchmarkTaskManifest;
+	searchSet: QuestBenchmarkSplit;
+	holdOutSet: QuestBenchmarkSplit;
+	manifest: QuestBenchmarkManifest;
 }> {
 	const state = await loadQuestTrialState(cwd, { ensure: true });
-	const dataset = options.dataset ?? state.benchmarkDataset ?? "terminal-bench-sample@2.0";
-	const runMode = options.runMode ?? benchmarkRunModeForDataset(dataset);
+	const family = options.benchmark ?? state.benchmarkFamily ?? "terminal-bench";
+	const adapter = BENCHMARK_ADAPTERS[family];
+	const dataset = options.dataset ?? (state.benchmarkFamily === family ? state.benchmarkDataset : undefined) ?? adapter.defaultDataset;
+	const runMode = adapter.resolveRunMode(dataset, options.runMode);
+	const manifest = await adapter.discoverManifest({ dataset, runMode, repo: options.repo, now: now(deps) });
+	const existingSearch = await loadSplit(getQuestTrialPaths(cwd).searchSetFile);
+	const existingHoldOut = await loadSplit(getQuestTrialPaths(cwd).holdOutSetFile);
+	if (!options.force && splitMatchesManifest(existingSearch, manifest) && splitMatchesManifest(existingHoldOut, manifest)) {
+		state.benchmarkFamily = family;
+		state.benchmarkDataset = dataset;
+		state.benchmarkRunMode = runMode;
+		await saveQuestTrialState(cwd, state);
+		return {
+			state,
+			searchSet: existingSearch!,
+			holdOutSet: existingHoldOut!,
+			manifest,
+		};
+	}
+	return prepareTrialBenchmark(cwd, { ...options, benchmark: family, dataset, runMode }, deps);
+}
+
+async function ensureCommunityStats(cwd: string, deps: FrontierTrialDependencies, force = false): Promise<CommunityStats> {
+	if (!force) {
+		const existing = await loadCommunityStats(cwd);
+		if (existing) return existing;
+	}
+	const paths = getQuestTrialPaths(cwd);
+	if (!existsSync(paths.communityTracesDir)) {
+		throw new Error(`Community traces directory is missing: ${paths.communityTracesDir}`);
+	}
+	const analyze = deps.analyzeCommunity ?? analyzeCommunityTraces;
+	const stats = await analyze(paths.communityTracesDir);
+	if (stats.totalFiles === 0) {
+		throw new Error(`Community traces directory is empty: ${paths.communityTracesDir}`);
+	}
+	await writeCommunityStats(cwd, stats);
+	return stats;
+}
+
+export async function prepareTrialBenchmark(
+	cwd: string,
+	options: PrepareBenchmarkOptions = {},
+	deps: FrontierTrialDependencies = {},
+): Promise<{
+	state: Awaited<ReturnType<typeof loadQuestTrialState>>;
+	searchSet: QuestBenchmarkSplit;
+	holdOutSet: QuestBenchmarkSplit;
+	manifest: QuestBenchmarkManifest;
+}> {
+	const state = await loadQuestTrialState(cwd, { ensure: true });
+	const family = options.benchmark ?? state.benchmarkFamily ?? "terminal-bench";
+	const adapter = BENCHMARK_ADAPTERS[family];
+	const dataset = options.dataset ?? (state.benchmarkFamily === family ? state.benchmarkDataset : undefined) ?? adapter.defaultDataset;
+	const runMode = adapter.resolveRunMode(dataset, options.runMode);
 	const seed = options.seed ?? DEFAULT_SAMPLE_SEED;
-	const manifest = await loadBenchmarkManifest(dataset, runMode);
-	const sortedTasks = [...manifest.tasks].sort((left, right) => left.name.localeCompare(right.name));
-	const shuffled = deterministicShuffle(sortedTasks, seed);
+	const manifest = await adapter.discoverManifest({ dataset, runMode, repo: options.repo, now: now(deps) });
+	const shuffled = deterministicShuffle(sortWorkItems(manifest.items), seed);
 	const counts = splitCounts(shuffled.length);
-	const searchTasks = shuffled.slice(0, counts.search);
-	const holdOutTasks = shuffled.slice(counts.search, counts.search + counts.holdOut);
-	const createdAt = Date.now();
-	const searchSet: QuestBenchmarkTaskSplit = {
-		id: `${dataset}-search`,
-		benchmark: "terminal-bench",
+	const createdAt = now(deps);
+	const searchSet: QuestBenchmarkSplit = {
+		id: `${family}-${dataset}-search`,
+		family,
 		dataset,
 		split: "search",
 		createdAt,
 		seed,
 		sourceManifestId: manifest.id,
-		totalTasks: searchTasks.length,
-		tasks: searchTasks,
+		sourceFingerprint: manifest.sourceFingerprint,
+		totalItems: counts.search,
+		items: shuffled.slice(0, counts.search),
 		notes: [`Prepared from ${manifest.source} manifest ${manifest.id}.`],
 	};
-	const holdOutSet: QuestBenchmarkTaskSplit = {
-		id: `${dataset}-hold-out`,
-		benchmark: "terminal-bench",
+	const holdOutSet: QuestBenchmarkSplit = {
+		id: `${family}-${dataset}-hold-out`,
+		family,
 		dataset,
 		split: "hold-out",
 		createdAt,
 		seed,
 		sourceManifestId: manifest.id,
-		totalTasks: holdOutTasks.length,
-		tasks: holdOutTasks,
+		sourceFingerprint: manifest.sourceFingerprint,
+		totalItems: counts.holdOut,
+		items: shuffled.slice(counts.search, counts.search + counts.holdOut),
 		notes: [`Prepared from ${manifest.source} manifest ${manifest.id}.`],
 	};
-	await writeTaskSplit(getQuestTrialPaths(cwd).searchSetFile, searchSet);
-	await writeTaskSplit(getQuestTrialPaths(cwd).holdOutSetFile, holdOutSet);
+	await writeSplit(getQuestTrialPaths(cwd).searchSetFile, searchSet);
+	await writeSplit(getQuestTrialPaths(cwd).holdOutSetFile, holdOutSet);
+	state.benchmarkFamily = family;
 	state.benchmarkDataset = dataset;
 	state.benchmarkRunMode = runMode;
-	state.lastSummary = `Prepared ${dataset}: ${searchSet.totalTasks} search / ${holdOutSet.totalTasks} hold-out tasks.`;
+	state.lastSummary = `Prepared ${family}:${dataset} with ${searchSet.totalItems} search and ${holdOutSet.totalItems} hold-out items.`;
 	await saveQuestTrialState(cwd, state);
 	return { state, searchSet, holdOutSet, manifest };
 }
@@ -778,8 +1347,8 @@ export async function prepareTrialBenchmark(cwd: string, options: PrepareBenchma
 export async function collectFrontierTrialStatus(cwd: string): Promise<FrontierTrialStatus> {
 	const state = await loadQuestTrialState(cwd, { ensure: true });
 	const profile = await loadQuestProfile(cwd, state.activeProfileId, { ensure: true, target: state.target });
-	const searchSet = await loadTaskSplit(getQuestTrialPaths(cwd).searchSetFile);
-	const holdOutSet = await loadTaskSplit(getQuestTrialPaths(cwd).holdOutSetFile);
+	const searchSet = await loadSplit(getQuestTrialPaths(cwd).searchSetFile);
+	const holdOutSet = await loadSplit(getQuestTrialPaths(cwd).holdOutSetFile);
 	const frontier = await loadFrontierState(cwd);
 	const communityStats = await loadCommunityStats(cwd);
 	const leader = frontier?.leaderCandidateId ? await loadCandidateSummary(cwd, frontier.leaderCandidateId) : null;
@@ -791,47 +1360,65 @@ export async function runTrialBaseline(
 	modelChoice: ModelChoice,
 	options: BaselineOptions = {},
 	deps: FrontierTrialDependencies = {},
-): Promise<{ state: Awaited<ReturnType<typeof loadQuestTrialState>>; profile: QuestProfile; summary: string; candidate: QuestCandidateSummary }> {
-	const { state, searchSet, holdOutSet } = await ensurePreparedBenchmark(cwd);
+): Promise<{
+	state: Awaited<ReturnType<typeof loadQuestTrialState>>;
+	profile: QuestProfile;
+	summary: string;
+	candidate: QuestCandidateSummary;
+}> {
+	const { state, searchSet, holdOutSet } = await ensurePreparedBenchmark(cwd, options, deps);
 	const existing = await loadCandidateSummary(cwd, "000");
-	if (existing && !options.force) {
+	if (
+		existing &&
+		!options.force &&
+		existing.searchScore?.family === searchSet.family &&
+		existing.searchScore?.dataset === searchSet.dataset
+	) {
 		const profile = await loadQuestProfile(cwd, state.activeProfileId, { ensure: true, target: state.target });
 		return {
 			state,
 			profile,
-			summary: `Baseline candidate 000 already exists for ${state.benchmarkDataset}.`,
+			summary: `Baseline candidate 000 already exists for ${searchSet.family}:${searchSet.dataset}.`,
 			candidate: existing,
 		};
 	}
 
 	const profile = await loadQuestProfile(cwd, state.activeProfileId, { ensure: true, target: state.target });
+	await stageBenchmarkProfile(cwd, profile);
+	await resetCandidateDir(cwd, "000");
 	state.status = "running";
-	state.lastSummary = `Running baseline candidate 000 on ${searchSet.dataset}.`;
+	state.lastSummary = `Running baseline candidate 000 on ${searchSet.family}:${searchSet.dataset}.`;
 	await saveQuestTrialState(cwd, state);
 	if (options.onSnapshot) {
 		await options.onSnapshot({ role: "trial", phase: "baseline-search", updatedAt: Date.now() });
 	}
 	const runSet = deps.runBenchmarkSet ?? runBenchmarkSet;
-	const searchScore = await runSet(cwd, modelChoice, profile.id, searchSet, "000", options.onProcessStart);
+	const searchScore = await runSet(cwd, modelChoice, profile.id, searchSet, "000", {
+		repo: options.repo,
+		onProcessStart: options.onProcessStart,
+	});
 	if (options.onSnapshot) {
 		await options.onSnapshot({ role: "trial", phase: "baseline-hold-out", updatedAt: Date.now() });
 	}
-	const holdOutScore = await runSet(cwd, modelChoice, profile.id, holdOutSet, "000", options.onProcessStart);
+	const holdOutScore = await runSet(cwd, modelChoice, profile.id, holdOutSet, "000", {
+		repo: options.repo,
+		onProcessStart: options.onProcessStart,
+	});
 	const candidate = baselineSummary("000", profile, searchScore, holdOutScore);
 	await saveCandidateArtifacts(cwd, "000", profile, {}, searchScore, holdOutScore, candidate);
-	const frontier: QuestFrontierState = {
-		generatedAt: Date.now(),
-		leaderCandidateId: "000",
-		frontierCandidateIds: ["000"],
-	};
-	await saveFrontierState(cwd, frontier);
-	state.currentCandidateId = "000";
+	const { frontier, leader } = await recomputeFrontier(cwd, searchSet.family, searchSet.dataset);
+	state.currentCandidateId = leader?.candidateId ?? "000";
 	state.frontierCandidateIds = frontier.frontierCandidateIds;
 	state.status = "idle";
-	state.lastSummary = `Baseline archived as candidate 000: ${searchScore.passed}/${searchScore.taskCount} search, ${holdOutScore.passed}/${holdOutScore.taskCount} hold-out.`;
+	state.lastSummary = `Baseline archived as candidate 000: ${searchScore.passed}/${searchScore.itemCount} search, ${holdOutScore.passed}/${holdOutScore.itemCount} hold-out.`;
 	await saveQuestTrialState(cwd, state);
 	await saveQuestProfile(cwd, profile);
-	return { state, profile, summary: state.lastSummary, candidate };
+	return {
+		state,
+		profile,
+		summary: state.lastSummary,
+		candidate: (leader && leader.candidateId === "000" ? leader : await loadCandidateSummary(cwd, "000")) ?? candidate,
+	};
 }
 
 export async function runTrialOptimization(
@@ -839,30 +1426,36 @@ export async function runTrialOptimization(
 	modelChoice: ModelChoice,
 	options: RunOptions = {},
 	deps: FrontierTrialDependencies = {},
-): Promise<{ state: Awaited<ReturnType<typeof loadQuestTrialState>>; profile: QuestProfile; summary: string; frontier: QuestFrontierState; leader: QuestCandidateSummary | null }> {
+): Promise<{
+	state: Awaited<ReturnType<typeof loadQuestTrialState>>;
+	profile: QuestProfile;
+	summary: string;
+	frontier: QuestFrontierState;
+	leader: QuestCandidateSummary | null;
+}> {
 	const iterations = Math.max(1, options.iterations ?? 1);
-	await ensurePreparedBenchmark(cwd);
+	const prepared = await ensurePreparedBenchmark(cwd, options, deps);
 	await ensureCommunityStats(cwd, deps);
-	await runTrialBaseline(cwd, modelChoice, {}, deps);
+	await runTrialBaseline(cwd, modelChoice, options, deps);
 
 	let state = await loadQuestTrialState(cwd, { ensure: true });
-	let leaderFrontier = await loadFrontierState(cwd);
-	let leaderSummary = leaderFrontier?.leaderCandidateId ? await loadCandidateSummary(cwd, leaderFrontier.leaderCandidateId) : null;
+	let frontier = (await loadFrontierState(cwd)) ?? initialFrontier();
+	let leader = frontier.leaderCandidateId ? await loadCandidateSummary(cwd, frontier.leaderCandidateId) : null;
 	let currentProfile = await loadQuestProfile(cwd, state.activeProfileId, { ensure: true, target: state.target });
 	const propose = deps.proposeCandidate ?? executeTrialProposerAgent;
 	const runSet = deps.runBenchmarkSet ?? runBenchmarkSet;
 
 	for (let iteration = 0; iteration < iterations; iteration += 1) {
 		const candidateId = await nextCandidateId(cwd);
-		const searchSet = await loadTaskSplit(getQuestTrialPaths(cwd).searchSetFile);
-		const holdOutSet = await loadTaskSplit(getQuestTrialPaths(cwd).holdOutSetFile);
+		const searchSet = (await loadSplit(getQuestTrialPaths(cwd).searchSetFile)) ?? prepared.searchSet;
+		const holdOutSet = (await loadSplit(getQuestTrialPaths(cwd).holdOutSetFile)) ?? prepared.holdOutSet;
 		const communityStats = await loadCommunityStats(cwd);
-		if (!searchSet || !holdOutSet || !communityStats) {
-			throw new Error("Trials are not prepared. Run prepare-benchmark and analyze-community first.");
+		if (!communityStats) {
+			throw new Error("Community stats are required for frontier optimization. Run /quest trials analyze-community first.");
 		}
 
 		state.status = "running";
-		state.lastSummary = `Proposer is generating candidate ${candidateId}.`;
+		state.lastSummary = `Proposer is generating candidate ${candidateId} for ${searchSet.family}:${searchSet.dataset}.`;
 		await saveQuestTrialState(cwd, state);
 		if (options.onSnapshot) {
 			await options.onSnapshot({ role: "proposer", phase: "propose", updatedAt: Date.now() });
@@ -880,7 +1473,7 @@ export async function runTrialOptimization(
 				searchSetPath: getQuestTrialPaths(cwd).searchSetFile,
 				holdOutSetPath: getQuestTrialPaths(cwd).holdOutSetFile,
 				communityStats,
-				leaderSummary: leaderSummary ?? undefined,
+				leaderSummary: leader ?? undefined,
 			},
 			options.onSnapshot,
 			options.onProcessStart,
@@ -896,50 +1489,59 @@ export async function runTrialOptimization(
 		nextProfile.id = `${state.target}-${state.projectId}-candidate-${candidateId}`;
 		nextProfile.updatedAt = Date.now();
 		await stageBenchmarkProfile(cwd, nextProfile);
+		await resetCandidateDir(cwd, candidateId);
 		if (options.onSnapshot) {
 			await options.onSnapshot({ role: "trial", phase: "search-benchmark", updatedAt: Date.now() });
 		}
-		const searchScore = await runSet(cwd, modelChoice, nextProfile.id, searchSet, candidateId, options.onProcessStart);
+		const searchScore = await runSet(cwd, modelChoice, nextProfile.id, searchSet, candidateId, {
+			repo: options.repo,
+			onProcessStart: options.onProcessStart,
+		});
 		if (options.onSnapshot) {
 			await options.onSnapshot({ role: "trial", phase: "hold-out-benchmark", updatedAt: Date.now() });
 		}
-		const holdOutScore = await runSet(cwd, modelChoice, nextProfile.id, holdOutSet, candidateId, options.onProcessStart);
-		let candidateSummary = candidateSummaryFromProposal(candidateId, nextProfile, proposal.candidate, searchScore, holdOutScore, "accepted");
-		if (!passesHoldOutGate(candidateSummary, leaderSummary)) {
-			candidateSummary = {
-				...candidateSummary,
+		const holdOutScore = await runSet(cwd, modelChoice, nextProfile.id, holdOutSet, candidateId, {
+			repo: options.repo,
+			onProcessStart: options.onProcessStart,
+		});
+		let summary = candidateSummaryFromProposal(candidateId, nextProfile, proposal.candidate, searchScore, holdOutScore, "accepted");
+		if (!passesHoldOutGate(summary, leader)) {
+			summary = {
+				...summary,
 				status: "rejected",
-				paretoOptimal: false,
 				failureReason: "Hold-out score regressed relative to the current leader.",
 			};
-			await saveCandidateArtifacts(cwd, candidateId, nextProfile, proposal.candidate.patch, searchScore, holdOutScore, candidateSummary);
+			await saveCandidateArtifacts(cwd, candidateId, nextProfile, proposal.candidate.patch, searchScore, holdOutScore, summary);
+			state.lastSummary = `Candidate ${candidateId} rejected: hold-out score regressed.`;
+			await saveQuestTrialState(cwd, state);
 			continue;
 		}
 
-		await saveCandidateArtifacts(cwd, candidateId, nextProfile, proposal.candidate.patch, searchScore, holdOutScore, candidateSummary);
-		const recomputed = await recomputeFrontier(cwd);
-		leaderFrontier = recomputed.frontier;
-		leaderSummary = recomputed.leader;
-		const promotedProfile = await promoteLeaderProfile(cwd, leaderSummary);
+		await saveCandidateArtifacts(cwd, candidateId, nextProfile, proposal.candidate.patch, searchScore, holdOutScore, summary);
+		const recomputed = await recomputeFrontier(cwd, searchSet.family, searchSet.dataset);
+		frontier = recomputed.frontier;
+		leader = recomputed.leader;
+		const promotedProfile = await promoteLeaderProfile(cwd, leader);
 		if (promotedProfile) currentProfile = promotedProfile;
 		state = await loadQuestTrialState(cwd, { ensure: true });
-		state.currentCandidateId = candidateId;
-		state.frontierCandidateIds = leaderFrontier.frontierCandidateIds;
-		state.lastSummary = leaderSummary
-			? `Candidate ${candidateId} archived. Leader ${leaderSummary.candidateId}: mean=${leaderSummary.searchScore?.meanScore.toFixed(3) ?? "0.000"} cost=${leaderSummary.searchScore?.totalCost.toFixed(3) ?? "0.000"} duration=${leaderSummary.searchScore?.totalDurationMs ?? 0}ms.`
+		state.currentCandidateId = leader?.candidateId ?? candidateId;
+		state.frontierCandidateIds = frontier.frontierCandidateIds;
+		state.lastSummary = leader
+			? `Candidate ${candidateId} archived. Leader ${leader.candidateId}: mean=${leader.searchScore?.meanScore.toFixed(3) ?? "0.000"} cost=${leader.searchScore?.totalCost.toFixed(3) ?? "0.000"} duration=${leader.searchScore?.totalDurationMs ?? 0}ms.`
 			: `Candidate ${candidateId} archived.`;
 		await saveQuestTrialState(cwd, state);
 	}
 
 	state.status = "idle";
+	state.currentCandidateId = leader?.candidateId ?? state.currentCandidateId;
+	state.frontierCandidateIds = frontier.frontierCandidateIds;
 	await saveQuestTrialState(cwd, state);
-	const frontier = leaderFrontier ?? initialFrontier();
 	return {
 		state,
 		profile: currentProfile,
 		summary: state.lastSummary ?? "Frontier trials run completed.",
 		frontier,
-		leader: leaderSummary,
+		leader,
 	};
 }
 
@@ -948,15 +1550,19 @@ export async function analyzeTrialCommunity(cwd: string, force = false, deps: Fr
 }
 
 export function summarizeTrialStatus(status: FrontierTrialStatus): string {
-	const searchSummary = status.searchSet ? `${status.searchSet.totalTasks} search` : "no search split";
-	const holdOutSummary = status.holdOutSet ? `${status.holdOutSet.totalTasks} hold-out` : "no hold-out split";
+	const family = status.state.benchmarkFamily ?? "terminal-bench";
+	const dataset = status.state.benchmarkDataset ?? defaultDatasetForFamily(family);
+	const runMode = status.state.benchmarkRunMode ?? BENCHMARK_ADAPTERS[family].resolveRunMode(dataset);
+	const searchSummary = status.searchSet ? `${status.searchSet.totalItems} search` : "no search split";
+	const holdOutSummary = status.holdOutSet ? `${status.holdOutSet.totalItems} hold-out` : "no hold-out split";
 	const communitySummary = status.communityStats ? `${status.communityStats.parsedSessions}/${status.communityStats.totalSessions} community sessions` : "no community stats";
 	const leaderSummary = status.leader?.searchScore
 		? `leader ${status.leader.candidateId} mean=${status.leader.searchScore.meanScore.toFixed(3)} cost=${status.leader.searchScore.totalCost.toFixed(3)} duration=${status.leader.searchScore.totalDurationMs}ms`
 		: "no frontier leader";
 	return [
 		`Trials status: ${status.state.status}`,
-		`Dataset: ${status.state.benchmarkDataset ?? "unset"} (${status.state.benchmarkRunMode ?? "unset"})`,
+		`Benchmark: ${family}`,
+		`Dataset: ${dataset} (${runMode})`,
 		`Profile: ${status.profile.id}`,
 		`Split: ${searchSummary} / ${holdOutSummary}`,
 		`Community: ${communitySummary}`,

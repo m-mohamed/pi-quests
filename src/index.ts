@@ -25,15 +25,12 @@ import {
 	getQuestPaths,
 	listProjectQuests,
 	loadActiveQuest,
-	loadQuestExperiment,
 	loadQuestTrialState,
 	loadLearnedWorkflows,
 	loadQuestProfile,
 	loadQuest,
 	pruneQuestStorage,
 	projectIdFor,
-	saveQuestEvalDataset,
-	saveQuestExperiment,
 	saveQuestTrialState,
 	saveQuestProfile,
 	saveLearnedWorkflows,
@@ -49,7 +46,6 @@ import type {
 	LearnedWorkflow,
 	LiveRunSnapshot,
 	ModelChoice,
-	QuestExperiment,
 	QuestFeature,
 	QuestTrialState,
 	QuestMilestone,
@@ -74,16 +70,6 @@ const ROLE_NAMES: QuestRole[] = ["orchestrator", "worker", "validator"];
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const DASHBOARD_TABS = ["summary", "features", "runs", "detail"] as const;
 type DashboardTab = (typeof DASHBOARD_TABS)[number];
-
-const questExperimentScoreSchema = Type.Object({
-	datasetId: Type.String(),
-	caseIds: Type.Array(Type.String()),
-	passed: Type.Number(),
-	failed: Type.Number(),
-	score: Type.Number(),
-	maxScore: Type.Number(),
-	findings: Type.Array(Type.String()),
-});
 
 const questPromptSurfacesPatchSchema = Type.Object({
 	planningPolicy: Type.Optional(Type.String()),
@@ -794,6 +780,14 @@ ${
 
 		const [subcommand, ...rest] = trimmed.split(/\s+/);
 		const remainder = rest.join(" ").trim();
+		const requestedBenchmark = readFlag("--benchmark");
+		if (requestedBenchmark && requestedBenchmark !== "terminal-bench" && requestedBenchmark !== "slopcodebench") {
+			await emitNote(pi, ctx, "Unsupported benchmark family. Use --benchmark terminal-bench or --benchmark slopcodebench.", "warning");
+			return;
+		}
+		const benchmark = requestedBenchmark as "terminal-bench" | "slopcodebench" | undefined;
+		const dataset = readFlag("--dataset") ?? (remainder && !remainder.startsWith("--") ? remainder : undefined);
+		const repo = readFlag("--repo");
 
 		switch (subcommand) {
 			case "run": {
@@ -810,6 +804,10 @@ ${
 					ctx.cwd,
 					modelChoice,
 					{
+						benchmark,
+						dataset,
+						repo,
+						force: hasFlag("--force"),
 						iterations: Number.isFinite(iterations) && iterations > 0 ? iterations : 1,
 						onSnapshot: async (snapshotUpdate) => {
 							trialLiveRun = snapshotUpdate;
@@ -836,7 +834,6 @@ ${
 				activeTrialPid = undefined;
 				trialLiveRun = null;
 				currentTrialState.status = "stopped";
-				currentTrialState.activeExperimentId = undefined;
 				currentTrialState.lastSummary = "Trials stopped by operator.";
 				await saveQuestTrialState(ctx.cwd, currentTrialState);
 				await emitNote(pi, ctx, "Trials stopped.", "warning");
@@ -844,13 +841,12 @@ ${
 			}
 
 			case "prepare-benchmark": {
-				const dataset = readFlag("--dataset") ?? (remainder && !remainder.startsWith("--") ? remainder : undefined);
-				const prepared = await prepareTrialBenchmark(ctx.cwd, { dataset });
+				const prepared = await prepareTrialBenchmark(ctx.cwd, { benchmark, dataset, repo, force: hasFlag("--force") });
 				currentTrialState = prepared.state;
 				await emitNote(
 					pi,
 					ctx,
-					`Prepared ${prepared.manifest.dataset}: ${prepared.searchSet.totalTasks} search / ${prepared.holdOutSet.totalTasks} hold-out tasks.`,
+					`Prepared ${prepared.manifest.family}:${prepared.manifest.dataset}: ${prepared.searchSet.totalItems} search / ${prepared.holdOutSet.totalItems} hold-out items.\nNext: /quest trials baseline${benchmark ? ` --benchmark ${benchmark}` : ""}${dataset ? ` --dataset ${dataset}` : ""}${repo ? ` --repo ${repo}` : ""}`,
 				);
 				return;
 			}
@@ -878,6 +874,9 @@ ${
 					ctx.cwd,
 					modelChoice,
 					{
+						benchmark,
+						dataset,
+						repo,
 						force: hasFlag("--force"),
 						onSnapshot: async (snapshotUpdate) => {
 							trialLiveRun = snapshotUpdate;
@@ -1835,138 +1834,6 @@ ${
 			return {
 				content: [{ type: "text", text: `Updated Trials profile ${next.id}.` }],
 				details: { profileId: next.id, target: next.target },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "quest_trials_record_experiment",
-		label: "quest_trials_record_experiment",
-		description: "Persist a Trials experiment record.",
-		promptSnippet: "Persist a Trials experiment record",
-		parameters: Type.Object({
-			id: Type.String(),
-			target: Type.Union([Type.Literal("repo"), Type.Literal("quest-core")]),
-			profileId: Type.String(),
-			state: Type.Union([
-				Type.Literal("planned"),
-				Type.Literal("running"),
-				Type.Literal("rejected"),
-				Type.Literal("applied"),
-				Type.Literal("failed"),
-				Type.Literal("stopped"),
-			]),
-			summary: Type.String(),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const state = await loadQuestTrialState(ctx.cwd, { ensure: true });
-			const experiment: QuestExperiment = {
-				id: params.id,
-				projectId: state.projectId,
-				target: params.target,
-				profileId: params.profileId,
-				state: params.state,
-				createdAt: Date.now(),
-				updatedAt: Date.now(),
-				baselineScores: [],
-				candidateScores: [],
-				spotCheckCaseIds: [],
-				heldOutCaseIds: [],
-				tracesAnalyzed: [],
-				summary: params.summary,
-			};
-			await saveQuestExperiment(ctx.cwd, experiment);
-			return {
-				content: [{ type: "text", text: `Recorded Trials experiment ${params.id}.` }],
-				details: { experimentId: params.id },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "quest_trials_set_scores",
-		label: "quest_trials_set_scores",
-		description: "Update baseline and candidate score summaries for a Trials experiment.",
-		promptSnippet: "Persist Trials experiment scores",
-		parameters: Type.Object({
-			experimentId: Type.String(),
-			baselineScores: Type.Array(questExperimentScoreSchema),
-			candidateScores: Type.Array(questExperimentScoreSchema),
-			summary: Type.Optional(Type.String()),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const experiment = await loadQuestExperiment(ctx.cwd, params.experimentId);
-			if (!experiment) return { content: [{ type: "text", text: "Experiment not found." }] };
-			experiment.baselineScores = params.baselineScores as QuestExperiment["baselineScores"];
-			experiment.candidateScores = params.candidateScores as QuestExperiment["candidateScores"];
-			if (params.summary) experiment.summary = params.summary;
-			await saveQuestExperiment(ctx.cwd, experiment);
-			return {
-				content: [{ type: "text", text: `Updated scores for experiment ${params.experimentId}.` }],
-				details: { experimentId: params.experimentId },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "quest_trials_apply_candidate",
-		label: "quest_trials_apply_candidate",
-		description: "Apply a Trials candidate patch to the active profile.",
-		promptSnippet: "Apply a Trials candidate patch",
-		parameters: Type.Object({
-			adoptedChange: Type.String(),
-			promptSurfaces: Type.Optional(questPromptSurfacesPatchSchema),
-			modelPolicy: Type.Optional(questModelPolicyPatchSchema),
-			verificationBudget: Type.Optional(questVerificationBudgetPatchSchema),
-			contextPolicy: Type.Optional(questContextPolicyPatchSchema),
-			workflowHintPolicy: Type.Optional(questWorkflowHintPolicyPatchSchema),
-			traceGrading: Type.Optional(questTraceGradingPatchSchema),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const trialState = await loadQuestTrialState(ctx.cwd, { ensure: true });
-			const profile = await loadQuestProfile(ctx.cwd, trialState.activeProfileId, { ensure: true, target: trialState.target });
-			const next = applyQuestProfilePatch(profile, {
-				adoptedChange: params.adoptedChange,
-				promptSurfaces: params.promptSurfaces,
-				modelPolicy: params.modelPolicy,
-				verificationBudget: params.verificationBudget,
-				contextPolicy: params.contextPolicy,
-				workflowHintPolicy: params.workflowHintPolicy,
-				traceGrading: params.traceGrading,
-			});
-			await saveQuestProfile(ctx.cwd, next);
-			currentProfile = next;
-			return {
-				content: [{ type: "text", text: `Applied candidate patch to ${next.id}.` }],
-				details: { profileId: next.id, adoptedChanges: next.adoptedChanges.length },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "quest_trials_update_state",
-		label: "quest_trials_update_state",
-		description: "Update high-level Trials state such as target, active experiment, or summary.",
-		promptSnippet: "Update Trials state",
-		parameters: Type.Object({
-			target: Type.Optional(Type.Union([Type.Literal("repo"), Type.Literal("quest-core")])),
-			activeProfileId: Type.Optional(Type.String()),
-			activeExperimentId: Type.Optional(Type.String()),
-			status: Type.Optional(Type.Union([Type.Literal("idle"), Type.Literal("running"), Type.Literal("stopped"), Type.Literal("blocked")])),
-			lastSummary: Type.Optional(Type.String()),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const state = await loadQuestTrialState(ctx.cwd, { ensure: true });
-			if (params.target) state.target = params.target;
-			if (params.activeProfileId) state.activeProfileId = params.activeProfileId;
-			if (params.activeExperimentId !== undefined) state.activeExperimentId = params.activeExperimentId || undefined;
-			if (params.status) state.status = params.status;
-			if (params.lastSummary !== undefined) state.lastSummary = params.lastSummary || undefined;
-			await saveQuestTrialState(ctx.cwd, state);
-			currentTrialState = state;
-			return {
-				content: [{ type: "text", text: `Trials state updated to ${state.status}.` }],
-				details: { target: state.target, profileId: state.activeProfileId, experimentId: state.activeExperimentId },
 			};
 		},
 	});

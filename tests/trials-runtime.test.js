@@ -1,134 +1,58 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readdir, readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import test from "node:test";
-import { defaultQuestProfile, traceBundleFromWorkerRun } from "../src/trials-core.js";
-import { loadQuestTrialsSnapshot, replayQuestRunIntoTrialDataset } from "../src/trials-runtime.js";
-import { listQuestTraceBundles, writeQuestTraceBundle } from "../src/state.js";
+import { fileURLToPath } from "node:url";
 
-const DEFAULT_MODEL = {
-	provider: "openai-codex",
-	model: "gpt-5.4",
-	thinkingLevel: "high",
-};
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const ACTIVE_FILES = [
+	"package.json",
+	"README.md",
+	"docs/reproducibility.md",
+	"docs/baseline-results.md",
+	"benchmarks/slopcodebench/README.md",
+];
+const BANNED_REFERENCES = [
+	"runQuestTrialsLoop",
+	"executeTrialCandidateAgent",
+	"trace-replays",
+	"terminal-bench-replays",
+	"slopcodebench-replays",
+	".pi/quests/lab",
+	".pi/quests/meta-harness",
+	"benchmark:slop:smoke",
+	"benchmark:slop:local",
+];
 
-function sampleQuest(cwd) {
-	return {
-		id: "quest-runtime",
-		projectId: "quest-runtime-project",
-		cwd,
-		title: "Quest Runtime",
-		goal: "Replay traces into offline datasets.",
-		status: "running",
-		config: {
-			orchestratorModel: DEFAULT_MODEL,
-			workerModel: DEFAULT_MODEL,
-			validatorModel: DEFAULT_MODEL,
-			validationConcurrency: 2,
-			cwd,
-			createdAt: Date.now(),
-		},
-		defaultModel: DEFAULT_MODEL,
-		roleModels: {
-			orchestrator: DEFAULT_MODEL,
-			worker: DEFAULT_MODEL,
-			validator: DEFAULT_MODEL,
-		},
-		plan: {
-			title: "Quest Runtime",
-			summary: "Replay traces into offline datasets.",
-			risks: [],
-			environment: [],
-			services: [],
-			humanQaChecklist: ["Run human QA before shipping."],
-			milestones: [
-				{
-					id: "m1",
-					order: 1,
-					title: "Replay traces",
-					description: "Replay traces into dataset cases.",
-					successCriteria: ["Interesting traces become offline cases."],
-					status: "running",
-				},
-			],
-			features: [
-				{
-					id: "f1",
-					order: 1,
-					milestoneId: "m1",
-					title: "Replay traces",
-					description: "Replay traces into dataset cases.",
-					preconditions: [],
-					fulfills: ["Interesting traces become offline cases."],
-					status: "running",
-				},
-			],
-		},
-		validationReadiness: {
-			summary: "Repo checks supported. Browser validation limited.",
-			checks: [],
-		},
-		validationState: {
-			assertions: [],
-			updatedAt: Date.now(),
-		},
-		planRevisions: [],
-		pendingPlanRevisionRequests: [],
-		steeringNotes: [],
-		humanQaStatus: "pending",
-		shipReadiness: "not_ready",
-		createdAt: Date.now(),
-		updatedAt: Date.now(),
-		recentRuns: [],
-	};
+async function collectTrackedTextFiles(root) {
+	const collected = [];
+	for (const entry of await readdir(root, { withFileTypes: true })) {
+		if (entry.name.startsWith(".")) continue;
+		const next = join(root, entry.name);
+		if (entry.isDirectory()) {
+			collected.push(...(await collectTrackedTextFiles(next)));
+			continue;
+		}
+		if (entry.isFile() && /\.(ts|js|json|md)$/.test(entry.name)) collected.push(next);
+	}
+	return collected;
 }
 
-test("loadQuestTrialsSnapshot seeds repo-local trials artifacts and replayQuestRunIntoTrialDataset materializes cases", async () => {
-	const repoDir = await mkdtemp(join(tmpdir(), "pi-quests-trials-runtime-"));
-	try {
-		const snapshot = await loadQuestTrialsSnapshot(repoDir, true);
-		assert.equal(snapshot.state.status, "idle");
-		assert.ok(existsSync(join(repoDir, ".pi", "quests", "trials", "state.json")));
-		assert.ok(snapshot.datasets.some((dataset) => dataset.kind === "core-regression"));
-		assert.ok(snapshot.datasets.some((dataset) => dataset.kind === "trace-replays"));
-
-		const quest = sampleQuest(repoDir);
-		const profile = defaultQuestProfile(quest.projectId);
-		const trace = traceBundleFromWorkerRun(
-			quest,
-			{
-				id: "run-replay",
-				role: "validator",
-				featureId: "f1",
-				milestoneId: "m1",
-				startedAt: Date.now() - 5_000,
-				endedAt: Date.now(),
-				provider: DEFAULT_MODEL.provider,
-				model: DEFAULT_MODEL.model,
-				thinkingLevel: DEFAULT_MODEL.thinkingLevel,
-				exitCode: 1,
-				ok: false,
-				summary: "Validation stayed limited because browser coverage is manual and the milestone blocked.",
-				stderr: "manual browser validation only",
-				issues: ["Browser validation still requires human QA."],
-				phase: "user_surface",
-				events: [],
-			},
-			profile,
-		);
-
-		await writeQuestTraceBundle(repoDir, trace);
-		const traces = await listQuestTraceBundles(repoDir);
-		assert.equal(traces.length, 1);
-
-		const replayDataset = await replayQuestRunIntoTrialDataset(repoDir, "run-replay");
-		assert.ok(replayDataset);
-		assert.ok(replayDataset.cases.length > 0);
-		assert.ok(replayDataset.cases.some((testCase) => testCase.provenance.runId === "run-replay"));
-		assert.ok(replayDataset.cases.some((testCase) => testCase.failureTags.includes("weak_validation")));
-	} finally {
-		await rm(repoDir, { recursive: true, force: true });
+test("shipped source and active docs are free of replay-era trials references", async () => {
+	const files = [
+		...(await collectTrackedTextFiles(join(REPO_ROOT, "src"))),
+		...(await collectTrackedTextFiles(join(REPO_ROOT, "benchmarks"))),
+		...ACTIVE_FILES.map((file) => join(REPO_ROOT, file)).filter((file) => existsSync(file)),
+	];
+	for (const file of files) {
+		const contents = await readFile(file, "utf-8");
+		for (const banned of BANNED_REFERENCES) {
+			assert.equal(
+				contents.includes(banned),
+				false,
+				`${file} still references banned legacy text: ${banned}`,
+			);
+		}
 	}
 });

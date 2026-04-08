@@ -176,16 +176,7 @@ export interface PiSessionTrace {
 }
 export type QuestBenchmarkName = "local" | "terminal-bench" | "slopcodebench";
 export type QuestBenchmarkRunMode = "local" | "sample" | "full" | "smoke" | "custom";
-export type QuestEvalDatasetKind =
-	| "core-regression"
-	| "repo-profile"
-	| "trace-replays"
-	| "terminal-bench-replays"
-	| "slopcodebench-replays"
-	| "held-out";
-export type QuestEvalCaseSource = "seeded" | "trace_replay";
-export type QuestEvalCaseType = "policy" | "trace_replay";
-export type QuestExperimentState = "planned" | "running" | "rejected" | "applied" | "failed" | "stopped";
+export type QuestFrontierBenchmarkFamily = "terminal-bench" | "slopcodebench";
 
 export interface QuestBenchmarkProvenance {
 	benchmark: QuestBenchmarkName;
@@ -200,36 +191,40 @@ export interface QuestBenchmarkProvenance {
 	score?: number;
 }
 
-export interface QuestBenchmarkTaskDescriptor {
+export interface QuestBenchmarkWorkItem {
+	id: string;
 	name: string;
-	path: string;
-	gitUrl?: string;
-	gitCommitId?: string;
+	family: QuestFrontierBenchmarkFamily;
+	dataset: string;
+	path?: string;
+	metadata?: Record<string, unknown>;
 }
 
-export interface QuestBenchmarkTaskManifest {
+export interface QuestBenchmarkManifest {
 	id: string;
-	benchmark: QuestBenchmarkName;
+	family: QuestFrontierBenchmarkFamily;
 	dataset: string;
 	runMode: QuestBenchmarkRunMode;
 	createdAt: number;
-	taskCount: number;
+	totalItems: number;
 	seed?: number;
-	source: "vendored" | "registry" | "generated";
-	tasks: QuestBenchmarkTaskDescriptor[];
+	source: "vendored" | "registry" | "generated" | "discovered";
+	sourceFingerprint: string;
+	items: QuestBenchmarkWorkItem[];
 	notes?: string[];
 }
 
-export interface QuestBenchmarkTaskSplit {
+export interface QuestBenchmarkSplit {
 	id: string;
-	benchmark: QuestBenchmarkName;
+	family: QuestFrontierBenchmarkFamily;
 	dataset: string;
 	split: "search" | "hold-out";
 	createdAt: number;
 	seed: number;
 	sourceManifestId: string;
-	totalTasks: number;
-	tasks: QuestBenchmarkTaskDescriptor[];
+	sourceFingerprint: string;
+	totalItems: number;
+	items: QuestBenchmarkWorkItem[];
 	notes?: string[];
 }
 
@@ -645,61 +640,10 @@ export interface QuestTraceBundle {
 	benchmark?: QuestBenchmarkProvenance;
 }
 
-export interface QuestEvalCase {
-	id: string;
-	title: string;
-	description: string;
-	source: QuestEvalCaseSource;
-	caseType: QuestEvalCaseType;
-	targetSurfaceIds: QuestPromptSurfaceId[];
-	failureTags: QuestFailureTag[];
-	provenance: {
-		traceId?: string;
-		runId?: string;
-		questId?: string;
-		benchmark?: QuestBenchmarkProvenance;
-		createdAt: number;
-	};
-	input: {
-		role?: QuestRole;
-		tags?: QuestFailureTag[];
-		issues?: string[];
-		promptContains?: string[];
-	};
-	expectations: {
-		requiredSurfaceSnippets?: string[];
-		forbidSurfaceSnippets?: string[];
-		requiredPolicies?: {
-			preferSameModelFamily?: boolean;
-			spillLongOutputsToReports?: boolean;
-			maxSharedHintsAtLeast?: number;
-			correctiveFeatureBudgetAtMost?: number;
-		};
-	};
-}
-
-export interface QuestEvalDataset {
-	id: string;
-	title: string;
-	kind: QuestEvalDatasetKind;
-	description: string;
-	updatedAt: number;
-	cases: QuestEvalCase[];
-}
-
-export interface QuestExperimentScore {
-	datasetId: string;
-	caseIds: string[];
-	passed: number;
-	failed: number;
-	score: number;
-	maxScore: number;
-	findings: string[];
-}
-
-export interface QuestCandidateTaskResult {
-	taskId: string;
-	taskName: string;
+export interface QuestCandidateWorkItemResult {
+	itemId: string;
+	itemName: string;
+	family: QuestFrontierBenchmarkFamily;
 	dataset: string;
 	split: "search" | "hold-out";
 	status: "passed" | "failed" | "error";
@@ -713,14 +657,16 @@ export interface QuestCandidateTaskResult {
 	artifactPaths: string[];
 	failureReason?: string;
 	rewardValues?: Record<string, number>;
+	benchmarkMetrics?: Record<string, unknown>;
 	benchmark?: QuestBenchmarkProvenance;
 }
 
 export interface QuestCandidateScorecard {
+	family: QuestFrontierBenchmarkFamily;
 	split: "search" | "hold-out";
 	dataset: string;
 	generatedAt: number;
-	taskCount: number;
+	itemCount: number;
 	passed: number;
 	failed: number;
 	totalScore: number;
@@ -728,7 +674,8 @@ export interface QuestCandidateScorecard {
 	meanScore: number;
 	totalCost: number;
 	totalDurationMs: number;
-	tasks: QuestCandidateTaskResult[];
+	benchmarkMetrics?: Record<string, unknown>;
+	items: QuestCandidateWorkItemResult[];
 }
 
 export interface QuestCandidateSummary {
@@ -824,36 +771,16 @@ export interface QuestExperimentCandidate {
 	promptSurfaceIds: QuestPromptSurfaceId[];
 }
 
-export interface QuestExperiment {
-	id: string;
-	projectId: string;
-	target: QuestTrialTarget;
-	profileId: string;
-	state: QuestExperimentState;
-	createdAt: number;
-	updatedAt: number;
-	baselineScores: QuestExperimentScore[];
-	candidateScores: QuestExperimentScore[];
-	spotCheckCaseIds: string[];
-	heldOutCaseIds: string[];
-	tracesAnalyzed: string[];
-	candidate?: QuestExperimentCandidate;
-	summary: string;
-	failureReason?: string;
-	reportFile?: string;
-	changedArtifacts?: string[];
-}
-
 export interface QuestTrialState {
 	projectId: string;
 	target: QuestTrialTarget;
 	activeProfileId: string;
 	storageVersion?: number;
+	benchmarkFamily?: QuestFrontierBenchmarkFamily;
 	benchmarkDataset?: string;
 	benchmarkRunMode?: QuestBenchmarkRunMode;
 	currentCandidateId?: string;
 	frontierCandidateIds?: string[];
-	activeExperimentId?: string;
 	status: QuestTrialStatus;
 	lastSummary?: string;
 	updatedAt: number;
@@ -943,9 +870,5 @@ export interface QuestTrialPaths {
 	communityStatsFile: string;
 	communityTracesDir: string;
 	profilesDir: string;
-	datasetsDir: string;
 	tracesDir: string;
-	experimentsDir: string;
-	baselinesDir: string;
-	reportsDir: string;
 }

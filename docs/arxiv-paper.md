@@ -319,7 +319,7 @@ quest-headless run \
   --benchmark terminal-bench \
   --dataset terminal-bench-sample@2.0 \
   --task-id chess-puzzle-1 \
-  --model opencode-go/minimax-m2.5 \
+  --model zai/glm-5.1 \
   --json
 ```
 
@@ -415,11 +415,8 @@ function defaultBenchmarkModel(): string {
   // 2. Read Pi's configured default model
   const piDefault = readPiDefaultModel();
   if (piDefault) return piDefault;
-  // 3. Detect available API keys
-  if (process.env.OPENAI_API_KEY) return "openai-codex/gpt-5.4";
-  if (process.env.GEMINI_API_KEY) return "google/gemini-2.5-flash";
-  // 4. Hardcoded fallback
-  return "opencode-go/minimax-m2.5";
+  // 3. Fallback
+  return "zai/glm-5.1";
 }
 ```
 

@@ -1,9 +1,7 @@
 import type {
 	LearnedWorkflow,
 	ModelChoice,
-	QuestEvalDataset,
 	QuestEventRecord,
-	QuestExperiment,
 	QuestTrialState,
 	QuestProfile,
 	QuestState,
@@ -16,13 +14,9 @@ import {
 	getQuestTrialPaths,
 	getQuestPaths,
 	loadActiveQuest as loadActiveQuestCore,
-	loadQuestEvalDataset as loadQuestEvalDatasetCore,
-	loadQuestExperiment as loadQuestExperimentCore,
 	loadQuestTrialState as loadQuestTrialStateCore,
 	loadLearnedWorkflows as loadLearnedWorkflowsCore,
 	loadQuestProfile as loadQuestProfileCore,
-	listQuestEvalDatasets as listQuestEvalDatasetsCore,
-	listQuestExperiments as listQuestExperimentsCore,
 	listProjectQuests as listProjectQuestsCore,
 	listQuestProfiles as listQuestProfilesCore,
 	listQuestTraceBundles as listQuestTraceBundlesCore,
@@ -33,10 +27,6 @@ import {
 	projectIdFor,
 	pruneQuestStorage as pruneQuestStorageCore,
 	saveLearnedWorkflows as saveLearnedWorkflowsCore,
-	saveQuestBaselineProfile as saveQuestBaselineProfileCore,
-	saveQuestEvalDataset as saveQuestEvalDatasetCore,
-	saveQuestExperiment as saveQuestExperimentCore,
-	saveQuestTrialReport as saveQuestTrialReportCore,
 	saveQuestTrialState as saveQuestTrialStateCore,
 	saveQuestProfile as saveQuestProfileCore,
 	saveQuest as saveQuestCore,
@@ -127,38 +117,6 @@ export async function writeQuestTraceBundle(cwd: string, trace: QuestTraceBundle
 
 export async function listQuestTraceBundles(cwd: string, limit?: number): Promise<QuestTraceBundle[]> {
 	return listQuestTraceBundlesCore(cwd, limit);
-}
-
-export async function loadQuestEvalDataset(cwd: string, datasetId: string): Promise<QuestEvalDataset | null> {
-	return loadQuestEvalDatasetCore(cwd, datasetId);
-}
-
-export async function saveQuestEvalDataset(cwd: string, dataset: QuestEvalDataset): Promise<void> {
-	return saveQuestEvalDatasetCore(cwd, dataset);
-}
-
-export async function listQuestEvalDatasets(cwd: string): Promise<QuestEvalDataset[]> {
-	return listQuestEvalDatasetsCore(cwd);
-}
-
-export async function saveQuestExperiment(cwd: string, experiment: QuestExperiment): Promise<void> {
-	return saveQuestExperimentCore(cwd, experiment);
-}
-
-export async function loadQuestExperiment(cwd: string, experimentId: string): Promise<QuestExperiment | null> {
-	return loadQuestExperimentCore(cwd, experimentId);
-}
-
-export async function listQuestExperiments(cwd: string, limit?: number): Promise<QuestExperiment[]> {
-	return listQuestExperimentsCore(cwd, limit);
-}
-
-export async function saveQuestBaselineProfile(cwd: string, experimentId: string, profile: QuestProfile): Promise<string> {
-	return saveQuestBaselineProfileCore(cwd, experimentId, profile);
-}
-
-export async function saveQuestTrialReport(cwd: string, reportId: string, payload: unknown): Promise<string> {
-	return saveQuestTrialReportCore(cwd, reportId, payload);
 }
 
 export async function questDirStats(cwd: string, questId: string) {

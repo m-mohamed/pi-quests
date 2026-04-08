@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-	chooseHeuristicCandidate,
+	applyQuestProfilePatch,
 	defaultQuestProfile,
-	evaluateQuestDataset,
-	seedQuestDatasets,
+	parseQuestExperimentCandidate,
 	traceBundleFromWorkerRun,
 } from "../src/trials-core.js";
 
@@ -133,40 +132,30 @@ test("traceBundleFromWorkerRun derives failure tags from worker traces", () => {
 	assert.ok(trace.derivedIssues.some((issue) => /Prerequisites were missing/i.test(issue)));
 });
 
-test("seeded datasets and heuristic candidates turn traces into targeted improvements", () => {
-	const quest = sampleQuest();
-	const profile = defaultQuestProfile(quest.projectId);
-	const run = {
-		id: "run-2",
-		role: "worker",
-		featureId: "f1",
-		milestoneId: "m1",
-		startedAt: Date.now() - 10_000,
-		endedAt: Date.now(),
-		provider: DEFAULT_MODEL.provider,
-		model: DEFAULT_MODEL.model,
-		thinkingLevel: DEFAULT_MODEL.thinkingLevel,
-		exitCode: 1,
-		ok: false,
-		summary: "Long inline evidence caused a context overflow while collecting proof for the feature.",
-		stderr: "context overflow while streaming evidence",
-		phase: "streaming",
-		events: [],
-	};
-	const trace = traceBundleFromWorkerRun(quest, run, profile);
-	const datasets = seedQuestDatasets(quest.projectId, [trace]);
-	const coreDataset = datasets.find((dataset) => dataset.kind === "core-regression");
-	const replayDataset = datasets.find((dataset) => dataset.kind === "trace-replays");
-	assert.ok(coreDataset);
-	assert.ok(replayDataset);
-	assert.ok(replayDataset.cases.some((testCase) => testCase.failureTags.includes("context_overflow")));
-
-	const baseline = evaluateQuestDataset(profile, coreDataset);
-	assert.equal(baseline.failed, 0);
-
-	const candidate = chooseHeuristicCandidate(profile, [trace], datasets);
+test("frontier proposer candidates parse and apply to profile-owned surfaces only", () => {
+	const profile = defaultQuestProfile("project-123");
+	const candidate = parseQuestExperimentCandidate(`{
+  "summary": "Tighten worker policy",
+  "rationale": "Improve generalization on benchmark search tasks.",
+  "generalizationNote": "Targets repeated failures instead of a single trace.",
+  "targetedTags": ["weak_validation"],
+  "targetedCaseIds": [],
+  "promptSurfaceIds": ["feature-worker"],
+  "patch": {
+    "promptSurfaces": {
+      "workerPolicy": "Confirm prerequisites and state validation limits explicitly."
+    },
+    "contextPolicy": {
+      "spillLongOutputsToReports": true
+    }
+  }
+}`);
 	assert.ok(candidate);
-	assert.ok(candidate.targetedTags.includes("context_overflow"));
-	assert.ok(candidate.promptSurfaceIds.includes("feature-worker"));
-	assert.match(candidate.patch.promptSurfaces.workerPolicy, /Spill very long evidence/i);
+	assert.deepEqual(candidate.targetedTags, ["weak_validation"]);
+	assert.deepEqual(candidate.promptSurfaceIds, ["feature-worker"]);
+
+	const patched = applyQuestProfilePatch(profile, candidate.patch);
+	assert.match(patched.promptSurfaces.workerPolicy, /validation limits explicitly/i);
+	assert.equal(patched.contextPolicy.spillLongOutputsToReports, true);
+	assert.equal(patched.toolAllowlist.worker.includes("edit"), true);
 });

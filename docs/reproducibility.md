@@ -8,14 +8,13 @@ node --import tsx scripts/evals.ts --suite offline-core
 node --import tsx scripts/evals-scenario.ts
 ```
 
-## Local substrate smoke
+## Local headless substrate
 
 ```bash
 npm run benchmark:local
-npm run benchmark:slop:smoke
 ```
 
-These commands exercise the local Quest benchmark substrate. They are fast development checks, not official public benchmark runs.
+This command exercises the standalone local Quest benchmark substrate. It is a development check, not a frontier benchmark family.
 
 ## Terminal-Bench through Harbor
 
@@ -42,14 +41,6 @@ To preview the Harbor invocation without running it:
 ```bash
 node --import tsx benchmarks/harbor/run.ts --dataset terminal-bench-sample@2.0 --run-mode sample --dry-run
 ```
-
-## SlopCodeBench local smoke
-
-```bash
-npm run benchmark:slop:local
-```
-
-This command validates Quest's checkpoint-aware adapter against local fixtures only. It is not the official public benchmark path.
 
 ## SlopCodeBench official runner overlay
 

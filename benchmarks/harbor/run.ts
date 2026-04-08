@@ -1,11 +1,21 @@
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createWriteStream, existsSync, readFileSync } from "node:fs";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
-import { defaultBenchmarkModel, missingEnvVarsForModel, requiredEnvVarsForModel } from "../shared.js";
+import { credentialsAvailableForModel, defaultBenchmarkModel, requiredEnvVarsForModel } from "../shared.js";
+
+const BUNDLED_PI_BIN = "/opt/quest-package/node_modules/.bin/pi";
+const DEFAULT_BUNDLED_PI_VERSION = "0.65.2";
+const BUNDLED_NODE_VERSION = "20.18.3";
+const BUNDLED_NODE_RUNTIME_DIR = "/opt/quest-node-runtimes";
+const LINUX_NODE_ARCHES = ["x64", "arm64"] as const;
+
+type LinuxNodeArch = (typeof LINUX_NODE_ARCHES)[number];
 
 export interface HarborRunOptions {
 	dataset: string;
@@ -13,6 +23,7 @@ export interface HarborRunOptions {
 	model?: string;
 	dryRun?: boolean;
 	bundlePath?: string;
+	nodeRuntimePath?: string;
 	jobsDir?: string;
 	profileId?: string;
 	includeTaskNames?: string[];
@@ -55,6 +66,7 @@ export function buildHarborCommand(options: HarborRunOptions): { command: string
 	}
 	if (options.bundlePath) {
 		const mounts = [`${options.bundlePath}:/opt/quest-package:ro`];
+		if (options.nodeRuntimePath) mounts.push(`${options.nodeRuntimePath}:${BUNDLED_NODE_RUNTIME_DIR}:ro`);
 		const authFile = join(homedir(), ".pi", "agent", "auth.json");
 		if (existsSync(authFile)) {
 			try {
@@ -69,6 +81,8 @@ export function buildHarborCommand(options: HarborRunOptions): { command: string
 		}
 		args.push("--mounts-json", JSON.stringify(mounts));
 		args.push("--ae", "QUEST_PACKAGE_DIR=/opt/quest-package");
+		if (options.nodeRuntimePath) args.push("--ae", `QUEST_NODE_RUNTIME_DIR=${BUNDLED_NODE_RUNTIME_DIR}`);
+		args.push("--ae", `PI_QUESTS_PI_BIN=${BUNDLED_PI_BIN}`);
 	}
 	args.push("--ae", `QUEST_HARBOR_DATASET=${options.dataset}`);
 	args.push("--ae", `QUEST_HARBOR_RUN_MODE=${options.runMode}`);
@@ -123,11 +137,103 @@ function parseArgs(argv: string[]): HarborRunOptions {
 	};
 }
 
-async function materializeQuestBundle(rootDir: string): Promise<{ bundlePath: string; cleanup(): Promise<void> }> {
+function bundledPiVersion(): string {
+	const explicit = process.env.PI_QUESTS_PI_VERSION?.trim();
+	if (explicit) return explicit;
+	try {
+		const detected = execSync("pi --version", {
+			cwd: process.cwd(),
+			encoding: "utf-8",
+			stdio: ["ignore", "pipe", "ignore"],
+		})
+			.trim()
+			.replace(/^v/i, "");
+		return detected || DEFAULT_BUNDLED_PI_VERSION;
+	} catch {
+		return DEFAULT_BUNDLED_PI_VERSION;
+	}
+}
+
+async function runCommand(command: string, args: string[], cwd: string): Promise<void> {
+	const proc = spawn(command, args, {
+		cwd,
+		env: process.env,
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	let stdout = "";
+	let stderr = "";
+	proc.stdout.on("data", (chunk) => {
+		stdout += String(chunk);
+	});
+	proc.stderr.on("data", (chunk) => {
+		stderr += String(chunk);
+	});
+	const exitCode = await new Promise<number>((resolvePromise, reject) => {
+		proc.on("close", (code) => resolvePromise(code ?? 1));
+		proc.on("error", reject);
+	});
+	if (exitCode !== 0) {
+		throw new Error(`${command} ${args.join(" ")} failed.\n${stderr || stdout}`);
+	}
+}
+
+function linuxNodeArchiveName(arch: LinuxNodeArch): string {
+	return `node-v${BUNDLED_NODE_VERSION}-linux-${arch}.tar.xz`;
+}
+
+function linuxNodeExtractedDirName(arch: LinuxNodeArch): string {
+	return `node-v${BUNDLED_NODE_VERSION}-linux-${arch}`;
+}
+
+async function writeDownloadedFile(url: string, destination: string): Promise<void> {
+	const response = await fetch(url);
+	if (!response.ok || !response.body) {
+		throw new Error(`Failed to download ${url}: ${response.status} ${response.statusText}`);
+	}
+	const output = createWriteStream(destination);
+	await pipeline(Readable.fromWeb(response.body as globalThis.ReadableStream), output);
+}
+
+async function ensureBundledLinuxNodeRuntime(arch: LinuxNodeArch): Promise<string> {
+	const cacheRoot = join(homedir(), ".cache", "pi-quests", "harbor-node");
+	const runtimeDir = join(cacheRoot, `node-linux-${arch}`);
+	const nodeBin = join(runtimeDir, "bin", "node");
+	if (existsSync(nodeBin)) return runtimeDir;
+	await mkdir(cacheRoot, { recursive: true });
+	const archivePath = join(cacheRoot, linuxNodeArchiveName(arch));
+	if (!existsSync(archivePath)) {
+		const nodeUrl = `https://nodejs.org/dist/v${BUNDLED_NODE_VERSION}/${linuxNodeArchiveName(arch)}`;
+		await writeDownloadedFile(nodeUrl, archivePath);
+	}
+	const extractRoot = await mkdtemp(join(cacheRoot, `extract-${arch}-`));
+	try {
+		await runCommand("tar", ["-xJf", archivePath, "-C", extractRoot], cacheRoot);
+		const extractedDir = join(extractRoot, linuxNodeExtractedDirName(arch));
+		const extractedNode = join(extractedDir, "bin", "node");
+		if (!existsSync(extractedNode)) {
+			throw new Error(`Bundled Linux Node archive for ${arch} did not contain ${extractedNode}`);
+		}
+		await rm(runtimeDir, { recursive: true, force: true });
+		await cp(extractedDir, runtimeDir, { recursive: true });
+	} finally {
+		await rm(extractRoot, { recursive: true, force: true });
+	}
+	return runtimeDir;
+}
+
+export async function materializeQuestBundle(
+	rootDir: string,
+): Promise<{ bundlePath: string; nodeRuntimePath: string; piVersion: string; cleanup(): Promise<void> }> {
 	const outputDir = await mkdtemp(join(tmpdir(), "quest-harbor-pack-"));
 	const bundlePath = join(outputDir, "bundle");
 	const distPath = join(bundlePath, "dist");
 	await mkdir(distPath, { recursive: true });
+	const piVersion = bundledPiVersion();
+	await writeFile(
+		join(bundlePath, "package.json"),
+		`${JSON.stringify({ type: "module", private: true, name: "quest-harbor-bundle" }, null, 2)}\n`,
+		"utf-8",
+	);
 	const tsconfigPath = join(outputDir, "tsconfig.harbor.json");
 	await writeFile(
 		tsconfigPath,
@@ -165,36 +271,43 @@ async function materializeQuestBundle(rootDir: string): Promise<{ bundlePath: st
 		)}\n`,
 		"utf-8",
 	);
-	const proc = spawn("npx", ["tsc", "-p", tsconfigPath], {
-		cwd: rootDir,
-		env: process.env,
-		stdio: ["ignore", "pipe", "pipe"],
-	});
-	let stdout = "";
-	let stderr = "";
-	proc.stdout.on("data", (chunk) => {
-		stdout += String(chunk);
-	});
-	proc.stderr.on("data", (chunk) => {
-		stderr += String(chunk);
-	});
-	const exitCode = await new Promise<number>((resolvePromise, reject) => {
-		proc.on("close", (code) => resolvePromise(code ?? 1));
-		proc.on("error", reject);
-	});
-	if (exitCode !== 0) {
-		throw new Error(`Failed to compile the Quest Harbor bundle.\n${stderr || stdout}`);
+	await runCommand("npx", ["tsc", "-p", tsconfigPath], rootDir);
+	await runCommand(
+		"npm",
+		[
+			"install",
+			"--prefix",
+			bundlePath,
+			"--omit=dev",
+			"--no-fund",
+			"--no-audit",
+			`@mariozechner/pi-coding-agent@${piVersion}`,
+		],
+		rootDir,
+	);
+	await runCommand(join(bundlePath, "node_modules", ".bin", "pi"), ["--version"], rootDir);
+	const nodeRuntimeRoot = join(outputDir, "node-runtimes");
+	await mkdir(nodeRuntimeRoot, { recursive: true });
+	for (const arch of LINUX_NODE_ARCHES) {
+		const cachedRuntimeDir = await ensureBundledLinuxNodeRuntime(arch);
+		await cp(cachedRuntimeDir, join(nodeRuntimeRoot, `node-linux-${arch}`), { recursive: true });
 	}
-	await writeFile(join(bundlePath, "package.json"), `${JSON.stringify({ type: "module" }, null, 2)}\n`, "utf-8");
 	return {
 		bundlePath,
+		nodeRuntimePath: nodeRuntimeRoot,
+		piVersion,
 		async cleanup() {
 			await rm(outputDir, { recursive: true, force: true });
 		},
 	};
 }
 
-async function writeInvocationSummary(rootDir: string, options: HarborRunOptions, command: ReturnType<typeof buildHarborCommand>) {
+async function writeInvocationSummary(
+	rootDir: string,
+	options: HarborRunOptions,
+	command: ReturnType<typeof buildHarborCommand>,
+	bundledPiVersion?: string,
+) {
 	const outputDir = resolve(rootDir, "benchmarks", ".runs", "harbor");
 	await mkdir(outputDir, { recursive: true });
 	const file = join(outputDir, `invocation-${Date.now()}.json`);
@@ -212,6 +325,8 @@ async function writeInvocationSummary(rootDir: string, options: HarborRunOptions
 		nConcurrent: options.nConcurrent ?? 1,
 		agentSetupTimeoutMultiplier: options.agentSetupTimeoutMultiplier ?? 4,
 		bundlePath: options.bundlePath ?? null,
+		nodeRuntimePath: options.nodeRuntimePath ?? null,
+		bundledPiVersion: bundledPiVersion ?? null,
 		agentEnvKeys,
 		command: [command.command, ...command.args],
 	};
@@ -221,19 +336,27 @@ async function writeInvocationSummary(rootDir: string, options: HarborRunOptions
 async function main() {
 	const options = parseArgs(process.argv.slice(2));
 	const model = options.model ?? defaultBenchmarkModel();
-	const missing = missingEnvVarsForModel(model);
-	if (missing.length > 0) {
-		throw new Error(`Missing credentials for ${model}. Expected one of: ${missing.join(", ")}`);
+	const credentials = credentialsAvailableForModel(model);
+	if (!credentials.ok) {
+		throw new Error(credentials.detail);
 	}
 	const rootDir = resolve(dirname(dirname(fileURLToPath(import.meta.url))), "..");
 	const bundle = await materializeQuestBundle(rootDir);
+	const previousVersion = process.env.PI_QUESTS_PI_VERSION;
+	process.env.PI_QUESTS_PI_VERSION = bundle.piVersion;
 	try {
 		const command = buildHarborCommand({
 			...options,
 			model,
 			bundlePath: bundle.bundlePath,
+			nodeRuntimePath: bundle.nodeRuntimePath,
 		});
-		await writeInvocationSummary(rootDir, { ...options, model, bundlePath: bundle.bundlePath }, command);
+		await writeInvocationSummary(
+			rootDir,
+			{ ...options, model, bundlePath: bundle.bundlePath, nodeRuntimePath: bundle.nodeRuntimePath },
+			command,
+			bundle.piVersion,
+		);
 		if (options.dryRun) {
 			console.log(JSON.stringify(command, null, 2));
 			return;
@@ -256,6 +379,8 @@ async function main() {
 			proc.on("error", reject);
 		});
 	} finally {
+		if (previousVersion === undefined) delete process.env.PI_QUESTS_PI_VERSION;
+		else process.env.PI_QUESTS_PI_VERSION = previousVersion;
 		await bundle.cleanup();
 	}
 }

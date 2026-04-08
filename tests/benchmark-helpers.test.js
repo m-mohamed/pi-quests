@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -124,6 +125,148 @@ test("qemu-startup helper boots extracted Alpine kernel over serial telnet", asy
 		assert.doesNotMatch(captured, /mon:telnet/);
 		assert.match(captured, /-daemonize/);
 	} finally {
+		if (previousPath === undefined) delete process.env.PATH;
+		else process.env.PATH = previousPath;
+		await rm(binDir, { recursive: true, force: true });
+	}
+});
+
+test("qemu-alpine-ssh helper boots Alpine and provisions SSH via overlay", async () => {
+	const binDir = await mkdtemp(join(tmpdir(), "pi-quests-qemu-ssh-helper-"));
+	const captureFile = join(binDir, "qemu-args.txt");
+	const overlayCaptureDir = join(binDir, "overlay");
+	const sshpassCaptureFile = join(binDir, "sshpass-args.txt");
+	const serialCommands = [];
+	const previousPath = process.env.PATH;
+	const previousSerialPort = process.env.PI_QUESTS_QEMU_SERIAL_PORT;
+	let serialPort = "0";
+	const serialServer = createServer((socket) => {
+		let buffer = "";
+		let loggedIn = false;
+		socket.setEncoding("utf8");
+		socket.write("localhost login: ");
+		socket.on("data", (chunk) => {
+			buffer += String(chunk).replace(/\r/g, "\n");
+			while (buffer.includes("\n")) {
+				const newlineIndex = buffer.indexOf("\n");
+				const line = buffer.slice(0, newlineIndex).trim();
+				buffer = buffer.slice(newlineIndex + 1);
+				if (!loggedIn) {
+					if (line === "root") {
+						loggedIn = true;
+						socket.write("localhost:~# ");
+					} else if (!line) {
+						socket.write("localhost login: ");
+					}
+					continue;
+				}
+				if (!line) {
+					socket.write("localhost:~# ");
+					continue;
+				}
+				serialCommands.push(line);
+				if (line === "uname -r") {
+					socket.write("6.6.4-1-lts\nlocalhost:~# ");
+					continue;
+				}
+				socket.write("localhost:~# ");
+			}
+		});
+	});
+	try {
+		await new Promise((resolvePromise, reject) => {
+			serialServer.once("error", reject);
+			serialServer.listen(0, "127.0.0.1", resolvePromise);
+		});
+		const address = serialServer.address();
+		assert.ok(address && typeof address === "object");
+		serialPort = String(address.port);
+		process.env.PI_QUESTS_QEMU_SERIAL_PORT = serialPort;
+		await writeFile(
+			join(binDir, "qemu-system-x86_64"),
+			`#!/bin/sh\nprintf '%s\n' "$@" > ${JSON.stringify(captureFile)}\n`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "bsdtar"),
+			"#!/bin/sh\nprintf 'stub-archive'\n",
+			{ mode: 0o755 },
+		);
+		await writeFile(join(binDir, "mkfs.vfat"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		await writeFile(
+			join(binDir, "tar"),
+			`#!/bin/sh
+: > "$2"
+rm -rf ${JSON.stringify(overlayCaptureDir)}
+mkdir -p ${JSON.stringify(overlayCaptureDir)}
+cp -R "$PWD/etc" ${JSON.stringify(overlayCaptureDir)}/etc
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "mcopy"),
+			`#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(join(binDir, "mcopy-args.txt"))}
+exit 0
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "sshpass"),
+			`#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(sshpassCaptureFile)}
+printf '6.6.4-1-lts\n'
+`,
+			{ mode: 0o755 },
+		);
+		process.env.PATH = `${binDir}:${previousPath ?? ""}`;
+		await runBenchmarkHelper({
+			family: "terminal-bench",
+			taskId: "qemu-alpine-ssh",
+			inputPath: "/app/alpine.iso",
+			outputPath: "/app/alpine-disk.qcow2",
+		});
+		const captured = await readFile(captureFile, "utf-8");
+		assert.match(captured, /-kernel/);
+		assert.match(captured, /vmlinuz-lts/);
+		assert.match(captured, /-initrd/);
+		assert.match(captured, /initramfs-lts/);
+		assert.match(captured, /\/app\/alpine\.iso/);
+		assert.match(captured, /-drive/);
+		assert.match(captured, /\/app\/alpine-disk\.qcow2/);
+		assert.match(captured, /hostfwd=tcp::2222-:22/);
+		assert.match(captured, new RegExp(`127\\.0\\.0\\.1:${serialPort}`));
+		assert.match(captured, /\.img,format=raw/);
+		assert.doesNotMatch(captured, /mon:telnet/);
+		assert.match(captured, /-daemonize/);
+		const overlayInittab = await readFile(join(overlayCaptureDir, "etc/inittab"), "utf-8");
+		assert.match(overlayInittab, /ttyS0::respawn/);
+		assert.equal(await readFile(join(overlayCaptureDir, "etc/hostname"), "utf-8"), "localhost\n");
+		assert.match(await readFile(join(overlayCaptureDir, "etc/securetty"), "utf-8"), /ttyS0/);
+		const sshpassArgs = await readFile(sshpassCaptureFile, "utf-8");
+		assert.match(sshpassArgs, /password123/);
+		assert.match(sshpassArgs, /StrictHostKeyChecking=no/);
+		assert.match(sshpassArgs, /-p/);
+		assert.match(sshpassArgs, /2222/);
+		assert.match(sshpassArgs, /root@localhost/);
+		assert.match(sshpassArgs, /uname\n-r/);
+		assert.deepEqual(serialCommands, [
+			"ip link set eth0 up",
+			"udhcpc -i eth0",
+			"apk update",
+			"apk add openssh",
+			"ssh-keygen -A",
+			"if grep -q '^#\\?PermitRootLogin' /etc/ssh/sshd_config; then sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; else echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config; fi",
+			"if grep -q '^#\\?PasswordAuthentication' /etc/ssh/sshd_config; then sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; else echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config; fi",
+			"echo 'root:password123' | chpasswd",
+			"rc-update add sshd default",
+			"service sshd restart",
+			"uname -r",
+		]);
+	} finally {
+		await new Promise((resolvePromise) => serialServer.close(resolvePromise));
+		if (previousSerialPort === undefined) delete process.env.PI_QUESTS_QEMU_SERIAL_PORT;
+		else process.env.PI_QUESTS_QEMU_SERIAL_PORT = previousSerialPort;
 		if (previousPath === undefined) delete process.env.PATH;
 		else process.env.PATH = previousPath;
 		await rm(binDir, { recursive: true, force: true });

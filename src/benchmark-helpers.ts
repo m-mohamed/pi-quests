@@ -5,6 +5,19 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { QuestBenchmarkProvenance } from "./types.js";
 
+const nodeNetModuleName = "node:net";
+const nodeNet = (await import(nodeNetModuleName)) as {
+	createConnection(options: { host: string; port: number }, listener?: () => void): {
+		setEncoding(encoding: string): void;
+		on(event: string, listener: (...args: any[]) => void): void;
+		once(event: string, listener: (...args: any[]) => void): void;
+		write(text: string): void;
+		end(): void;
+	};
+};
+
+type SocketLike = ReturnType<typeof nodeNet.createConnection>;
+
 export interface ParsedBenchmarkHelperArgs {
 	family: string;
 	taskId: string;
@@ -38,6 +51,14 @@ export function nativeBenchmarkHelperArgs(
 			taskId: benchmark.taskId,
 			inputPath: "/app/vendor/sqlite-fossil-release.tar.gz",
 			outputPath: "/app/sqlite",
+		};
+	}
+	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "qemu-alpine-ssh") {
+		return {
+			family: benchmark.benchmark,
+			taskId: benchmark.taskId,
+			inputPath: "/app/alpine.iso",
+			outputPath: "/app/alpine-disk.qcow2",
 		};
 	}
 	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "qemu-startup") {
@@ -584,6 +605,387 @@ EOF
 expect -f "$EXPECT_FILE"
 `;
 
+const QEMU_ALPINE_SSH_SCRIPT = String.raw`
+set -euo pipefail
+ISO_PATH="$1"
+DISK_PATH="$2"
+
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+  echo "qemu-system-x86_64 is required" >&2
+  exit 1
+fi
+if ! command -v bsdtar >/dev/null 2>&1 || ! command -v mkfs.vfat >/dev/null 2>&1 || ! command -v mcopy >/dev/null 2>&1 || ! command -v sshpass >/dev/null 2>&1; then
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "required helper dependencies are missing and apt-get is unavailable to install them" >&2
+    exit 1
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update >/dev/null
+  apt-get install -y -qq libarchive-tools dosfstools mtools sshpass >/dev/null
+fi
+
+BOOT_DIR="$(mktemp -d)"
+OVERLAY_DIR="$(mktemp -d)"
+OVERLAY_IMAGE="$(mktemp).img"
+cleanup() {
+  rm -rf "$BOOT_DIR" "$OVERLAY_DIR" "$OVERLAY_IMAGE"
+}
+trap cleanup EXIT
+
+bsdtar -xOf "$ISO_PATH" boot/vmlinuz-lts > "$BOOT_DIR/vmlinuz-lts"
+bsdtar -xOf "$ISO_PATH" boot/initramfs-lts > "$BOOT_DIR/initramfs-lts"
+
+mkdir -p "$OVERLAY_DIR/etc" "$OVERLAY_DIR/root"
+cat <<'EOF' > "$OVERLAY_DIR/etc/inittab"
+# /etc/inittab
+
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+::once:/root/setup-ssh.sh
+
+tty1::respawn:/sbin/getty 38400 tty1
+tty2::respawn:/sbin/getty 38400 tty2
+tty3::respawn:/sbin/getty 38400 tty3
+tty4::respawn:/sbin/getty 38400 tty4
+tty5::respawn:/sbin/getty 38400 tty5
+tty6::respawn:/sbin/getty 38400 tty6
+ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100
+
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/openrc shutdown
+EOF
+printf 'localhost\n' > "$OVERLAY_DIR/etc/hostname"
+cat <<'EOF' > "$OVERLAY_DIR/etc/securetty"
+tty1
+tty2
+tty3
+tty4
+tty5
+tty6
+ttyS0
+EOF
+cat <<'EOF' > "$OVERLAY_DIR/root/setup-ssh.sh"
+#!/bin/sh
+set -eu
+
+mkdir -p /var/log /var/lib
+LOG_FILE="/var/log/setup-ssh.log"
+MARKER="/var/lib/setup-ssh.done"
+if [ -f "$MARKER" ]; then
+  exit 0
+fi
+
+{
+  echo "Starting setup-ssh"
+  sleep 5
+  ip link set eth0 up || true
+  i=0
+  until udhcpc -i eth0; do
+    i=$((i + 1))
+    if [ "$i" -ge 10 ]; then
+      echo "DHCP failed"
+      exit 1
+    fi
+    sleep 2
+  done
+
+  apk update
+  apk add openssh
+  ssh-keygen -A
+
+  if grep -q '^#\?PermitRootLogin' /etc/ssh/sshd_config; then
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  else
+    echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+  fi
+
+  if grep -q '^#\?PasswordAuthentication' /etc/ssh/sshd_config; then
+    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  else
+    echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config
+  fi
+
+  echo 'root:password123' | chpasswd
+  rc-update add sshd default
+  service sshd restart
+  touch "$MARKER"
+} >>"$LOG_FILE" 2>&1
+EOF
+chmod +x "$OVERLAY_DIR/root/setup-ssh.sh"
+
+(cd "$OVERLAY_DIR" && tar -czf "$OVERLAY_DIR/localhost.apkovl.tar.gz" etc)
+truncate -s 8M "$OVERLAY_IMAGE"
+mkfs.vfat "$OVERLAY_IMAGE" >/dev/null
+mcopy -i "$OVERLAY_IMAGE" "$OVERLAY_DIR/localhost.apkovl.tar.gz" ::localhost.apkovl.tar.gz
+
+qemu-system-x86_64 -m 1024 \
+  -kernel "$BOOT_DIR/vmlinuz-lts" \
+  -initrd "$BOOT_DIR/initramfs-lts" \
+  -append "modules=loop,squashfs,sd-mod,usb-storage console=ttyS0 hostname=localhost" \
+  -drive file="$ISO_PATH",media=cdrom,readonly=on \
+  -drive file="$DISK_PATH",format=qcow2 \
+  -drive file="$OVERLAY_IMAGE",format=raw \
+  -nic user,hostfwd=tcp::2222-:22 \
+  -daemonize -display none -vga none \
+  -serial telnet:127.0.0.1:6665,server,nowait
+
+deadline=$(( $(date +%s) + 180 ))
+while true; do
+  if sshpass -p password123 ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=5 \
+    -p 2222 root@localhost uname -r 2>/dev/null | grep -q '6.6.4-1-lts'; then
+    exit 0
+  fi
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "SSH on port 2222 never became ready" >&2
+    exit 1
+  fi
+  sleep 2
+done
+`;
+
+const QEMU_ALPINE_SSH_BOOT_SCRIPT = String.raw`
+set -euo pipefail
+ISO_PATH="$1"
+DISK_PATH="$2"
+SERIAL_PORT="$3"
+if [ -z "$SERIAL_PORT" ]; then
+  SERIAL_PORT=6665
+fi
+
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+  echo "qemu-system-x86_64 is required" >&2
+  exit 1
+fi
+if ! command -v bsdtar >/dev/null 2>&1 || ! command -v mkfs.vfat >/dev/null 2>&1 || ! command -v mcopy >/dev/null 2>&1 || ! command -v sshpass >/dev/null 2>&1; then
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "required helper dependencies are missing and apt-get is unavailable to install them" >&2
+    exit 1
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update >/dev/null
+  apt-get install -y -qq libarchive-tools dosfstools mtools sshpass >/dev/null
+fi
+
+BOOT_DIR="$(mktemp -d)"
+OVERLAY_DIR="$(mktemp -d)"
+OVERLAY_IMAGE="$(mktemp).img"
+cleanup() {
+  rm -rf "$BOOT_DIR" "$OVERLAY_DIR" "$OVERLAY_IMAGE"
+}
+trap cleanup EXIT
+
+bsdtar -xOf "$ISO_PATH" boot/vmlinuz-lts > "$BOOT_DIR/vmlinuz-lts"
+bsdtar -xOf "$ISO_PATH" boot/initramfs-lts > "$BOOT_DIR/initramfs-lts"
+
+mkdir -p "$OVERLAY_DIR/etc"
+cat <<'EOF' > "$OVERLAY_DIR/etc/inittab"
+# /etc/inittab
+
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+
+tty1::respawn:/sbin/getty 38400 tty1
+tty2::respawn:/sbin/getty 38400 tty2
+tty3::respawn:/sbin/getty 38400 tty3
+tty4::respawn:/sbin/getty 38400 tty4
+tty5::respawn:/sbin/getty 38400 tty5
+tty6::respawn:/sbin/getty 38400 tty6
+ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100
+
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/openrc shutdown
+EOF
+printf 'localhost\n' > "$OVERLAY_DIR/etc/hostname"
+cat <<'EOF' > "$OVERLAY_DIR/etc/securetty"
+tty1
+tty2
+tty3
+tty4
+tty5
+tty6
+ttyS0
+EOF
+
+(cd "$OVERLAY_DIR" && tar -czf "$OVERLAY_DIR/localhost.apkovl.tar.gz" etc)
+truncate -s 8M "$OVERLAY_IMAGE"
+mkfs.vfat "$OVERLAY_IMAGE" >/dev/null
+mcopy -i "$OVERLAY_IMAGE" "$OVERLAY_DIR/localhost.apkovl.tar.gz" ::localhost.apkovl.tar.gz
+
+qemu-system-x86_64 -m 1024 \
+  -kernel "$BOOT_DIR/vmlinuz-lts" \
+  -initrd "$BOOT_DIR/initramfs-lts" \
+  -append "modules=loop,squashfs,sd-mod,usb-storage console=ttyS0 hostname=localhost" \
+  -drive file="$ISO_PATH",media=cdrom,readonly=on \
+  -drive file="$DISK_PATH",format=qcow2 \
+  -drive file="$OVERLAY_IMAGE",format=raw \
+  -nic user,hostfwd=tcp::2222-:22 \
+  -daemonize -display none -vga none \
+  -serial tcp:127.0.0.1:$SERIAL_PORT,server,nowait
+sleep 2
+`;
+
+function delay(ms: number): Promise<void> {
+	return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+class SerialConsoleSession {
+	private buffer = "";
+	private waiters = new Set<() => void>();
+	private closed = false;
+	private readonly socket: SocketLike;
+
+	constructor(socket: SocketLike) {
+		this.socket = socket;
+		this.socket.setEncoding("utf8");
+		this.socket.on("data", (chunk: string) => {
+			this.buffer += String(chunk);
+			if (this.buffer.length > 200_000) {
+				this.buffer = this.buffer.slice(-200_000);
+			}
+			for (const resolvePromise of this.waiters) resolvePromise();
+			this.waiters.clear();
+		});
+		this.socket.on("close", () => {
+			this.closed = true;
+			for (const resolvePromise of this.waiters) resolvePromise();
+			this.waiters.clear();
+		});
+	}
+
+	send(text: string): void {
+		this.socket.write(text);
+	}
+
+	async waitFor(pattern: RegExp, timeoutMs: number, startIndex = 0): Promise<string> {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			const slice = this.buffer.slice(startIndex);
+			if (pattern.test(slice)) {
+				return slice;
+			}
+			if (this.closed) {
+				throw new Error(`Serial console closed while waiting for ${pattern}.`);
+			}
+			const remaining = deadline - Date.now();
+			await new Promise<void>((resolvePromise, reject) => {
+				let waiter: (() => void) | undefined;
+				const timer = setTimeout(() => {
+					if (waiter) this.waiters.delete(waiter);
+					reject(new Error(`Timed out waiting for ${pattern}.`));
+				}, remaining);
+				waiter = () => {
+					clearTimeout(timer);
+					resolvePromise();
+				};
+				this.waiters.add(waiter);
+			});
+		}
+		throw new Error(`Timed out waiting for ${pattern}.`);
+	}
+
+	async execute(command: string, promptPattern: RegExp, timeoutMs: number): Promise<string> {
+		const startIndex = this.buffer.length;
+		this.send(`${command}\n`);
+		return await this.waitFor(promptPattern, timeoutMs, startIndex);
+	}
+
+	close(): void {
+		this.socket.end();
+	}
+}
+
+async function connectSerialConsole(port: number, timeoutMs: number): Promise<SerialConsoleSession> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		try {
+			const socket = await new Promise<SocketLike>((resolvePromise, reject) => {
+				const candidate = nodeNet.createConnection({ host: "127.0.0.1", port }, () => resolvePromise(candidate));
+				candidate.once("error", reject);
+			});
+			return new SerialConsoleSession(socket);
+		} catch {
+			await delay(1_000);
+		}
+	}
+	throw new Error(`Timed out connecting to serial console on port ${port}.`);
+}
+
+async function waitForSshReady(timeoutMs: number): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		try {
+			const output = await runCommand("sshpass", [
+				"-p",
+				"password123",
+				"ssh",
+				"-o",
+				"StrictHostKeyChecking=no",
+				"-o",
+				"UserKnownHostsFile=/dev/null",
+				"-o",
+				"ConnectTimeout=5",
+				"-p",
+				"2222",
+				"root@localhost",
+				"uname",
+				"-r",
+			]);
+			if (output.includes("6.6.4-1-lts")) {
+				return;
+			}
+		} catch {
+			// Retry until the guest-side SSH service comes up.
+		}
+		await delay(2_000);
+	}
+	throw new Error("SSH on port 2222 never became ready.");
+}
+
+async function runQemuAlpineSshHelper(parsed: ParsedBenchmarkHelperArgs): Promise<void> {
+	const serialPort = Number.parseInt(process.env.PI_QUESTS_QEMU_SERIAL_PORT ?? "6665", 10);
+	await runShellScript(QEMU_ALPINE_SSH_BOOT_SCRIPT, [parsed.inputPath, parsed.outputPath, String(serialPort)]);
+	const consoleSession = await connectSerialConsole(serialPort, 30_000);
+	let promptPinger: ReturnType<typeof setInterval> | undefined;
+	try {
+		consoleSession.send("\rroot\n");
+		promptPinger = setInterval(() => consoleSession.send("\rroot\n"), 5_000);
+		await consoleSession.waitFor(/# /, 600_000);
+		clearInterval(promptPinger);
+		promptPinger = undefined;
+		await consoleSession.execute("ip link set eth0 up", /# /, 60_000);
+		await consoleSession.execute("udhcpc -i eth0", /# /, 120_000);
+		await consoleSession.execute("apk update", /# /, 300_000);
+		await consoleSession.execute("apk add openssh", /# /, 300_000);
+		await consoleSession.execute("ssh-keygen -A", /# /, 60_000);
+		await consoleSession.execute(
+			"if grep -q '^#\\?PermitRootLogin' /etc/ssh/sshd_config; then sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; else echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config; fi",
+			/# /,
+			60_000,
+		);
+		await consoleSession.execute(
+			"if grep -q '^#\\?PasswordAuthentication' /etc/ssh/sshd_config; then sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; else echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config; fi",
+			/# /,
+			60_000,
+		);
+		await consoleSession.execute("echo 'root:password123' | chpasswd", /# /, 60_000);
+		await consoleSession.execute("rc-update add sshd default", /# /, 60_000);
+		await consoleSession.execute("service sshd restart", /# /, 60_000);
+		const unameOutput = await consoleSession.execute("uname -r", /# /, 60_000);
+		if (!unameOutput.includes("6.6.4-1-lts")) {
+			throw new Error("Guest kernel version check did not match 6.6.4-1-lts.");
+		}
+	} finally {
+		if (promptPinger) clearInterval(promptPinger);
+		consoleSession.close();
+	}
+	await waitForSshReady(300_000);
+}
+
 const SQLITE_WITH_GCOV_SCRIPT = [
 	"set -euo pipefail",
 	'ARCHIVE_PATH="${1:-/app/vendor/sqlite-fossil-release.tar.gz}"',
@@ -739,6 +1141,10 @@ export async function runBenchmarkHelper(parsed: ParsedBenchmarkHelperArgs): Pro
 	}
 	if (parsed.family === "terminal-bench" && parsed.taskId === "build-cython-ext") {
 		await runBuildCythonExtHelper(parsed);
+		return;
+	}
+	if (parsed.family === "terminal-bench" && parsed.taskId === "qemu-alpine-ssh") {
+		await runQemuAlpineSshHelper(parsed);
 		return;
 	}
 	if (parsed.family === "terminal-bench" && parsed.taskId === "qemu-startup") {

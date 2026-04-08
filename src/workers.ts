@@ -269,6 +269,15 @@ function benchmarkTaskSpecificHint(benchmark: QuestBenchmarkProvenance): string 
 - On slower Apple Silicon hosts, the fastest path is to extract Alpine's kernel/initramfs from the ISO, boot them directly with the ISO still attached as the CD-ROM, and attach a tiny side-media overlay that enables ttyS0 login.
 - Block until the serial console actually emits the login prompt.`;
 	}
+	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "qemu-alpine-ssh") {
+		return `Task-specific hint:
+- A native helper is available at /opt/quest-package/dist/benchmark-helpers.js.
+- First action: run this exact command and stop if SSH on port 2222 succeeds:
+  node /opt/quest-package/dist/benchmark-helpers.js terminal-bench qemu-alpine-ssh /app/alpine.iso /app/alpine-disk.qcow2
+- Use the installed qemu-system-x86_64 binary; do not build QEMU from source.
+- On slower Apple Silicon hosts, the fastest path is to extract Alpine's kernel/initramfs from the ISO, boot them directly with the ISO still attached as the CD-ROM, and attach a tiny side-media overlay that enables ttyS0 login.
+- Configure networking and OpenSSH from the serial console, then verify \`ssh -p 2222 root@localhost\` works with password \`password123\`.`;
+	}
 	return "";
 }
 

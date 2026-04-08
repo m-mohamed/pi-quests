@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import type { QuestBenchmarkProvenance } from "./types.js";
 
 export interface ParsedBenchmarkHelperArgs {
@@ -51,13 +52,11 @@ export function parseArgs(argv: string[]): ParsedBenchmarkHelperArgs {
 }
 
 const CHESS_BEST_MOVE_PYTHON = String.raw`
-from pathlib import Path
+import json
 import os
 import sys
 
-import chess
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageStat
 
 LIGHT = (240, 217, 181)
 DARK = (181, 136, 99)
@@ -114,9 +113,9 @@ def mse(square, template):
     y1 = margin
     x2 = square.size[0] - margin
     y2 = square.size[1] - margin
-    square_arr = np.asarray(square.crop((x1, y1, x2, y2)), dtype=np.float32)
-    template_arr = np.asarray(template.crop((x1, y1, x2, y2)), dtype=np.float32)
-    return float(np.mean((square_arr - template_arr) ** 2))
+    diff = ImageChops.difference(square.crop((x1, y1, x2, y2)), template.crop((x1, y1, x2, y2)))
+    rms = ImageStat.Stat(diff).rms
+    return float(sum(channel * channel for channel in rms) / max(1, len(rms)))
 
 
 def recover_board(image_path):
@@ -142,53 +141,329 @@ def recover_board(image_path):
     return rows
 
 
-def board_to_fen(rows):
-    fen_rows = []
-    for row in rows:
-        empties = 0
-        fen_row = []
-        for piece in row:
-            if not piece:
-                empties += 1
-                continue
-            if empties:
-                fen_row.append(str(empties))
-                empties = 0
-            fen_row.append(piece)
-        if empties:
-            fen_row.append(str(empties))
-        fen_rows.append("".join(fen_row) or "8")
-    return "/".join(fen_rows)
-
-
-def mate_in_one_moves(fen):
-    board = chess.Board(fen + " w - - 0 1")
-    winning = []
-    for move in board.legal_moves:
-        board.push(move)
-        if board.is_checkmate():
-            winning.append(move.uci())
-        board.pop()
-    return winning
-
-
 def main():
     image_path = sys.argv[1]
-    output_path = Path(sys.argv[2])
     board_rows = recover_board(image_path)
-    fen = board_to_fen(board_rows)
-    winning = mate_in_one_moves(fen)
-    if not winning:
-        raise SystemExit("No mate-in-one moves found from recovered board.")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(winning), encoding="utf-8")
-    print("Recovered FEN:", fen)
-    print("Winning moves:", " ".join(winning))
+    print(json.dumps(board_rows))
 
 
 if __name__ == "__main__":
     main()
 `;
+
+type ChessPiece = string | null;
+type ChessColor = "white" | "black";
+
+interface ChessMove {
+	fromRow: number;
+	fromCol: number;
+	toRow: number;
+	toCol: number;
+	promotion?: string;
+}
+
+function normalizeBoardRows(rows: readonly (readonly string[])[]): ChessPiece[][] {
+	if (rows.length !== 8 || rows.some((row) => row.length !== 8)) {
+		throw new Error("Recovered chess board must be 8x8.");
+	}
+	return rows.map((row) => row.map((piece) => (piece ? piece : null)));
+}
+
+function inBounds(row: number, col: number): boolean {
+	return row >= 0 && row < 8 && col >= 0 && col < 8;
+}
+
+function pieceColor(piece: ChessPiece): ChessColor | null {
+	if (!piece) return null;
+	return piece === piece.toUpperCase() ? "white" : "black";
+}
+
+function oppositeColor(color: ChessColor): ChessColor {
+	return color === "white" ? "black" : "white";
+}
+
+function cloneBoard(board: ChessPiece[][]): ChessPiece[][] {
+	return board.map((row) => [...row]);
+}
+
+function pieceAt(board: ChessPiece[][], row: number, col: number): ChessPiece {
+	return inBounds(row, col) ? board[row][col] : null;
+}
+
+function findKing(board: ChessPiece[][], color: ChessColor): [number, number] {
+	const expected = color === "white" ? "K" : "k";
+	for (let row = 0; row < 8; row += 1) {
+		for (let col = 0; col < 8; col += 1) {
+			if (board[row][col] === expected) {
+				return [row, col];
+			}
+		}
+	}
+	throw new Error(`Recovered board is missing the ${color} king.`);
+}
+
+function isSquareAttacked(board: ChessPiece[][], targetRow: number, targetCol: number, byColor: ChessColor): boolean {
+	const pawn = byColor === "white" ? "P" : "p";
+	const knight = byColor === "white" ? "N" : "n";
+	const bishop = byColor === "white" ? "B" : "b";
+	const rook = byColor === "white" ? "R" : "r";
+	const queen = byColor === "white" ? "Q" : "q";
+	const king = byColor === "white" ? "K" : "k";
+	const pawnRow = byColor === "white" ? targetRow + 1 : targetRow - 1;
+	for (const deltaCol of [-1, 1]) {
+		if (pieceAt(board, pawnRow, targetCol + deltaCol) === pawn) {
+			return true;
+		}
+	}
+	for (const [deltaRow, deltaCol] of [
+		[-2, -1],
+		[-2, 1],
+		[-1, -2],
+		[-1, 2],
+		[1, -2],
+		[1, 2],
+		[2, -1],
+		[2, 1],
+	] as const) {
+		if (pieceAt(board, targetRow + deltaRow, targetCol + deltaCol) === knight) {
+			return true;
+		}
+	}
+	for (const [deltaRow, deltaCol] of [
+		[-1, -1],
+		[-1, 0],
+		[-1, 1],
+		[0, -1],
+		[0, 1],
+		[1, -1],
+		[1, 0],
+		[1, 1],
+	] as const) {
+		if (pieceAt(board, targetRow + deltaRow, targetCol + deltaCol) === king) {
+			return true;
+		}
+	}
+	for (const [deltaRow, deltaCol] of [
+		[-1, -1],
+		[-1, 1],
+		[1, -1],
+		[1, 1],
+	] as const) {
+		let row = targetRow + deltaRow;
+		let col = targetCol + deltaCol;
+		while (inBounds(row, col)) {
+			const piece = board[row][col];
+			if (piece) {
+				if (piece === bishop || piece === queen) {
+					return true;
+				}
+				break;
+			}
+			row += deltaRow;
+			col += deltaCol;
+		}
+	}
+	for (const [deltaRow, deltaCol] of [
+		[-1, 0],
+		[1, 0],
+		[0, -1],
+		[0, 1],
+	] as const) {
+		let row = targetRow + deltaRow;
+		let col = targetCol + deltaCol;
+		while (inBounds(row, col)) {
+			const piece = board[row][col];
+			if (piece) {
+				if (piece === rook || piece === queen) {
+					return true;
+				}
+				break;
+			}
+			row += deltaRow;
+			col += deltaCol;
+		}
+	}
+	return false;
+}
+
+function isKingInCheck(board: ChessPiece[][], color: ChessColor): boolean {
+	const [kingRow, kingCol] = findKing(board, color);
+	return isSquareAttacked(board, kingRow, kingCol, oppositeColor(color));
+}
+
+function pushMove(moves: ChessMove[], move: ChessMove, piece: ChessPiece): void {
+	if (!piece) return;
+	if ((piece === "P" && move.toRow === 0) || (piece === "p" && move.toRow === 7)) {
+		moves.push({ ...move, promotion: piece === "P" ? "Q" : "q" });
+		return;
+	}
+	moves.push(move);
+}
+
+function generatePseudoMoves(board: ChessPiece[][], color: ChessColor): ChessMove[] {
+	const moves: ChessMove[] = [];
+	for (let row = 0; row < 8; row += 1) {
+		for (let col = 0; col < 8; col += 1) {
+			const piece = board[row][col];
+			if (!piece || pieceColor(piece) !== color) continue;
+			switch (piece.toLowerCase()) {
+				case "p": {
+					const direction = color === "white" ? -1 : 1;
+					const startRow = color === "white" ? 6 : 1;
+					const oneStepRow = row + direction;
+					if (inBounds(oneStepRow, col) && !board[oneStepRow][col]) {
+						pushMove(moves, { fromRow: row, fromCol: col, toRow: oneStepRow, toCol: col }, piece);
+						const twoStepRow = row + direction * 2;
+						if (row === startRow && inBounds(twoStepRow, col) && !board[twoStepRow][col]) {
+							moves.push({ fromRow: row, fromCol: col, toRow: twoStepRow, toCol: col });
+						}
+					}
+					for (const deltaCol of [-1, 1]) {
+						const captureRow = row + direction;
+						const captureCol = col + deltaCol;
+						if (!inBounds(captureRow, captureCol)) continue;
+						const target = board[captureRow][captureCol];
+						if (target && pieceColor(target) === oppositeColor(color)) {
+							pushMove(moves, { fromRow: row, fromCol: col, toRow: captureRow, toCol: captureCol }, piece);
+						}
+					}
+					break;
+				}
+				case "n":
+					for (const [deltaRow, deltaCol] of [
+						[-2, -1],
+						[-2, 1],
+						[-1, -2],
+						[-1, 2],
+						[1, -2],
+						[1, 2],
+						[2, -1],
+						[2, 1],
+					] as const) {
+						const nextRow = row + deltaRow;
+						const nextCol = col + deltaCol;
+						if (!inBounds(nextRow, nextCol)) continue;
+						const target = board[nextRow][nextCol];
+						if (!target || pieceColor(target) === oppositeColor(color)) {
+							moves.push({ fromRow: row, fromCol: col, toRow: nextRow, toCol: nextCol });
+						}
+					}
+					break;
+				case "b":
+				case "r":
+				case "q": {
+					const directions =
+						piece.toLowerCase() === "b"
+							? ([
+									[-1, -1],
+									[-1, 1],
+									[1, -1],
+									[1, 1],
+								] as const)
+							: piece.toLowerCase() === "r"
+								? ([
+										[-1, 0],
+										[1, 0],
+										[0, -1],
+										[0, 1],
+									] as const)
+								: ([
+										[-1, -1],
+										[-1, 1],
+										[1, -1],
+										[1, 1],
+										[-1, 0],
+										[1, 0],
+										[0, -1],
+										[0, 1],
+									] as const);
+					for (const [deltaRow, deltaCol] of directions) {
+						let nextRow = row + deltaRow;
+						let nextCol = col + deltaCol;
+						while (inBounds(nextRow, nextCol)) {
+							const target = board[nextRow][nextCol];
+							if (!target) {
+								moves.push({ fromRow: row, fromCol: col, toRow: nextRow, toCol: nextCol });
+							} else {
+								if (pieceColor(target) === oppositeColor(color)) {
+									moves.push({ fromRow: row, fromCol: col, toRow: nextRow, toCol: nextCol });
+								}
+								break;
+							}
+							nextRow += deltaRow;
+							nextCol += deltaCol;
+						}
+					}
+					break;
+				}
+				case "k":
+					for (const [deltaRow, deltaCol] of [
+						[-1, -1],
+						[-1, 0],
+						[-1, 1],
+						[0, -1],
+						[0, 1],
+						[1, -1],
+						[1, 0],
+						[1, 1],
+					] as const) {
+						const nextRow = row + deltaRow;
+						const nextCol = col + deltaCol;
+						if (!inBounds(nextRow, nextCol)) continue;
+						const target = board[nextRow][nextCol];
+						if (!target || pieceColor(target) === oppositeColor(color)) {
+							moves.push({ fromRow: row, fromCol: col, toRow: nextRow, toCol: nextCol });
+						}
+					}
+					break;
+				default:
+					break;
+			}
+		}
+	}
+	return moves;
+}
+
+function applyMove(board: ChessPiece[][], move: ChessMove): ChessPiece[][] {
+	const nextBoard = cloneBoard(board);
+	const piece = nextBoard[move.fromRow][move.fromCol];
+	if (!piece) {
+		throw new Error("Cannot apply a move from an empty square.");
+	}
+	nextBoard[move.fromRow][move.fromCol] = null;
+	nextBoard[move.toRow][move.toCol] = move.promotion ?? piece;
+	return nextBoard;
+}
+
+function generateLegalMoves(board: ChessPiece[][], color: ChessColor): ChessMove[] {
+	return generatePseudoMoves(board, color).filter((move) => !isKingInCheck(applyMove(board, move), color));
+}
+
+function moveToUci(move: ChessMove): string {
+	const files = "abcdefgh";
+	return `${files[move.fromCol]}${8 - move.fromRow}${files[move.toCol]}${8 - move.toRow}`;
+}
+
+export function findWhiteMateInOneMoves(rows: readonly (readonly string[])[]): string[] {
+	const board = normalizeBoardRows(rows);
+	const winningMoves: string[] = [];
+	for (const move of generateLegalMoves(board, "white")) {
+		const nextBoard = applyMove(board, move);
+		if (!isKingInCheck(nextBoard, "black")) continue;
+		if (generateLegalMoves(nextBoard, "black").length === 0) {
+			winningMoves.push(moveToUci(move));
+		}
+	}
+	return winningMoves.sort();
+}
+
+export const chessHelperTestUtils = {
+	normalizeBoardRows,
+	generateLegalMoves,
+	applyMove,
+	isKingInCheck,
+	isSquareAttacked,
+};
 
 const QEMU_STARTUP_SCRIPT = String.raw`
 set -euo pipefail
@@ -293,8 +568,8 @@ EOF
 expect -f "$EXPECT_FILE"
 `;
 
-async function runPythonScript(script: string, args: string[]): Promise<void> {
-	await new Promise<void>((resolvePromise, reject) => {
+async function runPythonScript(script: string, args: string[]): Promise<string> {
+	return await new Promise<string>((resolvePromise, reject) => {
 		const proc = spawn("python3", ["-c", script, ...args], {
 			stdio: ["ignore", "pipe", "pipe"],
 		});
@@ -312,8 +587,7 @@ async function runPythonScript(script: string, args: string[]): Promise<void> {
 				reject(new Error(stderr.trim() || stdout.trim() || `python3 exited with code ${code ?? 1}`));
 				return;
 			}
-			if (stdout.trim()) console.log(stdout.trimEnd());
-			resolvePromise();
+			resolvePromise(stdout.trim());
 		});
 	});
 }
@@ -345,7 +619,13 @@ async function runShellScript(script: string, args: string[]): Promise<void> {
 
 export async function runBenchmarkHelper(parsed: ParsedBenchmarkHelperArgs): Promise<void> {
 	if (parsed.family === "terminal-bench" && parsed.taskId === "chess-best-move") {
-		await runPythonScript(CHESS_BEST_MOVE_PYTHON, [parsed.inputPath, parsed.outputPath]);
+		const recoveredRows = JSON.parse(await runPythonScript(CHESS_BEST_MOVE_PYTHON, [parsed.inputPath])) as string[][];
+		const winningMoves = findWhiteMateInOneMoves(recoveredRows);
+		if (winningMoves.length === 0) {
+			throw new Error("No mate-in-one moves found from recovered board.");
+		}
+		await mkdir(dirname(parsed.outputPath), { recursive: true });
+		await writeFile(parsed.outputPath, `${winningMoves.join("\n")}\n`, "utf-8");
 		return;
 	}
 	if (parsed.family === "terminal-bench" && parsed.taskId === "qemu-startup") {

@@ -3,7 +3,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { parseArgs, runBenchmarkHelper } from "../src/benchmark-helpers.js";
+import { findWhiteMateInOneMoves, parseArgs, runBenchmarkHelper } from "../src/benchmark-helpers.js";
+
+function boardRows(...rows) {
+	return rows.map((row) => row.split("").map((cell) => (cell === "." ? "" : cell)));
+}
 
 test("benchmark helper CLI parses family, task, input, and output", () => {
 	const parsed = parseArgs(["terminal-bench", "chess-best-move", "/app/chess_board.png", "/app/move.txt"]);
@@ -26,6 +30,54 @@ test("benchmark helper rejects unsupported tasks", async () => {
 			}),
 		/no native helper registered/i,
 	);
+});
+
+test("findWhiteMateInOneMoves finds defended queen mates", () => {
+	const moves = findWhiteMateInOneMoves(
+		boardRows(
+			".......k",
+			"........",
+			".....KQ.",
+			"........",
+			"........",
+			"........",
+			"........",
+			"........",
+		),
+	);
+	assert.deepEqual(moves, ["g6g7"]);
+});
+
+test("findWhiteMateInOneMoves filters out pseudo-mates that drop the queen", () => {
+	const moves = findWhiteMateInOneMoves(
+		boardRows(
+			".......k",
+			"........",
+			"......Q.",
+			"........",
+			"........",
+			"........",
+			"....K...",
+			"........",
+		),
+	);
+	assert.deepEqual(moves, []);
+});
+
+test("findWhiteMateInOneMoves matches the terminal-bench sample board", () => {
+	const moves = findWhiteMateInOneMoves(
+		boardRows(
+			"r.bq.r..",
+			".p...pp.",
+			"p.n.p...",
+			"...nPkbP",
+			"........",
+			"P.N.....",
+			".P..QPP.",
+			"R.B.K..R",
+		),
+	);
+	assert.deepEqual(moves, ["e2e4", "g2g4"]);
 });
 
 test("qemu-startup helper boots extracted Alpine kernel over serial telnet", async () => {

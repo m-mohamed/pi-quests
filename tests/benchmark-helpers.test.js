@@ -9,6 +9,10 @@ function boardRows(...rows) {
 	return rows.map((row) => row.split("").map((cell) => (cell === "." ? "" : cell)));
 }
 
+function escapeRegExp(value) {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 test("benchmark helper CLI parses family, task, input, and output", () => {
 	const parsed = parseArgs(["terminal-bench", "chess-best-move", "/app/chess_board.png", "/app/move.txt"]);
 	assert.deepEqual(parsed, {
@@ -123,5 +127,191 @@ test("qemu-startup helper boots extracted Alpine kernel over serial telnet", asy
 		if (previousPath === undefined) delete process.env.PATH;
 		else process.env.PATH = previousPath;
 		await rm(binDir, { recursive: true, force: true });
+	}
+});
+
+test("build-cython-ext helper clones, patches, and builds pyknotid", async () => {
+	const binDir = await mkdtemp(join(tmpdir(), "pi-quests-cython-helper-bin-"));
+	const appDir = await mkdtemp(join(tmpdir(), "pi-quests-cython-helper-app-"));
+	const targetDir = join(appDir, "pyknotid");
+	const gitCaptureFile = join(binDir, "git-args.txt");
+	const pythonCaptureFile = join(binDir, "python-args.txt");
+	const pythonCwdFile = join(binDir, "python-cwd.txt");
+	const previousPath = process.env.PATH;
+	try {
+		await writeFile(
+			join(binDir, "git"),
+			`#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(gitCaptureFile)}
+target="$7"
+mkdir -p "$target/pyknotid/make" "$target/pyknotid/spacecurves" "$target/pyknotid/representations"
+printf 'from fractions import gcd\n' > "$target/pyknotid/make/torus.py"
+printf 'value = n.float)\n' > "$target/pyknotid/spacecurves/spacecurve.py"
+printf 'arr = dtype=n.float)\n' > "$target/pyknotid/make/periodic_knot.py"
+printf 'n.complex here\nn.float\ntrailing n.float\n' > "$target/pyknotid/invariants.py"
+printf 'return n.int(value)\n' > "$target/pyknotid/representations/representation.py"
+printf 'dtype = np.int\n' > "$target/pyknotid/spacecurves/periodiccell.py"
+printf 'dtype = np.int\n' > "$target/pyknotid/spacecurves/ccomplexity.pyx"
+printf 'from setuptools import setup\nsetup()\n' > "$target/setup.py"
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "python3"),
+			`#!/bin/sh
+printf '%s\n' "$PWD" >> ${JSON.stringify(pythonCwdFile)}
+printf '%s\n' "$@" >> ${JSON.stringify(pythonCaptureFile)}
+if [ "$1" = "setup.py" ]; then
+  mkdir -p "$PWD/pyknotid/spacecurves"
+  : > "$PWD/pyknotid/cinvariants.so"
+  : > "$PWD/pyknotid/spacecurves/chelpers.so"
+  : > "$PWD/pyknotid/spacecurves/ccomplexity.so"
+fi
+`,
+			{ mode: 0o755 },
+		);
+		process.env.PATH = `${binDir}:${previousPath ?? ""}`;
+		await runBenchmarkHelper({
+			family: "terminal-bench",
+			taskId: "build-cython-ext",
+			inputPath: appDir,
+			outputPath: targetDir,
+		});
+		const gitArgs = await readFile(gitCaptureFile, "utf-8");
+		assert.match(gitArgs, /clone/);
+		assert.match(gitArgs, /0\.5\.3/);
+		assert.match(gitArgs, new RegExp(escapeRegExp(targetDir)));
+		assert.equal(await readFile(join(targetDir, "pyknotid/make/torus.py"), "utf-8"), "from math import gcd\n");
+		assert.equal(await readFile(join(targetDir, "pyknotid/spacecurves/spacecurve.py"), "utf-8"), "value = n.float64)\n");
+		assert.equal(
+			await readFile(join(targetDir, "pyknotid/make/periodic_knot.py"), "utf-8"),
+			"arr = dtype=n.float64)\n",
+		);
+		assert.equal(
+			await readFile(join(targetDir, "pyknotid/representations/representation.py"), "utf-8"),
+			"return int(value)\n",
+		);
+		assert.equal(
+			await readFile(join(targetDir, "pyknotid/spacecurves/periodiccell.py"), "utf-8"),
+			"dtype = np.int64\n",
+		);
+		assert.equal(
+			await readFile(join(targetDir, "pyknotid/spacecurves/ccomplexity.pyx"), "utf-8"),
+			"dtype = np.int64\n",
+		);
+		const invariants = await readFile(join(targetDir, "pyknotid/invariants.py"), "utf-8");
+		assert.match(invariants, /n\.complex128/);
+		assert.match(invariants, /n\.float64/);
+		assert.doesNotMatch(invariants, /n\.complex[^0-9]/);
+		const pythonArgs = await readFile(pythonCaptureFile, "utf-8");
+		assert.match(pythonArgs, /-m/);
+		assert.match(pythonArgs, /pip/);
+		assert.match(pythonArgs, /setuptools==80\.9\.0/);
+		assert.match(pythonArgs, /cython==3\.1\.3/);
+		assert.match(pythonArgs, /setup\.py/);
+		assert.match(pythonArgs, /build_ext/);
+		assert.match(pythonArgs, /--inplace/);
+		assert.match(pythonArgs, /-e/);
+		const pythonCwds = await readFile(pythonCwdFile, "utf-8");
+		assert.match(pythonCwds, new RegExp(escapeRegExp(targetDir)));
+	} finally {
+		if (previousPath === undefined) delete process.env.PATH;
+		else process.env.PATH = previousPath;
+		await rm(binDir, { recursive: true, force: true });
+		await rm(appDir, { recursive: true, force: true });
+	}
+});
+
+test("sqlite-with-gcov helper unpacks, configures coverage flags, and installs sqlite3", async () => {
+	const binDir = await mkdtemp(join(tmpdir(), "pi-quests-sqlite-helper-bin-"));
+	const appDir = await mkdtemp(join(tmpdir(), "pi-quests-sqlite-helper-app-"));
+	const archivePath = join(appDir, "sqlite-fossil-release.tar.gz");
+	const targetDir = join(appDir, "sqlite");
+	const aptCaptureFile = join(binDir, "apt-args.txt");
+	const tarCaptureFile = join(binDir, "tar-args.txt");
+	const configureCaptureFile = join(binDir, "configure-env.txt");
+	const makeCaptureFile = join(binDir, "make-args.txt");
+	const lnCaptureFile = join(binDir, "ln-args.txt");
+	const previousPath = process.env.PATH;
+	try {
+		await writeFile(archivePath, "stub-archive");
+		await writeFile(
+			join(binDir, "apt-get"),
+			`#!/bin/sh
+printf '%s\n' "$@" >> ${JSON.stringify(aptCaptureFile)}
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "tar"),
+			`#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(tarCaptureFile)}
+target=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-C" ]; then
+    shift
+    target="$1"
+    break
+  fi
+  shift
+done
+mkdir -p "$target"
+cat <<'EOF' > "$target/configure"
+#!/bin/sh
+printf '%s\n' "$CFLAGS" > ${JSON.stringify(configureCaptureFile)}
+EOF
+chmod +x "$target/configure"
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "nproc"),
+			"#!/bin/sh\nprintf '8\n'",
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "make"),
+			`#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(makeCaptureFile)}
+: > sqlite3
+: > coverage.gcno
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "ln"),
+			`#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(lnCaptureFile)}
+`,
+			{ mode: 0o755 },
+		);
+		process.env.PATH = `${binDir}:${previousPath ?? ""}`;
+		await runBenchmarkHelper({
+			family: "terminal-bench",
+			taskId: "sqlite-with-gcov",
+			inputPath: archivePath,
+			outputPath: targetDir,
+		});
+		const aptArgs = await readFile(aptCaptureFile, "utf-8");
+		assert.match(aptArgs, /update/);
+		assert.match(aptArgs, /install/);
+		assert.match(aptArgs, /gcc/);
+		assert.match(aptArgs, /jimsh/);
+		assert.match(aptArgs, /make/);
+		assert.match(aptArgs, /tclsh/);
+		assert.match(aptArgs, /tzdata/);
+		const tarArgs = await readFile(tarCaptureFile, "utf-8");
+		assert.match(tarArgs, /-xzf/);
+		assert.match(tarArgs, new RegExp(escapeRegExp(archivePath)));
+		assert.match(tarArgs, new RegExp(escapeRegExp(targetDir)));
+		assert.match(await readFile(configureCaptureFile, "utf-8"), /-ftest-coverage -fprofile-arcs/);
+		assert.match(await readFile(makeCaptureFile, "utf-8"), /-j8/);
+		assert.match(await readFile(lnCaptureFile, "utf-8"), new RegExp(escapeRegExp(`${targetDir}/sqlite3`)));
+		assert.match(await readFile(lnCaptureFile, "utf-8"), /\/usr\/local\/bin\/sqlite3/);
+	} finally {
+		if (previousPath === undefined) delete process.env.PATH;
+		else process.env.PATH = previousPath;
+		await rm(binDir, { recursive: true, force: true });
+		await rm(appDir, { recursive: true, force: true });
 	}
 });

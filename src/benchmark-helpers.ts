@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { QuestBenchmarkProvenance } from "./types.js";
@@ -22,6 +22,22 @@ export function nativeBenchmarkHelperArgs(
 			taskId: benchmark.taskId,
 			inputPath: "/app/chess_board.png",
 			outputPath: "/app/move.txt",
+		};
+	}
+	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "build-cython-ext") {
+		return {
+			family: benchmark.benchmark,
+			taskId: benchmark.taskId,
+			inputPath: "/app",
+			outputPath: "/app/pyknotid",
+		};
+	}
+	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "sqlite-with-gcov") {
+		return {
+			family: benchmark.benchmark,
+			taskId: benchmark.taskId,
+			inputPath: "/app/vendor/sqlite-fossil-release.tar.gz",
+			outputPath: "/app/sqlite",
 		};
 	}
 	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "qemu-startup") {
@@ -568,6 +584,22 @@ EOF
 expect -f "$EXPECT_FILE"
 `;
 
+const SQLITE_WITH_GCOV_SCRIPT = [
+	"set -euo pipefail",
+	'ARCHIVE_PATH="${1:-/app/vendor/sqlite-fossil-release.tar.gz}"',
+	'TARGET_DIR="${2:-/app/sqlite}"',
+	"export DEBIAN_FRONTEND=noninteractive",
+	"apt-get update",
+	"apt-get install -y gcc jimsh make tclsh tzdata",
+	'rm -rf "$TARGET_DIR"',
+	'mkdir -p "$TARGET_DIR"',
+	'tar -xzf "$ARCHIVE_PATH" -C "$TARGET_DIR" --strip-components=1',
+	'cd "$TARGET_DIR"',
+	'CFLAGS="-g -ftest-coverage -fprofile-arcs" ./configure --enable-fts3 --enable-session',
+	'make -j"$(nproc)"',
+	'ln -sf "$TARGET_DIR/sqlite3" /usr/local/bin/sqlite3',
+].join("\n");
+
 async function runPythonScript(script: string, args: string[]): Promise<string> {
 	return await new Promise<string>((resolvePromise, reject) => {
 		const proc = spawn("python3", ["-c", script, ...args], {
@@ -585,6 +617,35 @@ async function runPythonScript(script: string, args: string[]): Promise<string> 
 		proc.on("close", (code) => {
 			if ((code ?? 1) !== 0) {
 				reject(new Error(stderr.trim() || stdout.trim() || `python3 exited with code ${code ?? 1}`));
+				return;
+			}
+			resolvePromise(stdout.trim());
+		});
+	});
+}
+
+interface CommandOptions {
+	cwd?: string;
+}
+
+async function runCommand(command: string, args: string[], options: CommandOptions = {}): Promise<string> {
+	return await new Promise<string>((resolvePromise, reject) => {
+		const proc = spawn(command, args, {
+			cwd: options.cwd,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let stdout = "";
+		let stderr = "";
+		proc.stdout.on("data", (chunk) => {
+			stdout += String(chunk);
+		});
+		proc.stderr.on("data", (chunk) => {
+			stderr += String(chunk);
+		});
+		proc.on("error", reject);
+		proc.on("close", (code) => {
+			if ((code ?? 1) !== 0) {
+				reject(new Error(stderr.trim() || stdout.trim() || `${command} exited with code ${code ?? 1}`));
 				return;
 			}
 			resolvePromise(stdout.trim());
@@ -611,10 +672,58 @@ async function runShellScript(script: string, args: string[]): Promise<void> {
 				reject(new Error(stderr.trim() || stdout.trim() || `bash exited with code ${code ?? 1}`));
 				return;
 			}
-			if (stdout.trim()) console.log(stdout.trimEnd());
 			resolvePromise();
 		});
 	});
+}
+
+async function replaceInFile(filePath: string, replacements: Array<[RegExp, string]>): Promise<void> {
+	const original = await readFile(filePath, "utf-8");
+	let updated = original;
+	for (const [pattern, replacement] of replacements) {
+		updated = updated.replace(pattern, replacement);
+	}
+	await writeFile(filePath, updated, "utf-8");
+}
+
+async function resolvePythonBinary(): Promise<string> {
+	for (const candidate of ["python3", "python"]) {
+		try {
+			await runCommand(candidate, ["--version"]);
+			return candidate;
+		} catch {
+			continue;
+		}
+	}
+	throw new Error("python3 or python is required");
+}
+
+async function runBuildCythonExtHelper(parsed: ParsedBenchmarkHelperArgs): Promise<void> {
+	const pythonBin = await resolvePythonBinary();
+	await rm(parsed.outputPath, { recursive: true, force: true });
+	await mkdir(dirname(parsed.outputPath), { recursive: true });
+	await runCommand("git", [
+		"clone",
+		"--depth",
+		"1",
+		"--branch",
+		"0.5.3",
+		"https://github.com/SPOCKnots/pyknotid.git",
+		parsed.outputPath,
+	]);
+	await replaceInFile(`${parsed.outputPath}/pyknotid/make/torus.py`, [[/from fractions import gcd/g, "from math import gcd"]]);
+	await replaceInFile(`${parsed.outputPath}/pyknotid/spacecurves/spacecurve.py`, [[/n\.float\)/g, "n.float64)"]]);
+	await replaceInFile(`${parsed.outputPath}/pyknotid/make/periodic_knot.py`, [[/dtype=n\.float\)/g, "dtype=n.float64)"]]);
+	await replaceInFile(`${parsed.outputPath}/pyknotid/invariants.py`, [
+		[/n\.complex/g, "n.complex128"],
+		[/n\.float(?![0-9])/g, "n.float64"],
+	]);
+	await replaceInFile(`${parsed.outputPath}/pyknotid/representations/representation.py`, [[/n\.int\(/g, "int("]]);
+	await replaceInFile(`${parsed.outputPath}/pyknotid/spacecurves/periodiccell.py`, [[/np\.int/g, "np.int64"]]);
+	await replaceInFile(`${parsed.outputPath}/pyknotid/spacecurves/ccomplexity.pyx`, [[/np\.int/g, "np.int64"]]);
+	await runCommand(pythonBin, ["-m", "pip", "install", "--disable-pip-version-check", "setuptools==80.9.0", "cython==3.1.3"]);
+	await runCommand(pythonBin, ["setup.py", "build_ext", "--inplace"], { cwd: parsed.outputPath });
+	await runCommand(pythonBin, ["-m", "pip", "install", "--disable-pip-version-check", "-e", "."], { cwd: parsed.outputPath });
 }
 
 export async function runBenchmarkHelper(parsed: ParsedBenchmarkHelperArgs): Promise<void> {
@@ -628,8 +737,16 @@ export async function runBenchmarkHelper(parsed: ParsedBenchmarkHelperArgs): Pro
 		await writeFile(parsed.outputPath, `${winningMoves.join("\n")}\n`, "utf-8");
 		return;
 	}
+	if (parsed.family === "terminal-bench" && parsed.taskId === "build-cython-ext") {
+		await runBuildCythonExtHelper(parsed);
+		return;
+	}
 	if (parsed.family === "terminal-bench" && parsed.taskId === "qemu-startup") {
 		await runShellScript(QEMU_STARTUP_SCRIPT, [parsed.inputPath, parsed.outputPath]);
+		return;
+	}
+	if (parsed.family === "terminal-bench" && parsed.taskId === "sqlite-with-gcov") {
+		await runShellScript(SQLITE_WITH_GCOV_SCRIPT, [parsed.inputPath, parsed.outputPath]);
 		return;
 	}
 	throw new Error(`No native helper registered for ${parsed.family}/${parsed.taskId}.`);

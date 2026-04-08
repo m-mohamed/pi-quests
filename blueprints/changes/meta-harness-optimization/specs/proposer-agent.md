@@ -2,80 +2,75 @@
 
 ## Purpose
 
-Define how the proposer agent reads traces and proposes patches.
+Define how the `proposer` role reads frontier artifacts and proposes bounded profile patches.
 
 ## Requirements
 
-### Requirement: Read all prior candidates
+### Requirement: Read canonical Trials artifacts
 
-The proposer SHALL have access to the full candidate history.
+The proposer SHALL have read access to the full frontier history under `.pi/quests/trials/`.
 
-#### Scenario: Query filesystem
+#### Scenario: Query optimization state
 
-- GIVEN the proposer agent starts
-- WHEN it reads the meta-harness filesystem
-- THEN it can list all candidate directories
-- AND it can read any candidate's `profile.patch.json`
-- AND it can read any candidate's `scores.json`
-- AND it can read any candidate's traces via `grep`/`cat`
+- GIVEN the proposer starts
+- WHEN it reads the Trials filesystem
+- THEN it can inspect:
+  - `community-stats.json`
+  - `search-set.json`
+  - `hold-out-set.json`
+  - `frontier.json`
+  - `candidates/*/profile.patch.json`
+  - `candidates/*/scores.json`
+  - `candidates/*/hold-out.json`
+  - `candidates/*/summary.json`
+  - `candidates/*/traces/<task-name>/...`
 
 ### Requirement: Counterfactual diagnosis
 
-The proposer SHALL trace failures to specific profile decisions.
+The proposer SHALL trace benchmark failures back to profile-owned decisions.
 
-#### Scenario: Diagnose failure
+#### Scenario: Diagnose a failed task
 
-- GIVEN candidate N failed on task X with failure tag T
-- WHEN the proposer reads `traces/candidates/N/traces/task-X/`
-- THEN it identifies the specific failure mode
-- AND it traces back to profile decisions that may have caused it
-- AND it proposes targeted fixes for T
+- GIVEN candidate `N` failed task `X`
+- WHEN the proposer reads the candidate summary, scorecards, and archived traces
+- THEN it identifies the failure mode
+- AND it connects that failure to profile surfaces that can be patched safely
 
-### Requirement: Propose bounded patches
+### Requirement: Bounded patch scope
 
-The proposer SHALL propose changes only to profile-owned surfaces.
+The proposer SHALL modify only profile-owned surfaces.
 
 #### Scenario: Generate patch
 
-- GIVEN the proposer identifies improvement opportunities
-- WHEN it generates a patch
-- THEN it modifies only: prompt surfaces, budgets, policies, workflow hints
-- AND it does NOT modify runtime code
-- AND it includes rationale citing specific trace evidence
+- GIVEN the proposer identifies an improvement opportunity
+- WHEN it emits a patch
+- THEN it changes only prompt surfaces, budgets, tool policies, or workflow guidance owned by `QuestProfile`
+- AND it does not modify runtime code
 
-### Requirement: No mutation
+### Requirement: Read-only execution
 
-The proposer SHALL NOT mutate files or execute code.
+The proposer SHALL remain read-only with respect to the repository and Trials artifacts.
 
-#### Scenario: Proposer constraints
+#### Scenario: Tool constraints
 
 - GIVEN the proposer is running
-- WHEN it attempts to use tools
-- THEN `read` is ALLOWED
-- AND `bash` with `grep`/`cat`/`head`/`ls` is ALLOWED (read-only)
-- AND `edit`/`write` is FORBIDDEN
-- AND `bash` with mutation is FORBIDDEN
+- WHEN it uses tools
+- THEN read-oriented tools are allowed
+- AND mutating edits are forbidden
+- AND benchmark execution remains the responsibility of the evaluation loop, not the proposer
 
-### Requirement: Output format
+### Requirement: Structured candidate output
 
-The proposer SHALL output `QuestProfilePatch`.
+The proposer SHALL output a candidate patch with rationale and targeting metadata.
 
-#### Scenario: Proposer output
+#### Scenario: Proposal result
 
 - GIVEN the proposer finishes diagnosis
-- WHEN it outputs its proposal
-- THEN it produces: `profile.patch.json` with rationale
-- AND it produces: list of addressed failure tags
-- AND it produces: list of source candidate IDs
-
-### Requirement: Cite evidence
-
-The proposer SHALL cite specific evidence from traces.
-
-#### Scenario: Evidence citation
-
-- GIVEN the proposer proposes a patch
-- WHEN it outputs rationale
-- THEN it cites specific trace files
-- AND it cites specific line numbers or message IDs
-- AND it cites specific scores that would improve
+- WHEN it returns a result
+- THEN it includes:
+  - a `QuestProfilePatch`
+  - a summary
+  - rationale
+  - targeted failure tags
+  - targeted prompt surfaces
+  - a generalization note

@@ -1,70 +1,82 @@
-# Meta-Harness Filesystem Specification
+# Frontier Trials Filesystem Specification
 
 ## Purpose
 
-Define the filesystem layout for meta-harness optimization.
+Define the canonical filesystem layout for frontier optimization in Quest.
 
 ## Requirements
 
+### Requirement: Canonical optimization root
+
+The system SHALL use `.pi/quests/trials/` as the live optimization root.
+
+#### Scenario: Resolve runtime storage
+
+- GIVEN Trials is preparing or running optimization
+- WHEN it reads or writes optimization state
+- THEN it uses `.pi/quests/trials/`
+- AND it treats `.pi/quests/lab` and `.pi/quests/meta-harness` as migration inputs only
+
 ### Requirement: Candidate directory structure
 
-The system SHALL create candidate directories with consistent structure.
+The system SHALL archive each benchmarked candidate with a consistent layout.
 
 #### Scenario: Create candidate
 
-- GIVEN the meta-harness creates a new candidate
+- GIVEN the system evaluates a new candidate
 - WHEN it writes the candidate directory
-- THEN it creates: `profile.patch.json`, `scores.json`, `traces/`
-- AND it uses sequential numbering (001, 002, ...)
+- THEN it creates:
+  - `profile.json`
+  - `profile.patch.json`
+  - `scores.json`
+  - `hold-out.json`
+  - `summary.json`
+  - `traces/<task-name>/...`
+- AND it uses sequential numbering (`000`, `001`, `002`, ...)
 
-### Requirement: Score file format
+### Requirement: Search and hold-out artifacts
 
-The system SHALL write scores in a queryable format.
+The system SHALL materialize explicit task splits on disk.
 
-#### Scenario: Write scores
+#### Scenario: Prepare benchmark split
 
-- GIVEN a candidate evaluated on the search set
-- WHEN the system writes `scores.json`
-- THEN it includes: task_id, score, duration_ms, model_choice for each task
-- AND it includes aggregate: mean_score, total_duration, tokens_used
+- GIVEN a benchmark dataset manifest
+- WHEN Trials prepares the benchmark
+- THEN it writes `search-set.json`
+- AND it writes `hold-out-set.json`
+- AND those files contain explicit task lists with no overlap
 
-### Requirement: Trace preservation
+### Requirement: Frontier state
 
-The system SHALL preserve execution traces per candidate.
+The system SHALL persist frontier membership and leader selection.
 
-#### Scenario: Store traces
+#### Scenario: Recompute frontier
 
-- GIVEN a candidate evaluated on task X
-- WHEN the system stores traces
-- THEN it writes to `candidates/NNN/traces/task-X/`
-- AND it includes: full execution log, model messages, tool results
-
-### Requirement: Search/hold-out isolation
-
-The system SHALL never leak hold-out tasks to optimization.
-
-#### Scenario: Validate split
-
-- GIVEN `search-set.json` and `hold-out-set.json`
-- WHEN the system validates
-- THEN there is no overlap between task IDs
-- AND `hold-out-set.json` task IDs never appear in candidate optimization
-
-#### Scenario: Hold-out validation only
-
-- GIVEN a candidate is being evaluated
-- WHEN scores are computed for optimization
-- THEN only search-set tasks contribute to the score
-- AND hold-out scores are computed for validation only
-- AND candidates that regress on hold-out are rejected
+- GIVEN at least one accepted candidate
+- WHEN Trials recomputes the frontier
+- THEN it writes `frontier.json`
+- AND it records the leader candidate ID
+- AND it records the ordered list of frontier candidate IDs
 
 ### Requirement: Current profile tracking
 
-The system SHALL track the active profile separately from candidates.
+The system SHALL track the promoted leader profile separately from archived candidates.
 
-#### Scenario: Read current profile
+#### Scenario: Promote leader
 
-- GIVEN meta-harness has run at least one optimization
-- WHEN the system reads current profile
-- THEN `current/profile.json` contains the active profile
-- AND it matches one of the archived candidates' resulting profiles
+- GIVEN a frontier leader exists
+- WHEN Trials promotes that leader
+- THEN `.pi/quests/trials/current/profile.json` contains the promoted profile
+- AND it matches the archived `profile.json` for the leader candidate
+
+### Requirement: Search/hold-out isolation
+
+The system SHALL never leak hold-out tasks into optimization scoring.
+
+#### Scenario: Score a candidate
+
+- GIVEN search and hold-out splits exist
+- WHEN Trials evaluates a candidate
+- THEN only the search split contributes to domination and leader selection
+- AND hold-out scores are used only as a non-regression gate
+- AND candidates that regress on hold-out are rejected

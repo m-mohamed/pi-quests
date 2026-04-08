@@ -93,6 +93,28 @@ interface ValidationReadinessPayload {
 	}>;
 }
 
+interface TrialProposerContext {
+	communityStatsPath: string;
+	frontierStatePath: string;
+	candidatesDir: string;
+	searchSetPath: string;
+	holdOutSetPath: string;
+	communityStats?: {
+		totalSessions?: number;
+		parsedSessions?: number;
+		failureTags?: Record<string, number>;
+	};
+	leaderSummary?: {
+		candidateId?: string;
+		summary?: string;
+		searchScore?: {
+			meanScore?: number;
+			totalCost?: number;
+			totalDurationMs?: number;
+		};
+	};
+}
+
 const DEFAULT_USAGE: UsageStats = {
 	input: 0,
 	output: 0,
@@ -939,15 +961,16 @@ export async function executeTrialCandidateAgent(
 	const result = await runPiTask({
 		cwd,
 		modelChoice,
-		tools: toolAllowlistForRole(profile, "trial"),
-		role: "trial",
-		systemPrompt: `You are Trials, a bounded optimizer for Quest profiles.
+		tools: toolAllowlistForRole(profile, "proposer"),
+		role: "proposer",
+		systemPrompt: `You are the Quest proposer for frontier trials.
 
 Rules:
-- Only propose changes on the explicit profile edit surfaces.
-- Do not propose TypeScript control-flow changes.
-- Prefer changes that generalize across multiple traces.
-- If you are unsure, return a conservative patch.
+- Only propose changes on explicit QuestProfile edit surfaces.
+- Do not propose code changes or file mutations.
+- Prefer changes that generalize across repeated failures.
+- Follow the proposer policy exactly:
+${promptSurfaceText(profile, "proposer")}
 - End with a JSON object only.`,
 		prompt: `Target: ${target}
 
@@ -988,13 +1011,106 @@ Return:
 		run: workerRunFromResult(
 			modelChoice,
 			result,
-			"trial",
+			"proposer",
 			startedAt,
 			{},
 			candidate?.summary ?? (text || "No Trials candidate returned."),
 			result.exitCode === 0 && Boolean(candidate),
 			undefined,
 			benchmark,
+		),
+		candidate,
+	};
+}
+
+export async function executeTrialProposerAgent(
+	cwd: string,
+	modelChoice: ModelChoice,
+	profile: QuestProfile,
+	target: QuestProfile["target"],
+	context: TrialProposerContext,
+	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
+	onProcessStart?: (pid: number) => void | Promise<void>,
+): Promise<{ run: WorkerRunRecord; candidate: QuestExperimentCandidate | null }> {
+	const startedAt = Date.now();
+	const topFailureTags = Object.entries(context.communityStats?.failureTags ?? {})
+		.sort((left, right) => (right[1] ?? 0) - (left[1] ?? 0))
+		.slice(0, 6)
+		.map(([tag, count]) => `${tag}: ${count}`);
+	const result = await runPiTask({
+		cwd,
+		modelChoice,
+		tools: toolAllowlistForRole(profile, "proposer"),
+		role: "proposer",
+		systemPrompt: `You are the Quest frontier proposer.
+
+Rules:
+- Propose QuestProfilePatch changes only.
+- Optimize for benchmark generalization, not one-off wins.
+- Respect the proposer policy exactly:
+${promptSurfaceText(profile, "proposer")}
+- Use the canonical trials filesystem paths provided in the prompt.
+- End with a JSON object only.`,
+		prompt: `Target: ${target}
+
+Canonical trials paths:
+- frontier state: ${context.frontierStatePath}
+- candidates dir: ${context.candidatesDir}
+- community stats: ${context.communityStatsPath}
+- search split: ${context.searchSetPath}
+- hold-out split: ${context.holdOutSetPath}
+
+Current profile:
+\`\`\`json
+${JSON.stringify(profile, null, 2)}
+\`\`\`
+
+Current frontier leader:
+- candidate: ${context.leaderSummary?.candidateId ?? "none"}
+- summary: ${context.leaderSummary?.summary ?? "none"}
+- mean score: ${context.leaderSummary?.searchScore?.meanScore ?? 0}
+- total cost: ${context.leaderSummary?.searchScore?.totalCost ?? 0}
+- total duration ms: ${context.leaderSummary?.searchScore?.totalDurationMs ?? 0}
+
+Community corpus summary:
+- parsed sessions: ${context.communityStats?.parsedSessions ?? 0}/${context.communityStats?.totalSessions ?? 0}
+- top failure tags:
+${topFailureTags.length > 0 ? topFailureTags.map((line) => `  - ${line}`).join("\n") : "  - none"}
+
+Read the canonical files as needed before you decide.
+
+Return:
+\`\`\`json
+{
+  "summary": "short description",
+  "rationale": "why this improves the frontier objective",
+  "generalizationNote": "why this should generalize beyond one task or trace",
+  "targetedTags": ["weak_validation"],
+  "targetedCaseIds": [],
+  "promptSurfaceIds": ["proposer"],
+  "patch": {
+    "promptSurfaces": {
+      "workerPolicy": "..."
+    }
+  }
+}
+\`\`\``,
+		onSnapshot,
+		onProcessStart,
+	});
+	const text = getFinalAssistantText(result.messages);
+	const candidate = parseQuestExperimentCandidate(text);
+	return {
+		run: workerRunFromResult(
+			modelChoice,
+			result,
+			"proposer",
+			startedAt,
+			{},
+			candidate?.summary ?? (text || "No proposer candidate returned."),
+			result.exitCode === 0 && Boolean(candidate),
+			undefined,
+			undefined,
 		),
 		candidate,
 	};

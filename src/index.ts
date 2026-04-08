@@ -5,11 +5,12 @@ import { Type } from "@sinclair/typebox";
 import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Key, Text, matchesKey } from "@mariozechner/pi-tui";
-import { applyQuestProfilePatch, defaultQuestProfile, summarizeExperimentScores, traceBundleFromPlanningSession, traceBundleFromWorkerRun } from "./trials-core.js";
-import { loadQuestTrialsSnapshot, replayQuestRunIntoTrialDataset, runQuestTrialsLoop } from "./trials-runtime.js";
+import { applyQuestProfilePatch, defaultQuestProfile, traceBundleFromPlanningSession, traceBundleFromWorkerRun } from "./trials-core.js";
+import { collectFrontierTrialStatus, prepareTrialBenchmark, analyzeTrialCommunity, runTrialBaseline, runTrialOptimization, summarizeTrialStatus } from "./frontier-trials.js";
 import { defaultHumanQaChecklist, mergeRemainingPlan, parseQuestPlanText, planningInstructions, synthesizeValidationAssertions } from "./plan-core.js";
 import { describeActiveRun, markQuestAborted, prepareQuestForResume, terminateQuestProcess } from "./runtime-core.js";
 import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
+import { truncate } from "./utils.js";
 import {
 	buildQuestWidgetModel,
 	buildTrialsWidgetModel,
@@ -128,16 +129,10 @@ const questTraceGradingPatchSchema = Type.Object({
 
 function createDefaultModelChoice(model: Model<any> | null, thinkingLevel: ThinkingLevel): ModelChoice {
 	return {
-		provider: model?.provider ?? "openai-codex",
-		model: model?.id ?? "gpt-5.4",
+		provider: model?.provider ?? "zai",
+		model: model?.id ?? "glm-5.1",
 		thinkingLevel,
 	};
-}
-
-function truncate(text: string, max = 120): string {
-	const compact = text.replace(/\s+/g, " ").trim();
-	if (compact.length <= max) return compact;
-	return `${compact.slice(0, max - 1)}…`;
 }
 
 function modelLabel(choice: ModelChoice | undefined): string {
@@ -713,40 +708,25 @@ export default function questExtension(pi: ExtensionAPI) {
 		await emitNote(pi, ctx, `Active quest set to "${selectedQuest.title}".`);
 	}
 
-	function summarizeTrials(snapshot: Awaited<ReturnType<typeof loadQuestTrialsSnapshot>>): string {
-		const latestExperiment = snapshot.experiments[0];
-		const latestScores = latestExperiment ? summarizeExperimentScores(latestExperiment.candidateScores) : "No experiments yet.";
+	function summarizeTrials(status: Awaited<ReturnType<typeof collectFrontierTrialStatus>>): string {
 		return `# Trials
 
-- Status: ${snapshot.state.status}
-- Target: ${snapshot.state.target}
-- Active profile: ${snapshot.profile.id}
-- Adopted changes: ${snapshot.profile.adoptedChanges.length}
-- Trace bundles: ${snapshot.traces.length}
-- Datasets: ${snapshot.datasets.length}
-- Experiments: ${snapshot.experiments.length}
-- Active trial run: ${
+${summarizeTrialStatus(status)}
+
+Active trial run:
+${
 		trialLiveRun
-			? `${trialLiveRun.phase}${trialLiveRun.latestToolName ? ` · ${trialLiveRun.latestToolName}` : ""}${trialLiveRun.latestMessage ? ` · ${truncate(trialLiveRun.latestMessage, 80)}` : ""}`
+			? `${trialLiveRun.role}/${trialLiveRun.phase}${trialLiveRun.latestToolName ? ` · ${trialLiveRun.latestToolName}` : ""}${trialLiveRun.latestMessage ? ` · ${truncate(trialLiveRun.latestMessage, 80)}` : ""}`
 			: "idle"
-	}
-${snapshot.state.lastSummary ? `- Last summary: ${snapshot.state.lastSummary}` : ""}
-
-Latest experiment:
-${latestExperiment ? `- ${latestExperiment.summary}` : "- none"}
-- Scores: ${latestScores}
-
-Recent trace tags:
-${snapshot.traces.slice(0, 6).map((trace) => `- [${trace.role}] ${trace.tags.join(", ") || "none"} · ${trace.summary}`).join("\n") || "- none"}
-`;
+	}`;
 	}
 
 	async function openQuestTrialsControl(ctx: ExtensionContext) {
-		const snapshot = await loadQuestTrialsSnapshot(ctx.cwd, true);
-		currentTrialState = snapshot.state;
-		currentProfile = snapshot.profile;
+		const status = await collectFrontierTrialStatus(ctx.cwd);
+		currentTrialState = status.state;
+		currentProfile = status.profile;
 		if (!ctx.hasUI || !ctx.ui.custom) {
-			await emitNote(pi, ctx, summarizeTrials(snapshot));
+			await emitNote(pi, ctx, summarizeTrials(status));
 			return;
 		}
 
@@ -760,10 +740,10 @@ ${snapshot.traces.slice(0, 6).map((trace) => `- [${trace.role}] ${trace.tags.joi
 
 			const component = {
 				render(width: number) {
-					const lines = summarizeTrials(snapshot)
+					const lines = summarizeTrials(status)
 						.split("\n")
 						.map((line, index) => (index === 0 ? theme.bold(theme.fg("accent", line.replace(/^# /, ""))) : line));
-					lines.splice(1, 0, theme.fg("muted", "q close · r run · s stop · p profile"));
+					lines.splice(1, 0, theme.fg("muted", "q close · b baseline · r run · s stop · p profile"));
 					return new Text(lines.join("\n"), 0, 0).render(width);
 				},
 				invalidate() {},
@@ -774,6 +754,10 @@ ${snapshot.traces.slice(0, 6).map((trace) => `- [${trace.role}] ${trace.tags.joi
 					}
 					if (data === "r") {
 						void handleQuestTrialsCommand("run", ctx).then(() => tui.requestRender());
+						return true;
+					}
+					if (data === "b") {
+						void handleQuestTrialsCommand("baseline", ctx).then(() => tui.requestRender());
 						return true;
 					}
 					if (data === "s") {
@@ -793,12 +777,18 @@ ${snapshot.traces.slice(0, 6).map((trace) => `- [${trace.role}] ${trace.tags.joi
 
 	async function handleQuestTrialsCommand(args: string, ctx: ExtensionContext) {
 		const trimmed = args.trim();
-		const snapshot = await loadQuestTrialsSnapshot(ctx.cwd, true);
-		currentTrialState = snapshot.state;
-		currentProfile = snapshot.profile;
+		const readFlag = (flag: string): string | undefined => {
+			const parts = trimmed.split(/\s+/);
+			const index = parts.indexOf(flag);
+			return index >= 0 ? parts[index + 1] : undefined;
+		};
+		const hasFlag = (flag: string): boolean => trimmed.split(/\s+/).includes(flag);
+		const status = await collectFrontierTrialStatus(ctx.cwd);
+		currentTrialState = status.state;
+		currentProfile = status.profile;
 
 		if (!trimmed) {
-			await openQuestTrialsControl(ctx);
+			await emitNote(pi, ctx, summarizeTrialStatus(status));
 			return;
 		}
 
@@ -815,21 +805,25 @@ ${snapshot.traces.slice(0, 6).map((trace) => `- [${trace.role}] ${trace.tags.joi
 					currentQuest && currentQuest.status !== "completed" && currentQuest.status !== "aborted"
 						? currentOrDefaultModel(currentQuest, "orchestrator")
 						: createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
-				const result = await runQuestTrialsLoop(
+				const iterations = Number(readFlag("--iterations") ?? "1");
+				const result = await runTrialOptimization(
 					ctx.cwd,
 					modelChoice,
-					async (snapshotUpdate) => {
-						trialLiveRun = snapshotUpdate;
-						await applyQuestUi(ctx, currentQuest);
-					},
-					async (pid) => {
-						activeTrialPid = pid;
+					{
+						iterations: Number.isFinite(iterations) && iterations > 0 ? iterations : 1,
+						onSnapshot: async (snapshotUpdate) => {
+							trialLiveRun = snapshotUpdate;
+							await applyQuestUi(ctx, currentQuest);
+						},
+						onProcessStart: async (pid) => {
+							activeTrialPid = pid;
+						},
 					},
 				);
 				activeTrialPid = undefined;
 				trialLiveRun = null;
-				currentTrialState = result.snapshot.state;
-				currentProfile = result.snapshot.profile;
+				currentTrialState = result.state;
+				currentProfile = result.profile;
 				await applyQuestUi(ctx, currentQuest);
 				await emitNote(pi, ctx, result.summary);
 				return;
@@ -849,44 +843,70 @@ ${snapshot.traces.slice(0, 6).map((trace) => `- [${trace.role}] ${trace.tags.joi
 				return;
 			}
 
-			case "replay": {
-				if (!remainder) {
-					await emitNote(pi, ctx, "Usage: /quest trials replay <run-id>", "warning");
-					return;
-				}
-				const dataset = await replayQuestRunIntoTrialDataset(ctx.cwd, remainder);
-				if (!dataset) {
-					await emitNote(pi, ctx, `No Quest trace matched run id "${remainder}".`, "warning");
-					return;
-				}
-				await emitNote(pi, ctx, `Added replay cases to ${dataset.id}.`);
+			case "prepare-benchmark": {
+				const dataset = readFlag("--dataset") ?? (remainder && !remainder.startsWith("--") ? remainder : undefined);
+				const prepared = await prepareTrialBenchmark(ctx.cwd, { dataset });
+				currentTrialState = prepared.state;
+				await emitNote(
+					pi,
+					ctx,
+					`Prepared ${prepared.manifest.dataset}: ${prepared.searchSet.totalTasks} search / ${prepared.holdOutSet.totalTasks} hold-out tasks.`,
+				);
 				return;
 			}
 
-			case "target": {
-				if (remainder !== "repo" && remainder !== "quest-core") {
-					await emitNote(pi, ctx, "Usage: /quest trials target <repo|quest-core>", "warning");
+			case "analyze-community": {
+				const stats = await analyzeTrialCommunity(ctx.cwd, hasFlag("--force"));
+				await emitNote(
+					pi,
+					ctx,
+					`Analyzed community traces: ${stats.parsedSessions}/${stats.totalSessions} valid Pi sessions across ${Object.keys(stats.sources).length} source(s).`,
+				);
+				return;
+			}
+
+			case "baseline": {
+				if (currentTrialState.status === "running") {
+					await emitNote(pi, ctx, "Trials are already running.", "warning");
 					return;
 				}
-				if (remainder === "quest-core" && !ctx.cwd.endsWith("/pi-quests")) {
-					await emitNote(pi, ctx, "quest-core target is only available inside the pi-quests package repo.", "warning");
-					return;
-				}
-				currentTrialState.target = remainder;
-				currentTrialState.activeProfileId = `${remainder}-${currentTrialState.projectId}`;
-				await saveQuestTrialState(ctx.cwd, currentTrialState);
-				currentProfile = await loadQuestProfile(ctx.cwd, currentTrialState.activeProfileId, { ensure: true, target: remainder });
-				await saveQuestProfile(ctx.cwd, currentProfile);
-				await emitNote(pi, ctx, `Trials target set to ${remainder}.`);
+				const modelChoice =
+					currentQuest && currentQuest.status !== "completed" && currentQuest.status !== "aborted"
+						? currentOrDefaultModel(currentQuest, "orchestrator")
+						: createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
+				const result = await runTrialBaseline(
+					ctx.cwd,
+					modelChoice,
+					{
+						force: hasFlag("--force"),
+						onSnapshot: async (snapshotUpdate) => {
+							trialLiveRun = snapshotUpdate;
+							await applyQuestUi(ctx, currentQuest);
+						},
+						onProcessStart: async (pid) => {
+							activeTrialPid = pid;
+						},
+					},
+				);
+				activeTrialPid = undefined;
+				trialLiveRun = null;
+				currentTrialState = result.state;
+				currentProfile = result.profile;
+				await applyQuestUi(ctx, currentQuest);
+				await emitNote(pi, ctx, result.summary);
+				return;
+			}
+
+			case "status": {
+				await emitNote(pi, ctx, summarizeTrialStatus(await collectFrontierTrialStatus(ctx.cwd)));
 				return;
 			}
 
 			case "profile": {
-				const latestExperiment = snapshot.experiments[0];
 				await emitNote(
 					pi,
 					ctx,
-					`Trials profile ${snapshot.profile.id}\n- target: ${snapshot.profile.target}\n- adopted changes: ${snapshot.profile.adoptedChanges.length}\n- same-model bias: ${snapshot.profile.modelPolicy.preferSameModelFamily}\n- spill-to-reports: ${snapshot.profile.contextPolicy.spillLongOutputsToReports}\n- latest scores: ${latestExperiment ? summarizeExperimentScores(latestExperiment.candidateScores) : "none"}`,
+					`Trials profile ${status.profile.id}\n- target: ${status.profile.target}\n- adopted changes: ${status.profile.adoptedChanges.length}\n- same-model bias: ${status.profile.modelPolicy.preferSameModelFamily}\n- spill-to-reports: ${status.profile.contextPolicy.spillLongOutputsToReports}\n- frontier size: ${status.frontier?.frontierCandidateIds.length ?? 0}`,
 				);
 				return;
 			}
@@ -895,7 +915,7 @@ ${snapshot.traces.slice(0, 6).map((trace) => `- [${trace.role}] ${trace.tags.joi
 				await emitNote(
 					pi,
 					ctx,
-					"Unknown /quest trials subcommand. Use /quest trials, /quest trials run, /quest trials stop, /quest trials replay <run-id>, /quest trials target <repo|quest-core>, or /quest trials profile.",
+					"Unknown /quest trials subcommand. Use /quest trials status, /quest trials prepare-benchmark, /quest trials analyze-community, /quest trials baseline, /quest trials run, /quest trials stop, or /quest trials profile.",
 					"warning",
 				);
 			}
@@ -1815,26 +1835,6 @@ ${snapshot.traces.slice(0, 6).map((trace) => `- [${trace.role}] ${trace.tags.joi
 			return {
 				content: [{ type: "text", text: `Updated Trials profile ${next.id}.` }],
 				details: { profileId: next.id, target: next.target },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "quest_trials_record_trace_case",
-		label: "quest_trials_record_trace_case",
-		description: "Add a Quest trace replay case to the trace-replays dataset.",
-		promptSnippet: "Persist a Quest trace replay case",
-		parameters: Type.Object({
-			runId: Type.String(),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const dataset = await replayQuestRunIntoTrialDataset(ctx.cwd, params.runId);
-			if (!dataset) {
-				return { content: [{ type: "text", text: `No Quest trace matched ${params.runId}.` }] };
-			}
-			return {
-				content: [{ type: "text", text: `Updated ${dataset.id} with replay cases for ${params.runId}.` }],
-				details: { datasetId: dataset.id, caseCount: dataset.cases.length },
 			};
 		},
 	});

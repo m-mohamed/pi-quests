@@ -20,17 +20,10 @@ import type {
 	WorkerEventRecord,
 	WorkerRunRecord,
 } from "./types.js";
+import { compact, unique } from "./utils.js";
 
 const PROFILE_VERSION = 1;
 const TRACE_VERSION = 1;
-
-function compact(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
-}
-
-function unique<T>(items: T[]): T[] {
-	return [...new Set(items)];
-}
 
 function uniqueCases(cases: QuestEvalCase[]): QuestEvalCase[] {
 	const byId = new Map(cases.map((testCase) => [testCase.id, testCase]));
@@ -62,16 +55,40 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 				"- Mark unsupported surfaces as unsupported.\n- Capture prerequisites, services, and commands that affect validation confidence.\n- Note when browser or user-surface checks still require manual coverage.",
 			revisionPolicy:
 				"- Preserve completed work.\n- Keep the remaining plan serial by default.\n- Revise only unfinished milestones, unfinished features, and unfinished validation.",
+			proposerPolicy:
+				"- Read candidate profiles, summaries, and benchmark artifacts from .pi/quests/trials/candidates/.\n- Read community trace statistics from .pi/quests/trials/community-stats.json.\n- Optimize for search-set mean score first, then lower cost, then lower duration.\n- Use hold-out results only as a regression gate, not as an overfitting target.\n- Propose a QuestProfilePatch only on profile-owned surfaces.\n- Output valid JSON only: summary, rationale, generalizationNote, targetedTags, targetedCaseIds, promptSurfaceIds, patch.\n- Do not execute code and do not mutate files.",
 		},
 		toolAllowlist: {
 			orchestrator: ["read", "bash"],
 			worker: ["read", "bash", "edit", "write"],
 			validator: ["read", "bash"],
 			trial: ["read", "bash"],
+			proposer: ["read", "bash", "grep"],
 		},
 		modelPolicy: {
 			preferSameModelFamily: true,
 			preferValidatorDivergence: false,
+		},
+		ensemblePolicy: {
+			enabled: true,
+			families: [
+				{
+					provider: "zai",
+					model: "glm-5.1",
+					thinkingLevel: "high",
+					role: "worker",
+					costPer1KInput: 0,
+					costPer1KOutput: 0,
+					latencyMs: 4000,
+					strengths: ["zai coding plan", "good at code execution"],
+					weaknesses: ["single provider dependency"],
+				},
+			],
+			defaultWorker: "zai/glm-5.1",
+			defaultValidator: "zai/glm-5.1",
+			escalationThreshold: 2,
+			autoEscalateOnFailure: false,
+			routingRules: [],
 		},
 		verificationBudget: {
 			workerAttempts: 1,
@@ -96,6 +113,42 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 			blockedPenalty: 0.3,
 			overflowPenalty: 0.25,
 			abortPenalty: 0.15,
+		},
+		harnessPolicy: {
+			computationalGuides: {
+				enabled: false,
+				linterConfigs: [],
+				preCommitHooks: [],
+				structuralTests: [],
+				archConstraints: [],
+			},
+			inferentialGuides: {
+				enabled: false,
+				agentsMdPath: "",
+				skillsDir: "",
+				codeReviewAgents: [],
+			},
+			sensors: {
+				computational: {
+					enabled: true,
+					linters: [],
+					typeCheckers: [],
+					testRunners: [],
+					driftDetectors: [],
+				},
+				inferential: {
+					enabled: false,
+					codeReviewAgents: [],
+					qualityJudges: [],
+					runtimeMonitors: [],
+				},
+			},
+			fitnessFunctions: {
+				enabled: false,
+				performanceRequirements: [],
+				observabilityRequirements: [],
+				architectureConstraints: [],
+			},
 		},
 		adoptedChanges: [],
 	};
@@ -147,6 +200,7 @@ export function normalizeQuestProfile(
 			worker: profile.toolAllowlist?.worker ?? base.toolAllowlist.worker,
 			validator: profile.toolAllowlist?.validator ?? base.toolAllowlist.validator,
 			trial: profile.toolAllowlist?.trial ?? base.toolAllowlist.trial,
+			proposer: profile.toolAllowlist?.proposer ?? base.toolAllowlist.proposer,
 		},
 		modelPolicy: { ...base.modelPolicy, ...profile.modelPolicy },
 		verificationBudget: { ...base.verificationBudget, ...profile.verificationBudget },
@@ -176,6 +230,8 @@ export function promptSurfaceText(profile: QuestProfile, surfaceId: QuestPromptS
 			return profile.promptSurfaces.readinessPolicy;
 		case "plan-revision":
 			return profile.promptSurfaces.revisionPolicy;
+		case "proposer":
+			return profile.promptSurfaces.proposerPolicy;
 	}
 }
 
@@ -184,6 +240,7 @@ export function promptSurfaceForRun(role: QuestRole, kind: QuestTraceBundle["kin
 	if (role === "validator" && phase === "user_surface") return "validator-user-surface";
 	if (role === "validator" && kind === "readiness") return "readiness-probe";
 	if (role === "orchestrator" && (kind === "replan" || phase === "replanning")) return "plan-revision";
+	if (role === "proposer") return "proposer";
 	return role === "validator" ? "validator-code-review" : "planning";
 }
 
@@ -335,6 +392,9 @@ export function traceBundleFromWorkerRun(quest: QuestState, run: WorkerRunRecord
 		validatorFindings,
 		tags,
 		derivedIssues: deriveIssuesFromTags(tags),
+		diagnostics: [],
+		compactionEvents: [],
+		cancellationReason: run.aborted === true ? "user_abort" : undefined,
 		usage: run.usage,
 		source: "worker_run",
 		benchmark: run.benchmark,
@@ -385,6 +445,9 @@ export function traceBundleFromPlanningSession(
 		validatorFindings: [],
 		tags,
 		derivedIssues: deriveIssuesFromTags(tags),
+		diagnostics: [],
+		compactionEvents: [],
+		cancellationReason: undefined,
 		source: "planning_session",
 		benchmark,
 	};
@@ -821,6 +884,7 @@ export function applyQuestProfilePatch(profile: QuestProfile, patch: QuestProfil
 				worker: patch.toolAllowlist?.worker ?? profile.toolAllowlist.worker,
 				validator: patch.toolAllowlist?.validator ?? profile.toolAllowlist.validator,
 				trial: patch.toolAllowlist?.trial ?? profile.toolAllowlist.trial,
+				proposer: patch.toolAllowlist?.proposer ?? profile.toolAllowlist.proposer,
 			},
 			modelPolicy: { ...profile.modelPolicy, ...patch.modelPolicy },
 			verificationBudget: { ...profile.verificationBudget, ...patch.verificationBudget },

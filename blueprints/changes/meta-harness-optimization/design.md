@@ -1,146 +1,118 @@
 # Design: Meta-Harness Optimization
 
-## Architecture Decision 1: Pi-Native Trace Format
+## Summary
 
-**Decision:** Use raw Pi session JSONL directly. Don't convert to QuestTraceBundle.
+Quest now implements the optimization loop as a Pi-native frontier system rooted in `.pi/quests/trials/`.
+The design keeps raw Pi session JSONL as the source of truth, uses Harbor-backed Terminal-Bench evaluation for objective scoring, and promotes only non-dominated candidates that also pass hold-out validation.
+
+## Decision 1: Canonical root is `.pi/quests/trials/`
+
+**Decision:** The only live optimization root is `.pi/quests/trials/`.
 
 **Rationale:**
-- Community traces are Pi sessions — conversion loses information
-- Pi session format is stable and documented
-- We can derive what we need on-demand
+
+- Trials already belongs to the Quest extension.
+- The codebase was previously split between `.pi/quests/lab`, `.pi/quests/meta-harness`, and `.pi/quests/trials`.
+- Frontier operation needs one canonical state root for status, candidates, community stats, and benchmark splits.
 
 **Consequences:**
-- Trials must accept both `QuestTraceBundle` and raw Pi session JSONL
-- Derive failure tags from conversation patterns (user frustration, tool errors)
-- No upfront conversion — lazy evaluation
 
----
+- `.pi/quests/lab` and `.pi/quests/meta-harness` are migration inputs only.
+- New runtime state never depends on those legacy roots.
 
-## Architecture Decision 2: Meta-Harness Filesystem Layout
+## Decision 2: Pi-native community traces stay raw
 
-```
-.pi/quests/meta-harness/
+**Decision:** Community ingestion operates directly on raw Pi session `.jsonl` files.
+
+**Rationale:**
+
+- Pi session events contain the full tool/message/compaction timeline.
+- Converting them into older Quest trace bundles would lose information and add translation bugs.
+
+**Consequences:**
+
+- The analyzer filters by the first record being `type: "session"`.
+- Canonical community stats are written to `.pi/quests/trials/community-stats.json`.
+- Non-Pi or non-session files are excluded from canonical per-source stats.
+
+## Decision 3: Candidate-centric filesystem
+
+**Decision:** Trials archives every benchmarked candidate under `candidates/NNN/`.
+
+**Filesystem layout:**
+
+```text
+.pi/quests/trials/
+├── state.json
 ├── current/
-│   └── profile.json              # Active profile
+│   └── profile.json
+├── profiles/
+│   └── <profile-id>.json
 ├── candidates/
-│   ├── 001/
-│   │   ├── profile.patch.json    # What changed
-│   │   ├── scores.json           # Search set scores
-│   │   ├── hold-out.json         # Hold-out scores (if run)
-│   │   └── traces/               # Execution traces
-│   │       ├── terminal-bench-task-1/
-│   │       └── ...
-│   ├── 002/
-│   └── ...
-├── search-set.json               # Task IDs for optimization
-├── hold-out-set.json             # Task IDs for validation
-└── traces/                       # Symlink to community + our traces
-    ├── community/
-    │   ├── badlogicgames/
-    │   └── 0xsero/
-    └── quest/
+│   ├── 000/
+│   │   ├── profile.json
+│   │   ├── profile.patch.json
+│   │   ├── scores.json
+│   │   ├── hold-out.json
+│   │   ├── summary.json
+│   │   └── traces/<task-name>/...
+│   └── 001/
+├── search-set.json
+├── hold-out-set.json
+├── frontier.json
+├── community-traces/
+└── community-stats.json
 ```
 
----
+**Consequences:**
 
-## Architecture Decision 3: Proposer as Quest Extension
+- Candidate `000` is always the archived baseline.
+- Search and hold-out benchmark artifacts are kept with the candidate that produced them.
+- The proposer reads a stable filesystem instead of relying on prompt-only summaries.
 
-**Decision:** Proposer is a Quest extension (`/quest propose-patch`), not a separate Pi session.
+## Decision 4: Search/hold-out scoring with Pareto frontier selection
+
+**Decision:** Search drives optimization; hold-out is a hard non-regression gate; frontier membership is determined by mean score, total cost, and total duration.
 
 **Rationale:**
-- Quest already has orchestrator/worker/validator pattern
-- Proposer is just another phase with different prompts
-- Can reuse Quest's trace capture, profile application, validation
+
+- Accuracy-only promotion overfits.
+- Cost and duration matter for practical benchmark progress.
+- Hold-out must stay isolated from candidate generation.
 
 **Consequences:**
-- Add `proposer` to `QuestRole` enum
-- Proposer reads filesystem via `read` tool
-- Proposer outputs `QuestProfilePatch`
-- Apply patch via existing `applyQuestProfilePatch()`
 
----
+- Deterministic leader ordering is:
+  1. highest `meanScore`
+  2. lowest `totalCost`
+  3. lowest `totalDurationMs`
+- Hold-out never participates in domination checks.
+- Hold-out regressions are rejected with no override.
 
-## Architecture Decision 4: Search/Hold-out Split
+## Decision 5: Proposer is the optimization agent
 
-**Decision:** 70% search, 30% hold-out. Pareto frontier selection.
+**Decision:** Candidate generation runs through the `proposer` role, not the legacy `trial` role.
 
 **Rationale:**
-- Meta-Harness paper used held-out tasks for validation
-- Prevents overfitting to search set
-- Pareto allows multi-objective (accuracy vs cost)
+
+- The proposer is explicitly scoped to patch profile-owned surfaces.
+- The evaluator path should be separate from the agent that proposes changes.
 
 **Consequences:**
-- Split tasks before any optimization
-- Never use hold-out for candidate selection
-- Validate final Pareto frontier on hold-out
 
----
+- The proposer reads `community-stats.json`, `search-set.json`, `hold-out-set.json`, `frontier.json`, and prior candidate artifacts.
+- The proposer cannot mutate runtime code. It only emits profile patches.
 
-## Architecture Decision 5: Fail Loudly, Fail Early
+## Decision 6: Default benchmark target is the official sample dataset
 
-**Decision:** No silent fallbacks. Validate before expensive runs.
+**Decision:** The default benchmark target is `terminal-bench-sample@2.0`.
 
 **Rationale:**
-- Hidden failures create debugging nightmares
-- Silent fallbacks hide configuration errors
-- Early validation saves time and money
+
+- It is the smallest official Harbor-backed dataset that exercises the real pipeline.
+- The same runtime can then be promoted to `terminal-bench@2.0` without architectural changes.
 
 **Consequences:**
-- If trace directory missing, fail — don't silently skip
-- If parse error on community trace, log and skip (batch mode)
-- If no traces found, fail — can't proceed without data
-- If hold-out regresses, reject candidate — no override
 
----
-
-## Information Flow
-
-```
-Community Traces (.pi/quests/trials/community-traces/)
-       │
-       ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    META-HARNESS FILESYSTEM                   │
-├─────────────────────────────────────────────────────────────┤
-│  candidates/                                                │
-│  ├── 001/                                                   │
-│  │   ├── profile.patch.json                                 │
-│  │   ├── scores.json                                        │
-│  │   └── traces/                                            │
-│  ├── 002/                                                   │
-│  └── ...                                                    │
-│  search-set.json                                            │
-│  hold-out-set.json                                          │
-└─────────────────────────────────────────────────────────────┘
-       │
-       ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      PROPOSER AGENT                          │
-│  - Reads prior candidates via grep/cat                      │
-│  - Reads scores.json for each candidate                     │
-│  - Reads selected traces for counterfactual diagnosis       │
-│  - Proposes targeted QuestProfilePatch                      │
-└─────────────────────────────────────────────────────────────┘
-       │
-       ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     EVALUATION                               │
-│  - Apply patch to current profile                           │
-│  - Score on search set                                      │
-│  - If search improves: validate on hold-out                 │
-│  - If hold-out passes: archive as new candidate             │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Failure Mode Handling
-
-| Failure Mode | Response |
-|--------------|----------|
-| Missing trace data | Fail. Don't synthesize. |
-| No candidates yet | Fail. Need baseline first. |
-| Hold-out regression | Reject candidate. No override. |
-| Community trace parse error | Log and skip. Don't halt batch. |
-| No search-set.json | Fail. Must define before optimization. |
-| Profile patch invalid | Fail. Malformed patch. |
+- The vendored sample manifest contains 10 official tasks.
+- The deterministic default split is 7 search / 3 hold-out with seed `42`.

@@ -1,0 +1,242 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { collectFrontierTrialStatus, prepareTrialBenchmark, runTrialBaseline, runTrialOptimization } from "../src/frontier-trials.js";
+
+const DEFAULT_MODEL = {
+	provider: "openai-codex",
+	model: "gpt-5.4",
+	thinkingLevel: "high",
+};
+
+function fakeScorecard(dataset, split, tasks, meanScore, totalCost, totalDurationMs) {
+	const perTaskScore = tasks.length > 0 ? meanScore : 0;
+	return {
+		split,
+		dataset,
+		generatedAt: Date.now(),
+		taskCount: tasks.length,
+		passed: Math.round(tasks.length * meanScore),
+		failed: tasks.length - Math.round(tasks.length * meanScore),
+		totalScore: perTaskScore * tasks.length,
+		maxScore: tasks.length,
+		meanScore,
+		totalCost,
+		totalDurationMs,
+		tasks: tasks.map((task) => ({
+			taskId: task.path,
+			taskName: task.name,
+			dataset,
+			split,
+			status: perTaskScore >= 1 ? "passed" : perTaskScore > 0 ? "failed" : "error",
+			score: perTaskScore,
+			maxScore: 1,
+			durationMs: Math.floor(totalDurationMs / Math.max(1, tasks.length)),
+			totalCost: totalCost / Math.max(1, tasks.length),
+			modelChoice: "openai-codex/gpt-5.4",
+			artifactPaths: [],
+		})),
+	};
+}
+
+test("prepareTrialBenchmark writes the deterministic 7/3 sample split", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-prepare-"));
+	try {
+		const prepared = await prepareTrialBenchmark(cwd, { dataset: "terminal-bench-sample@2.0" });
+		assert.equal(prepared.manifest.taskCount, 10);
+		assert.equal(prepared.searchSet.totalTasks, 7);
+		assert.equal(prepared.holdOutSet.totalTasks, 3);
+		assert.equal(prepared.searchSet.tasks.length, 7);
+		assert.equal(prepared.holdOutSet.tasks.length, 3);
+		assert.equal(prepared.searchSet.tasks.some((task) => task.name.includes("/")), false);
+		assert.equal(prepared.holdOutSet.tasks.some((task) => task.name.includes("/")), false);
+		assert.equal(new Set([...prepared.searchSet.tasks, ...prepared.holdOutSet.tasks].map((task) => task.name)).size, 10);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runTrialBaseline archives candidate 000 under the canonical trials layout", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-baseline-"));
+	try {
+		const baseline = await runTrialBaseline(
+			cwd,
+			DEFAULT_MODEL,
+			{},
+			{
+				runBenchmarkSet: async (_cwd, _model, _profileId, split, candidateId) =>
+					fakeScorecard(split.dataset, split.split, split.tasks, 1, candidateId === "000" ? 2 : 1, split.split === "search" ? 700 : 300),
+			},
+		);
+		const candidateSummaryPath = join(cwd, ".pi", "quests", "trials", "candidates", "000", "summary.json");
+		const candidateSummary = JSON.parse(await readFile(candidateSummaryPath, "utf-8"));
+		assert.ok(existsSync(candidateSummaryPath));
+		assert.equal(baseline.candidate.candidateId, "000");
+		assert.equal(candidateSummary.status, "frontier");
+		assert.equal(baseline.state.currentCandidateId, "000");
+		assert.deepEqual(baseline.state.frontierCandidateIds, ["000"]);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runTrialOptimization promotes a non-dominated proposer candidate and updates current/profile.json", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-run-"));
+	try {
+		const result = await runTrialOptimization(
+			cwd,
+			DEFAULT_MODEL,
+			{ iterations: 1 },
+			{
+				analyzeCommunity: async () => ({
+					generatedAt: Date.now(),
+					totalFiles: 1,
+					totalSessions: 1,
+					parsedSessions: 1,
+					failedSessions: 0,
+					failedPaths: [],
+					sources: {},
+					models: {},
+					providers: {},
+					totalInputTokens: 0,
+					totalOutputTokens: 0,
+					totalCacheRead: 0,
+					totalCacheWrite: 0,
+					totalCost: 0,
+					avgDurationMs: 0,
+					avgToolCalls: 0,
+					avgErrors: 0,
+					avgMessages: 0,
+					failureTags: { weak_validation: 3 },
+					topToolNames: {},
+					sessionDurationBuckets: [],
+				}),
+				proposeCandidate: async (_cwd, _model, _profile, _target, _context) => ({
+					run: {
+						id: "proposer-run",
+						role: "proposer",
+						startedAt: Date.now(),
+						endedAt: Date.now(),
+						provider: DEFAULT_MODEL.provider,
+						model: DEFAULT_MODEL.model,
+						thinkingLevel: DEFAULT_MODEL.thinkingLevel,
+						exitCode: 0,
+						ok: true,
+						summary: "Improve worker validation wording",
+						phase: "propose",
+						events: [],
+					},
+					candidate: {
+						id: "candidate-agent",
+						source: "agent",
+						summary: "Tighten worker validation language",
+						rationale: "Improves validation specificity across benchmark tasks.",
+						generalizationNote: "Targets repeated weak-validation failures rather than one task.",
+						targetedTags: ["weak_validation"],
+						targetedCaseIds: [],
+						promptSurfaceIds: ["feature-worker"],
+						patch: {
+							promptSurfaces: {
+								workerPolicy: "Confirm prerequisites early and state validation limits explicitly.",
+							},
+						},
+					},
+				}),
+				runBenchmarkSet: async (_cwd, _model, _profileId, split, candidateId) => {
+					if (candidateId === "000") {
+						return fakeScorecard(split.dataset, split.split, split.tasks, 0.5, 5, split.split === "search" ? 900 : 400);
+					}
+					return fakeScorecard(split.dataset, split.split, split.tasks, split.split === "search" ? 0.9 : 1, 2, split.split === "search" ? 500 : 250);
+				},
+			},
+		);
+		const status = await collectFrontierTrialStatus(cwd);
+		const currentProfile = JSON.parse(await readFile(join(cwd, ".pi", "quests", "trials", "current", "profile.json"), "utf-8"));
+		const candidate001Summary = JSON.parse(await readFile(join(cwd, ".pi", "quests", "trials", "candidates", "001", "summary.json"), "utf-8"));
+		assert.equal(result.frontier.leaderCandidateId, "001");
+		assert.deepEqual(status.frontier?.frontierCandidateIds, ["001"]);
+		assert.equal(status.leader?.candidateId, "001");
+		assert.equal(candidate001Summary.status, "frontier");
+		assert.match(currentProfile.id, /candidate-001$/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runTrialOptimization rejects candidates that regress hold-out performance", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-reject-"));
+	try {
+		await runTrialOptimization(
+			cwd,
+			DEFAULT_MODEL,
+			{ iterations: 1 },
+			{
+				analyzeCommunity: async () => ({
+					generatedAt: Date.now(),
+					totalFiles: 1,
+					totalSessions: 1,
+					parsedSessions: 1,
+					failedSessions: 0,
+					failedPaths: [],
+					sources: {},
+					models: {},
+					providers: {},
+					totalInputTokens: 0,
+					totalOutputTokens: 0,
+					totalCacheRead: 0,
+					totalCacheWrite: 0,
+					totalCost: 0,
+					avgDurationMs: 0,
+					avgToolCalls: 0,
+					avgErrors: 0,
+					avgMessages: 0,
+					failureTags: { weak_validation: 1 },
+					topToolNames: {},
+					sessionDurationBuckets: [],
+				}),
+				proposeCandidate: async () => ({
+					run: {
+						id: "proposer-run",
+						role: "proposer",
+						startedAt: Date.now(),
+						endedAt: Date.now(),
+						provider: DEFAULT_MODEL.provider,
+						model: DEFAULT_MODEL.model,
+						thinkingLevel: DEFAULT_MODEL.thinkingLevel,
+						exitCode: 0,
+						ok: true,
+						summary: "Candidate",
+						phase: "propose",
+						events: [],
+					},
+					candidate: {
+						id: "candidate-agent",
+						source: "agent",
+						summary: "Candidate",
+						rationale: "Candidate rationale",
+						generalizationNote: "Candidate generalization note",
+						targetedTags: ["weak_validation"],
+						targetedCaseIds: [],
+						promptSurfaceIds: ["feature-worker"],
+						patch: { promptSurfaces: { workerPolicy: "New worker policy" } },
+					},
+				}),
+				runBenchmarkSet: async (_cwd, _model, _profileId, split, candidateId) => {
+					if (candidateId === "000") {
+						return fakeScorecard(split.dataset, split.split, split.tasks, split.split === "search" ? 0.5 : 1, 5, 500);
+					}
+					return fakeScorecard(split.dataset, split.split, split.tasks, split.split === "search" ? 0.9 : 0.2, 1, 200);
+				},
+			},
+		);
+		const rejected = JSON.parse(await readFile(join(cwd, ".pi", "quests", "trials", "candidates", "001", "summary.json"), "utf-8"));
+		const status = await collectFrontierTrialStatus(cwd);
+		assert.equal(rejected.status, "rejected");
+		assert.equal(status.frontier?.leaderCandidateId, "000");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});

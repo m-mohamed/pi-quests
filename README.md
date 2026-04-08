@@ -74,10 +74,12 @@ Typical flow:
 - `/quest abort`
 - `/quest model <orchestrator|worker|validator> <provider/model[:thinking]>`
 - `/quest trials`
+- `/quest trials status`
+- `/quest trials prepare-benchmark [dataset]`
+- `/quest trials analyze-community [--force]`
+- `/quest trials baseline`
 - `/quest trials run`
 - `/quest trials stop`
-- `/quest trials replay <run-id>`
-- `/quest trials target <repo|quest-core>`
 - `/quest trials profile`
 - `/quests`
 
@@ -92,7 +94,7 @@ quest-headless run \
   --json
 ```
 
-The headless runner writes a machine-readable contract under `.pi/quests/<quest-id>/headless-run.json` and keeps benchmark provenance on Quest traces and replay cases.
+The headless runner writes a machine-readable contract under `.pi/quests/<quest-id>/headless-run.json` and keeps benchmark provenance on Quest artifacts plus Harbor trial directories.
 
 Local smoke and development scripts:
 
@@ -141,28 +143,28 @@ Quest never auto-commits, auto-deploys, or auto-ships.
 
 ## Trials
 
-Trials are the evals-and-traces improvement layer around the normal `/quest` runtime.
+Trials are the benchmark-and-frontier improvement layer around the normal `/quest` runtime.
 
 It keeps Quest execution and Quest optimization separate:
 
 1. normal `/quest` runs stay focused on the current repo task
-2. Trials capture planning, worker, validator, and replan traces under `.pi/quests/trials/traces/`
-3. Trials materialize offline eval cases from interesting traces such as weak validation, blocked milestones, corrective-loop churn, prerequisite misses, or context pressure
-4. `/quest trials run` evaluates candidate profile changes with a score-driven loop:
-   - recent traces and failing evals are clustered into improvement opportunities
-   - spot-check evals run first on the affected replay cases
-   - full offline datasets and held-out checks run before adoption
-   - winning candidates auto-apply only to explicit trial-owned surfaces such as prompt policies, verification budgets, context spill policy, workflow hints, and trace-grading thresholds
+2. Trials ingest raw Pi community sessions from `.pi/quests/trials/community-traces/` and generate canonical aggregate stats in `.pi/quests/trials/community-stats.json`
+3. `/quest trials prepare-benchmark` writes explicit search and hold-out task lists under `.pi/quests/trials/`
+4. `/quest trials baseline` archives the current profile as candidate `000`
+5. `/quest trials run` asks the `proposer` role to patch only trial-owned profile surfaces, then scores each candidate on the search split and validates it on hold-out
+6. non-dominated candidates stay on the Pareto frontier, and the current frontier leader is promoted to `.pi/quests/trials/current/profile.json`
 
 Trials do not mutate Quest runtime code during normal task execution, and they never auto-publish, auto-tag, or auto-release.
 
 ### Trials Commands
 
 - `/quest trials` opens Trials Control in interactive mode and prints a summary in print/RPC mode
-- `/quest trials run` runs the local improvement loop for the active profile
+- `/quest trials status` prints the canonical benchmark/community/frontier status
+- `/quest trials prepare-benchmark [dataset]` writes the explicit search/hold-out split
+- `/quest trials analyze-community [--force]` regenerates canonical Pi-native community stats
+- `/quest trials baseline` runs the current profile through Harbor and archives candidate `000`
+- `/quest trials run` runs the frontier optimization loop for the active profile
 - `/quest trials stop` stops the active trial run and preserves the current experiment report
-- `/quest trials replay <run-id>` converts a historical Quest run into trace-replay eval cases
-- `/quest trials target <repo|quest-core>` switches between per-repo optimization and package-repo optimization
 - `/quest trials profile` prints the active profile, adopted changes, and latest score summary
 
 ## Stored Artifacts
@@ -183,12 +185,21 @@ Shared learned workflow guidance is stored under `.pi/quests/shared-skills/`.
 Trials store their own improvement artifacts under `.pi/quests/trials/`:
 
 - `state.json`
+- `current/profile.json`
 - `profiles/<profile-id>.json`
-- `datasets/<dataset-id>.json`
-- `traces/<trace-id>.json`
-- `experiments/<experiment-id>.json`
-- `baselines/<experiment-id>.json`
-- `reports/<experiment-id>.json`
+- `candidates/NNN/profile.json`
+- `candidates/NNN/profile.patch.json`
+- `candidates/NNN/scores.json`
+- `candidates/NNN/hold-out.json`
+- `candidates/NNN/summary.json`
+- `candidates/NNN/traces/<task-name>/...`
+- `search-set.json`
+- `hold-out-set.json`
+- `frontier.json`
+- `community-traces/`
+- `community-stats.json`
+
+Legacy roots such as `.pi/quests/lab` and `.pi/quests/meta-harness` are migration inputs only. The live optimization runtime is canonical on `.pi/quests/trials/`.
 
 Quest artifacts are the source of truth. `pi.appendEntry()` is only used for session-local UI state such as quest mode and the last-opened Quest Control tab.
 
@@ -242,7 +253,6 @@ Maintainer-only manual harnesses also live under `scripts/`, but they are not pa
 
 Use these docs before tagging or announcing a new baseline:
 
-- `docs/release-checklist.md`
 - `docs/baseline-results.md`
 - `docs/benchmark-card.md`
 - `docs/reproducibility.md`
@@ -258,9 +268,8 @@ This repo now keeps its forward plan in a Quest-native planning workspace:
 - current capability docs: `blueprints/capabilities/`
 - active roadmap changes: `blueprints/changes/`
 
-The first roadmap items are:
+The active roadmap change is:
 
-- `blueprints/changes/improve-benchmark-baselines/`
-- `blueprints/changes/prepare-public-baseline-release/`
+- `blueprints/changes/meta-harness-optimization/`
 
-Targeted against Pi `0.64.x`.
+Targeted against Pi `0.65.x`.

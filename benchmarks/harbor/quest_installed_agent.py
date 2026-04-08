@@ -78,8 +78,10 @@ class QuestInstalledAgent(BaseInstalledAgent):
         package_dir = self._env("QUEST_PACKAGE_DIR", "/opt/quest-package")
         dataset = self._env("QUEST_HARBOR_DATASET", "unknown")
         run_mode = self._env("QUEST_HARBOR_RUN_MODE", "custom")
+        profile_id = self._env("QUEST_HARBOR_PROFILE_ID")
         task_id = self._env("HARBOR_TASK_ID", "unknown")
         model_flag = f"--model {shlex.quote(self.model_name)} " if self.model_name else ""
+        profile_flag = f"--profile {shlex.quote(profile_id)} " if profile_id else ""
         command = (
             f"node {shlex.quote(str(PurePosixPath(package_dir) / 'dist' / 'quest-headless.js'))} run "
             f"--instruction {shlex.quote(instruction)} "
@@ -89,6 +91,7 @@ class QuestInstalledAgent(BaseInstalledAgent):
             f"--task-id {shlex.quote(task_id)} "
             f"--run-mode {shlex.quote(run_mode)} "
             f"{model_flag}"
+            f"{profile_flag}"
             "--json "
             f"> {OUTPUT_FILE} 2> {STDERR_FILE}"
         )

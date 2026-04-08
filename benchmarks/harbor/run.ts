@@ -14,6 +14,8 @@ export interface HarborRunOptions {
 	dryRun?: boolean;
 	bundlePath?: string;
 	jobsDir?: string;
+	profileId?: string;
+	includeTaskNames?: string[];
 	maxTasks?: number;
 	nConcurrent?: number;
 	agentSetupTimeoutMultiplier?: number;
@@ -48,19 +50,17 @@ export function buildHarborCommand(options: HarborRunOptions): { command: string
 		args.push("--agent-setup-timeout-multiplier", String(setupTimeoutMultiplier));
 	}
 	if (options.maxTasks && Number.isFinite(options.maxTasks) && options.maxTasks > 0) args.push("-l", String(options.maxTasks));
+	for (const taskName of options.includeTaskNames ?? []) {
+		if (taskName.trim()) args.push("--include-task-name", taskName);
+	}
 	if (options.bundlePath) {
 		const mounts = [`${options.bundlePath}:/opt/quest-package:ro`];
 		const authFile = join(homedir(), ".pi", "agent", "auth.json");
 		if (existsSync(authFile)) {
 			try {
 				const auth = JSON.parse(readFileSync(authFile, "utf-8"));
-				// Extract OpenCode Go API key
-				let opencodeKey = auth?.["opencode-go"]?.key;
-				if (opencodeKey && opencodeKey.startsWith("!")) {
-					opencodeKey = execSync(opencodeKey.slice(1), { encoding: "utf-8" }).trim();
-				}
-				if (opencodeKey) args.push("--ae", `OPENCODE_API_KEY=${opencodeKey}`);
-				// Extract Codex OAuth access token
+				const zaiKey = auth?.["zai"]?.key;
+				if (zaiKey) args.push("--ae", `ZAI_API_KEY=${zaiKey}`);
 				const codexToken = auth?.["openai-codex"]?.access;
 				if (codexToken) args.push("--ae", `OPENAI_API_KEY=${codexToken}`);
 			} catch {
@@ -72,6 +72,7 @@ export function buildHarborCommand(options: HarborRunOptions): { command: string
 	}
 	args.push("--ae", `QUEST_HARBOR_DATASET=${options.dataset}`);
 	args.push("--ae", `QUEST_HARBOR_RUN_MODE=${options.runMode}`);
+	if (options.profileId?.trim()) args.push("--ae", `QUEST_HARBOR_PROFILE_ID=${options.profileId}`);
 	for (const name of requiredEnvVarsForModel(model)) {
 		const value = process.env[name];
 		if (value?.trim()) args.push("--ae", `${name}=${value}`);
@@ -99,11 +100,22 @@ function parseArgs(argv: string[]): HarborRunOptions {
 	const maxTasksIndex = argv.indexOf("--max-tasks");
 	const nConcurrentIndex = argv.indexOf("--n-concurrent");
 	const setupTimeoutMultiplierIndex = argv.indexOf("--agent-setup-timeout-multiplier");
+	const jobsDirIndex = argv.indexOf("--jobs-dir");
+	const profileIndex = argv.indexOf("--profile");
+	const includeTaskNames: string[] = [];
+	for (let index = 0; index < argv.length; index += 1) {
+		if (argv[index] === "--include-task-name" && argv[index + 1]) {
+			includeTaskNames.push(argv[index + 1]);
+		}
+	}
 	return {
 		dataset: argv[datasetIndex + 1],
 		runMode: runModeIndex >= 0 ? argv[runModeIndex + 1] : "custom",
 		model: modelIndex >= 0 ? argv[modelIndex + 1] : undefined,
 		dryRun: argv.includes("--dry-run"),
+		jobsDir: jobsDirIndex >= 0 ? resolve(argv[jobsDirIndex + 1]) : undefined,
+		profileId: profileIndex >= 0 ? argv[profileIndex + 1] : undefined,
+		includeTaskNames,
 		maxTasks: maxTasksIndex >= 0 ? Number(argv[maxTasksIndex + 1]) : undefined,
 		nConcurrent: nConcurrentIndex >= 0 ? Number(argv[nConcurrentIndex + 1]) : undefined,
 		agentSetupTimeoutMultiplier:
@@ -194,6 +206,8 @@ async function writeInvocationSummary(rootDir: string, options: HarborRunOptions
 		runMode: options.runMode,
 		model: options.model ?? defaultBenchmarkModel(),
 		jobsDir: options.jobsDir ?? resolve(rootDir, "benchmarks", ".runs", "harbor", options.runMode),
+		profileId: options.profileId ?? null,
+		includeTaskNames: options.includeTaskNames ?? [],
 		maxTasks: options.maxTasks ?? null,
 		nConcurrent: options.nConcurrent ?? 1,
 		agentSetupTimeoutMultiplier: options.agentSetupTimeoutMultiplier ?? 4,

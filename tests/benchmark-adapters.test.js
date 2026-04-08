@@ -16,6 +16,8 @@ test("buildHarborCommand wires the Quest installed-agent adapter", () => {
 		runMode: "sample",
 		model: "openai-codex/gpt-5.4",
 		bundlePath: "/tmp",
+		profileId: "repo-project-candidate-001",
+		includeTaskNames: ["sample/chess-best-move", "sample/regex-log"],
 	});
 	assert.equal(command.command, "harbor");
 	assert.ok(command.args.includes("--yes"));
@@ -31,6 +33,10 @@ test("buildHarborCommand wires the Quest installed-agent adapter", () => {
 	assert.ok(command.args.includes("QUEST_PACKAGE_DIR=/opt/quest-package"));
 	assert.ok(command.args.includes("QUEST_HARBOR_DATASET=terminal-bench-sample@2.0"));
 	assert.ok(command.args.includes("QUEST_HARBOR_RUN_MODE=sample"));
+	assert.ok(command.args.includes("QUEST_HARBOR_PROFILE_ID=repo-project-candidate-001"));
+	assert.equal(command.args.filter((value) => value === "--include-task-name").length, 2);
+	assert.ok(command.args.includes("sample/chess-best-move"));
+	assert.ok(command.args.includes("sample/regex-log"));
 	assert.equal(command.env.QUEST_HARBOR_DATASET, "terminal-bench-sample@2.0");
 	assert.equal(command.env.QUEST_HARBOR_RUN_MODE, "sample");
 });

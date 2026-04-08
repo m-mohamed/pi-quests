@@ -3,7 +3,7 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
 export type QuestStatus = "planning" | "proposal_ready" | "running" | "paused" | "blocked" | "completed" | "aborted";
 export type FeatureStatus = "pending" | "running" | "completed" | "blocked" | "skipped";
 export type MilestoneStatus = "pending" | "running" | "completed" | "blocked";
-export type QuestRole = "orchestrator" | "worker" | "validator" | "trial";
+export type QuestRole = "orchestrator" | "worker" | "validator" | "trial" | "proposer";
 export type HumanQaStatus = "pending" | "approved";
 export type ShipReadiness = "not_ready" | "validated_waiting_for_human_qa" | "human_qa_complete";
 export type ValidationSurfaceStatus = "supported" | "limited" | "unsupported";
@@ -26,7 +26,8 @@ export type QuestPromptSurfaceId =
 	| "validator-code-review"
 	| "validator-user-surface"
 	| "readiness-probe"
-	| "plan-revision";
+	| "plan-revision"
+	| "proposer";
 export type QuestFailureTag =
 	| "prerequisite_miss"
 	| "weak_validation"
@@ -38,6 +39,141 @@ export type QuestFailureTag =
 	| "tool_heavy"
 	| "validator_failure"
 	| "worker_failure";
+
+export type PiKnownSessionEventType =
+	| "session"
+	| "session_info"
+	| "model_change"
+	| "thinking_level_change"
+	| "message"
+	| "compaction"
+	| "custom"
+	| "custom_message"
+	| "label"
+	| "branch_summary";
+export type PiSessionEventType = PiKnownSessionEventType | (string & {});
+
+export interface PiSessionEvent {
+	type: PiSessionEventType;
+	id?: string;
+	parentId?: string | null;
+	timestamp: string;
+	[key: string]: unknown;
+}
+
+export interface PiSessionStartEvent extends PiSessionEvent {
+	type: "session";
+	version?: number;
+	cwd: string;
+}
+
+export interface PiSessionInfoEvent extends PiSessionEvent {
+	type: "session_info";
+	config?: Record<string, unknown>;
+	name?: string;
+	skills?: string[];
+	[key: string]: unknown;
+}
+
+export interface PiModelChangeEvent extends PiSessionEvent {
+	type: "model_change";
+	provider: string;
+	modelId: string;
+}
+
+export interface PiThinkingLevelChangeEvent extends PiSessionEvent {
+	type: "thinking_level_change";
+	thinkingLevel: ThinkingLevel;
+}
+
+export interface PiMessageContentBlock {
+	type: "text" | "toolCall" | "thinking";
+	text?: string;
+	name?: string;
+	arguments?: Record<string, unknown> | string;
+	thinking?: string;
+	thinkingSignature?: string;
+	partialJson?: string;
+	[key: string]: unknown;
+}
+
+export interface PiMessageEvent extends PiSessionEvent {
+	type: "message";
+	message: {
+		role: "user" | "assistant" | "toolResult";
+		content: PiMessageContentBlock[];
+		timestamp?: number;
+		api?: string;
+		provider?: string;
+		model?: string;
+		usage?: {
+			input: number;
+			output: number;
+			cacheRead: number;
+			cacheWrite: number;
+			totalTokens: number;
+			cost: {
+				input: number;
+				output: number;
+				cacheRead: number;
+				cacheWrite: number;
+				total: number;
+			};
+		};
+		stopReason?: string;
+		toolCallId?: string;
+		toolName?: string;
+		isError?: boolean;
+	};
+}
+
+export interface PiCompactionEvent extends PiSessionEvent {
+	type: "compaction";
+	summary?: string;
+	firstKeptEntryId?: string;
+	tokensBefore?: number;
+	tokensAfter?: number;
+	details?: Record<string, unknown>;
+	fromHook?: boolean;
+	originalTokens?: number;
+	compactedTokens?: number;
+	strategy?: string;
+}
+
+export interface PiSessionTrace {
+	id: string;
+	sourcePath: string;
+	version?: number;
+	cwd: string;
+	startedAt: number;
+	endedAt: number;
+	durationMs: number;
+	events: PiSessionEvent[];
+	modelChanges: Array<{ provider: string; modelId: string; timestamp: string }>;
+	thinkingLevelChanges: Array<{ thinkingLevel: ThinkingLevel; timestamp: string }>;
+	compactions: Array<{
+		timestamp: string;
+		summary?: string;
+		firstKeptEntryId?: string;
+		tokensBefore?: number;
+		tokensAfter?: number;
+		fromHook?: boolean;
+		details?: Record<string, unknown>;
+	}>;
+	messageCount: number;
+	toolCallCount: number;
+	errorCount: number;
+	usage: {
+		totalInputTokens: number;
+		totalOutputTokens: number;
+		totalCacheRead: number;
+		totalCacheWrite: number;
+		totalCost: number;
+		turnCount: number;
+	};
+	derivedTags: QuestFailureTag[];
+	derivedIssues: string[];
+}
 export type QuestBenchmarkName = "local" | "terminal-bench" | "slopcodebench";
 export type QuestBenchmarkRunMode = "local" | "sample" | "full" | "smoke" | "custom";
 export type QuestEvalDatasetKind =
@@ -64,6 +200,39 @@ export interface QuestBenchmarkProvenance {
 	score?: number;
 }
 
+export interface QuestBenchmarkTaskDescriptor {
+	name: string;
+	path: string;
+	gitUrl?: string;
+	gitCommitId?: string;
+}
+
+export interface QuestBenchmarkTaskManifest {
+	id: string;
+	benchmark: QuestBenchmarkName;
+	dataset: string;
+	runMode: QuestBenchmarkRunMode;
+	createdAt: number;
+	taskCount: number;
+	seed?: number;
+	source: "vendored" | "registry" | "generated";
+	tasks: QuestBenchmarkTaskDescriptor[];
+	notes?: string[];
+}
+
+export interface QuestBenchmarkTaskSplit {
+	id: string;
+	benchmark: QuestBenchmarkName;
+	dataset: string;
+	split: "search" | "hold-out";
+	createdAt: number;
+	seed: number;
+	sourceManifestId: string;
+	totalTasks: number;
+	tasks: QuestBenchmarkTaskDescriptor[];
+	notes?: string[];
+}
+
 export interface QuestPromptSurfaces {
 	version: number;
 	planningPolicy: string;
@@ -72,6 +241,7 @@ export interface QuestPromptSurfaces {
 	validatorUserSurfacePolicy: string;
 	readinessPolicy: string;
 	revisionPolicy: string;
+	proposerPolicy: string;
 }
 
 export interface QuestRoleToolPolicy {
@@ -79,11 +249,37 @@ export interface QuestRoleToolPolicy {
 	worker: string[];
 	validator: string[];
 	trial: string[];
+	proposer: string[];
 }
 
 export interface QuestModelPolicy {
 	preferSameModelFamily: boolean;
 	preferValidatorDivergence: boolean;
+}
+
+export interface QuestModelFamilyConfig {
+	provider: string;
+	model: string;
+	thinkingLevel: ThinkingLevel;
+	role: "worker" | "validator" | "judge" | "escalation";
+	costPer1KInput: number;
+	costPer1KOutput: number;
+	latencyMs: number;
+	strengths: string[];
+	weaknesses: string[];
+}
+
+export interface QuestModelEnsemblePolicy {
+	enabled: boolean;
+	families: QuestModelFamilyConfig[];
+	defaultWorker: string;
+	defaultValidator: string;
+	escalationThreshold: number;
+	autoEscalateOnFailure: boolean;
+	routingRules: Array<{
+		condition: string;
+		targetModel: string;
+	}>;
 }
 
 export interface QuestVerificationBudget {
@@ -114,6 +310,58 @@ export interface QuestTraceGradingThresholds {
 	abortPenalty: number;
 }
 
+export interface QuestHarnessComputationalGuides {
+	enabled: boolean;
+	linterConfigs: string[];
+	preCommitHooks: string[];
+	structuralTests: string[];
+	archConstraints: string[];
+}
+
+export interface QuestHarnessInferentialGuides {
+	enabled: boolean;
+	agentsMdPath: string;
+	skillsDir: string;
+	codeReviewAgents: string[];
+}
+
+export interface QuestHarnessSensors {
+	computational: {
+		enabled: boolean;
+		linters: string[];
+		typeCheckers: string[];
+		testRunners: string[];
+		driftDetectors: string[];
+	};
+	inferential: {
+		enabled: boolean;
+		codeReviewAgents: string[];
+		qualityJudges: string[];
+		runtimeMonitors: string[];
+	};
+}
+
+export interface QuestHarnessFitnessFunctions {
+	enabled: boolean;
+	performanceRequirements: Array<{
+		metric: string;
+		threshold: number;
+		unit: string;
+	}>;
+	observabilityRequirements: Array<{
+		standard: string;
+		required: boolean;
+	}>;
+	architectureConstraints: string[];
+}
+
+export interface QuestHarnessPolicy {
+	computationalGuides: QuestHarnessComputationalGuides;
+	inferentialGuides: QuestHarnessInferentialGuides;
+	sensors: QuestHarnessSensors;
+	fitnessFunctions: QuestHarnessFitnessFunctions;
+}
+
 export interface QuestProfile {
 	id: string;
 	projectId: string;
@@ -123,10 +371,12 @@ export interface QuestProfile {
 	promptSurfaces: QuestPromptSurfaces;
 	toolAllowlist: QuestRoleToolPolicy;
 	modelPolicy: QuestModelPolicy;
+	ensemblePolicy: QuestModelEnsemblePolicy;
 	verificationBudget: QuestVerificationBudget;
 	contextPolicy: QuestContextPolicy;
 	workflowHintPolicy: QuestWorkflowHintPolicy;
 	traceGrading: QuestTraceGradingThresholds;
+	harnessPolicy: QuestHarnessPolicy;
 	adoptedChanges: string[];
 }
 
@@ -261,7 +511,30 @@ export interface QuestTraceToolEvent {
 	toolName?: string;
 	summary?: string;
 	isError?: boolean;
+	sourceInfo?: QuestSourceInfo;
+	compactionContext?: {
+		tokensBefore: number;
+		tokensAfter: number;
+		droppedMessages: number;
+	};
 }
+
+export interface QuestSourceInfo {
+	path: string;
+	scope: "builtin" | "extension" | "skill" | "user" | "project";
+	source: "builtin" | "package" | "extension" | "cli" | "user" | "project";
+}
+
+export type QuestDiagnosticSeverity = "info" | "warning" | "error";
+
+export interface QuestDiagnostic {
+	severity: QuestDiagnosticSeverity;
+	source: string;
+	message: string;
+	timestamp: number;
+}
+
+export type QuestCancellationReason = "user_abort" | "timeout" | "error" | "context_overflow" | "completed" | "signal";
 
 export interface LiveRunSnapshot {
 	role: QuestRole;
@@ -358,6 +631,15 @@ export interface QuestTraceBundle {
 	validatorFindings: string[];
 	tags: QuestFailureTag[];
 	derivedIssues: string[];
+	diagnostics: QuestDiagnostic[];
+	compactionEvents: Array<{
+		timestamp: number;
+		tokensBefore: number;
+		tokensAfter: number;
+		droppedMessages: number;
+		reason: string;
+	}>;
+	cancellationReason?: QuestCancellationReason;
 	usage?: WorkerRunRecord["usage"];
 	source: "worker_run" | "planning_session";
 	benchmark?: QuestBenchmarkProvenance;
@@ -415,14 +697,118 @@ export interface QuestExperimentScore {
 	findings: string[];
 }
 
+export interface QuestCandidateTaskResult {
+	taskId: string;
+	taskName: string;
+	dataset: string;
+	split: "search" | "hold-out";
+	status: "passed" | "failed" | "error";
+	score: number;
+	maxScore: number;
+	durationMs: number;
+	totalCost: number;
+	modelChoice: string;
+	trialDir?: string;
+	questOutputFile?: string;
+	artifactPaths: string[];
+	failureReason?: string;
+	rewardValues?: Record<string, number>;
+	benchmark?: QuestBenchmarkProvenance;
+}
+
+export interface QuestCandidateScorecard {
+	split: "search" | "hold-out";
+	dataset: string;
+	generatedAt: number;
+	taskCount: number;
+	passed: number;
+	failed: number;
+	totalScore: number;
+	maxScore: number;
+	meanScore: number;
+	totalCost: number;
+	totalDurationMs: number;
+	tasks: QuestCandidateTaskResult[];
+}
+
+export interface QuestCandidateSummary {
+	candidateId: string;
+	profileId: string;
+	createdAt: number;
+	source: "baseline" | "proposer";
+	status: "accepted" | "rejected" | "frontier" | "archived";
+	summary: string;
+	rationale: string;
+	generalizationNote?: string;
+	targetedTags: QuestFailureTag[];
+	promptSurfaceIds: QuestPromptSurfaceId[];
+	searchScore?: QuestCandidateScorecard;
+	holdOutScore?: QuestCandidateScorecard;
+	paretoOptimal: boolean;
+	frontierRank?: number;
+	failureReason?: string;
+}
+
+export interface QuestFrontierState {
+	generatedAt: number;
+	leaderCandidateId?: string;
+	frontierCandidateIds: string[];
+}
+
+export interface CommunitySourceStats {
+	sourceId: string;
+	sessionCount: number;
+	parsedSessions: number;
+	failedSessions: number;
+	failedPaths: string[];
+	models: Record<string, number>;
+	providers: Record<string, number>;
+	totalInputTokens: number;
+	totalOutputTokens: number;
+	totalCacheRead: number;
+	totalCacheWrite: number;
+	totalCost: number;
+	totalDurationMs: number;
+	totalToolCalls: number;
+	totalErrors: number;
+	totalMessages: number;
+	failureTags: Partial<Record<QuestFailureTag, number>>;
+}
+
+export interface CommunityStats {
+	generatedAt: number;
+	totalFiles: number;
+	totalSessions: number;
+	parsedSessions: number;
+	failedSessions: number;
+	failedPaths: string[];
+	sources: Record<string, CommunitySourceStats>;
+	models: Record<string, number>;
+	providers: Record<string, number>;
+	totalInputTokens: number;
+	totalOutputTokens: number;
+	totalCacheRead: number;
+	totalCacheWrite: number;
+	totalCost: number;
+	avgDurationMs: number;
+	avgToolCalls: number;
+	avgErrors: number;
+	avgMessages: number;
+	failureTags: Partial<Record<QuestFailureTag, number>>;
+	topToolNames: Record<string, number>;
+	sessionDurationBuckets: Array<{ label: string; count: number }>;
+}
+
 export interface QuestProfilePatch {
 	promptSurfaces?: Partial<QuestPromptSurfaces>;
 	toolAllowlist?: Partial<QuestRoleToolPolicy>;
 	modelPolicy?: Partial<QuestModelPolicy>;
+	ensemblePolicy?: Partial<QuestModelEnsemblePolicy>;
 	verificationBudget?: Partial<QuestVerificationBudget>;
 	contextPolicy?: Partial<QuestContextPolicy>;
 	workflowHintPolicy?: Partial<QuestWorkflowHintPolicy>;
 	traceGrading?: Partial<QuestTraceGradingThresholds>;
+	harnessPolicy?: Partial<QuestHarnessPolicy>;
 	adoptedChange?: string;
 }
 
@@ -462,6 +848,11 @@ export interface QuestTrialState {
 	projectId: string;
 	target: QuestTrialTarget;
 	activeProfileId: string;
+	storageVersion?: number;
+	benchmarkDataset?: string;
+	benchmarkRunMode?: QuestBenchmarkRunMode;
+	currentCandidateId?: string;
+	frontierCandidateIds?: string[];
 	activeExperimentId?: string;
 	status: QuestTrialStatus;
 	lastSummary?: string;
@@ -543,6 +934,14 @@ export interface QuestStoragePaths {
 export interface QuestTrialPaths {
 	rootDir: string;
 	stateFile: string;
+	currentDir: string;
+	currentProfileFile: string;
+	candidatesDir: string;
+	searchSetFile: string;
+	holdOutSetFile: string;
+	frontierFile: string;
+	communityStatsFile: string;
+	communityTracesDir: string;
 	profilesDir: string;
 	datasetsDir: string;
 	tracesDir: string;

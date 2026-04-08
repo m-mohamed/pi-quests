@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { defaultQuestProfile, normalizeQuestProfile } from "./trials-core.js";
 import type {
@@ -37,7 +37,17 @@ const SKILLS_DIR = "skills";
 const SHARED_SKILLS_DIR = "shared-skills";
 const SHARED_WORKFLOWS_FILE = "index.json";
 const TRIALS_DIR = "trials";
+const LEGACY_LAB_DIR = "lab";
+const LEGACY_META_HARNESS_DIR = "meta-harness";
 const TRIALS_STATE_FILE = "state.json";
+const TRIALS_CURRENT_DIR = "current";
+const TRIALS_CURRENT_PROFILE_FILE = "profile.json";
+const TRIALS_CANDIDATES_DIR = "candidates";
+const TRIALS_SEARCH_SET_FILE = "search-set.json";
+const TRIALS_HOLD_OUT_SET_FILE = "hold-out-set.json";
+const TRIALS_FRONTIER_FILE = "frontier.json";
+const TRIALS_COMMUNITY_STATS_FILE = "community-stats.json";
+const TRIALS_COMMUNITY_TRACES_DIR = "community-traces";
 const TRIALS_PROFILES_DIR = "profiles";
 const TRIALS_DATASETS_DIR = "datasets";
 const TRIALS_TRACES_DIR = "traces";
@@ -143,6 +153,14 @@ export function getQuestTrialPaths(cwd: string): QuestTrialPaths {
 	return {
 		rootDir,
 		stateFile: join(rootDir, TRIALS_STATE_FILE),
+		currentDir: join(rootDir, TRIALS_CURRENT_DIR),
+		currentProfileFile: join(rootDir, TRIALS_CURRENT_DIR, TRIALS_CURRENT_PROFILE_FILE),
+		candidatesDir: join(rootDir, TRIALS_CANDIDATES_DIR),
+		searchSetFile: join(rootDir, TRIALS_SEARCH_SET_FILE),
+		holdOutSetFile: join(rootDir, TRIALS_HOLD_OUT_SET_FILE),
+		frontierFile: join(rootDir, TRIALS_FRONTIER_FILE),
+		communityStatsFile: join(rootDir, TRIALS_COMMUNITY_STATS_FILE),
+		communityTracesDir: join(rootDir, TRIALS_COMMUNITY_TRACES_DIR),
 		profilesDir: join(rootDir, TRIALS_PROFILES_DIR),
 		datasetsDir: join(rootDir, TRIALS_DATASETS_DIR),
 		tracesDir: join(rootDir, TRIALS_TRACES_DIR),
@@ -248,6 +266,9 @@ async function ensureRoot(cwd: string): Promise<QuestStoragePaths> {
 async function ensureTrialRoot(cwd: string): Promise<QuestTrialPaths> {
 	const paths = getQuestTrialPaths(cwd);
 	await mkdir(paths.rootDir, { recursive: true });
+	await mkdir(paths.currentDir, { recursive: true });
+	await mkdir(paths.candidatesDir, { recursive: true });
+	await mkdir(paths.communityTracesDir, { recursive: true });
 	await mkdir(paths.profilesDir, { recursive: true });
 	await mkdir(paths.datasetsDir, { recursive: true });
 	await mkdir(paths.tracesDir, { recursive: true });
@@ -308,8 +329,8 @@ async function syncQuestArtifacts(quest: QuestState): Promise<void> {
 function normalizeQuest(quest: QuestState): QuestState {
 	if (!quest.config) {
 		const baseModel = quest.defaultModel ?? {
-			provider: "openai-codex",
-			model: "gpt-5.4",
+			provider: "zai",
+			model: "glm-5.1",
 			thinkingLevel: "high" as const,
 		};
 		quest.config = buildConfig(quest.cwd, quest.createdAt, baseModel);
@@ -566,9 +587,105 @@ function defaultTrialState(cwd: string): QuestTrialState {
 		projectId,
 		target: "repo",
 		activeProfileId: `repo-${projectId}`,
+		storageVersion: 2,
+		benchmarkDataset: "terminal-bench-sample@2.0",
+		benchmarkRunMode: "sample",
+		frontierCandidateIds: [],
 		status: "idle",
 		updatedAt: Date.now(),
 	};
+}
+
+function legacyLabPaths(cwd: string) {
+	const questsRootDir = join(cwd, QUESTS_ROOT_DIR);
+	const rootDir = join(questsRootDir, LEGACY_LAB_DIR);
+	return {
+		rootDir,
+		stateFile: join(rootDir, TRIALS_STATE_FILE),
+		profilesDir: join(rootDir, TRIALS_PROFILES_DIR),
+	};
+}
+
+function legacyMetaHarnessPaths(cwd: string) {
+	const questsRootDir = join(cwd, QUESTS_ROOT_DIR);
+	const rootDir = join(questsRootDir, LEGACY_META_HARNESS_DIR);
+	return {
+		rootDir,
+		searchSetFile: join(rootDir, TRIALS_SEARCH_SET_FILE),
+		holdOutSetFile: join(rootDir, TRIALS_HOLD_OUT_SET_FILE),
+		communityStatsFile: join(rootDir, "traces", TRIALS_COMMUNITY_STATS_FILE),
+		communityDir: join(rootDir, "traces", "community"),
+	};
+}
+
+function splitFileLooksConsistent(payload: unknown): boolean {
+	if (!payload || typeof payload !== "object") return false;
+	const split = payload as { totalTasks?: unknown; tasks?: unknown };
+	return Array.isArray(split.tasks) && typeof split.totalTasks === "number" && split.totalTasks === split.tasks.length;
+}
+
+async function migrateLegacyTrialStateIfNeeded(cwd: string, defaults: QuestTrialState): Promise<QuestTrialState | null> {
+	const legacyLab = legacyLabPaths(cwd);
+	if (!existsSync(legacyLab.stateFile)) return null;
+	try {
+		const raw = await readFile(legacyLab.stateFile, "utf-8");
+		const parsed = JSON.parse(raw) as Partial<QuestTrialState>;
+		const migrated: QuestTrialState = {
+			...defaults,
+			...parsed,
+			projectId: defaults.projectId,
+			activeProfileId: parsed.activeProfileId ?? defaults.activeProfileId,
+			target: parsed.target ?? defaults.target,
+			storageVersion: 2,
+			benchmarkDataset: parsed.benchmarkDataset ?? defaults.benchmarkDataset,
+			benchmarkRunMode: parsed.benchmarkRunMode ?? defaults.benchmarkRunMode,
+			frontierCandidateIds: parsed.frontierCandidateIds ?? defaults.frontierCandidateIds,
+		};
+		const legacyProfileFile = join(legacyLab.profilesDir, `${migrated.activeProfileId}.json`);
+		const paths = await ensureTrialRoot(cwd);
+		if (existsSync(legacyProfileFile) && !existsSync(paths.currentProfileFile)) {
+			const profileRaw = await readFile(legacyProfileFile, "utf-8");
+			await writeFile(paths.currentProfileFile, profileRaw.endsWith("\n") ? profileRaw : `${profileRaw}\n`, "utf-8");
+			await writeFile(profileFile(paths, migrated.activeProfileId), profileRaw.endsWith("\n") ? profileRaw : `${profileRaw}\n`, "utf-8");
+		}
+
+		const legacyMeta = legacyMetaHarnessPaths(cwd);
+		for (const [sourceFile, targetFile] of [
+			[legacyMeta.searchSetFile, paths.searchSetFile],
+			[legacyMeta.holdOutSetFile, paths.holdOutSetFile],
+		] as const) {
+			if (!existsSync(sourceFile) || existsSync(targetFile)) continue;
+			try {
+				const splitRaw = await readFile(sourceFile, "utf-8");
+				const splitPayload = JSON.parse(splitRaw);
+				if (!splitFileLooksConsistent(splitPayload)) continue;
+				await writeFile(targetFile, `${JSON.stringify(splitPayload, null, 2)}\n`, "utf-8");
+			} catch {
+				continue;
+			}
+		}
+		if (existsSync(legacyMeta.communityDir)) {
+			const currentEntries = await readdir(paths.communityTracesDir).catch(() => []);
+			if (currentEntries.length === 0) {
+				const legacyEntries = await readdir(legacyMeta.communityDir, { withFileTypes: true }).catch(() => []);
+				for (const entry of legacyEntries) {
+					const sourceEntry = join(legacyMeta.communityDir, entry.name);
+					let copySource = sourceEntry;
+					try {
+						copySource = await realpath(sourceEntry).catch(() => sourceEntry);
+						if (!existsSync(copySource)) continue;
+						await cp(copySource, join(paths.communityTracesDir, entry.name), { recursive: true, force: true });
+					} catch {
+						continue;
+					}
+				}
+			}
+		}
+		await writeFile(paths.stateFile, `${JSON.stringify(migrated, null, 2)}\n`, "utf-8");
+		return migrated;
+	} catch {
+		return null;
+	}
 }
 
 export async function loadQuestTrialState(cwd: string, options: { ensure?: boolean } = {}): Promise<QuestTrialState> {
@@ -576,6 +693,8 @@ export async function loadQuestTrialState(cwd: string, options: { ensure?: boole
 	const paths = getQuestTrialPaths(cwd);
 	if (!existsSync(paths.stateFile)) {
 		if (options.ensure) {
+			const migrated = await migrateLegacyTrialStateIfNeeded(cwd, defaults);
+			if (migrated) return migrated;
 			await ensureTrialRoot(cwd);
 			await writeFile(paths.stateFile, `${JSON.stringify(defaults, null, 2)}\n`, "utf-8");
 		}
@@ -590,6 +709,10 @@ export async function loadQuestTrialState(cwd: string, options: { ensure?: boole
 			projectId: defaults.projectId,
 			activeProfileId: parsed.activeProfileId ?? defaults.activeProfileId,
 			target: parsed.target ?? defaults.target,
+			storageVersion: parsed.storageVersion ?? defaults.storageVersion,
+			benchmarkDataset: parsed.benchmarkDataset ?? defaults.benchmarkDataset,
+			benchmarkRunMode: parsed.benchmarkRunMode ?? defaults.benchmarkRunMode,
+			frontierCandidateIds: parsed.frontierCandidateIds ?? defaults.frontierCandidateIds,
 		};
 	} catch {
 		return defaults;
@@ -613,11 +736,14 @@ export async function loadQuestProfile(
 	const defaults = defaultQuestProfile(projectIdFor(cwd), resolvedTarget);
 	defaults.id = resolvedProfileId;
 	const paths = getQuestTrialPaths(cwd);
-	const file = profileFile(paths, resolvedProfileId);
+	const file = resolvedProfileId === state.activeProfileId ? paths.currentProfileFile : profileFile(paths, resolvedProfileId);
 	if (!existsSync(file)) {
 		if (options.ensure) {
 			await ensureTrialRoot(cwd);
 			await writeFile(file, `${JSON.stringify(defaults, null, 2)}\n`, "utf-8");
+			if (file === paths.currentProfileFile) {
+				await writeFile(profileFile(paths, defaults.id), `${JSON.stringify(defaults, null, 2)}\n`, "utf-8");
+			}
 		}
 		return defaults;
 	}
@@ -634,6 +760,7 @@ export async function saveQuestProfile(cwd: string, profile: QuestProfile): Prom
 	const normalized = normalizeQuestProfile(profile, projectIdFor(cwd), profile.target);
 	normalized.updatedAt = Date.now();
 	await writeFile(profileFile(paths, normalized.id), `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
+	await writeFile(paths.currentProfileFile, `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
 	const state = await loadQuestTrialState(cwd, { ensure: true });
 	state.activeProfileId = normalized.id;
 	state.target = normalized.target;

@@ -1,0 +1,55 @@
+{
+  "id": "terminal-bench-sample@2.0",
+  "benchmark": "terminal-bench",
+  "dataset": "terminal-bench-sample@2.0",
+  "runMode": "sample",
+  "createdAt": 1775520000000,
+  "taskCount": 10,
+  "seed": 42,
+  "source": "vendored",
+  "notes": [
+    "Vendored from Harbor registry metadata for deterministic sample benchmark preparation."
+  ],
+  "tasks": [
+    {
+      "name": "chess-best-move",
+      "path": "sample/chess-best-move"
+    },
+    {
+      "name": "sqlite-with-gcov",
+      "path": "sample/sqlite-with-gcov"
+    },
+    {
+      "name": "polyglot-c-py",
+      "path": "sample/polyglot-c-py"
+    },
+    {
+      "name": "qemu-startup",
+      "path": "sample/qemu-startup"
+    },
+    {
+      "name": "regex-log",
+      "path": "sample/regex-log"
+    },
+    {
+      "name": "fix-code-vulnerability",
+      "path": "sample/fix-code-vulnerability"
+    },
+    {
+      "name": "build-cython-ext",
+      "path": "sample/build-cython-ext"
+    },
+    {
+      "name": "qemu-alpine-ssh",
+      "path": "sample/qemu-alpine-ssh"
+    },
+    {
+      "name": "log-summary-date-ranges",
+      "path": "sample/log-summary-date-ranges"
+    },
+    {
+      "name": "configure-git-webserver",
+      "path": "sample/configure-git-webserver"
+    }
+  ]
+}

@@ -2,52 +2,62 @@
 
 ## Purpose
 
-Define how Quest ingests and uses community Pi traces.
+Define how Quest ingests raw community Pi traces into the frontier Trials runtime.
 
 ## Requirements
 
-### Requirement: Symlink to community traces
+### Requirement: Canonical community root
 
-The system SHALL reference community traces without duplication.
+The system SHALL use `.pi/quests/trials/community-traces/` as the canonical community-trace root.
 
-#### Scenario: Link community trace directories
+#### Scenario: Resolve community traces
 
-- GIVEN community traces downloaded to `.pi/quests/trials/community-traces/`
-- WHEN the system initializes meta-harness
-- THEN it creates symlinks under `.pi/quests/meta-harness/traces/community/`
-- AND it preserves original directory structure
+- GIVEN community traces downloaded under `.pi/quests/trials/community-traces/`
+- WHEN the system initializes Trials community analysis
+- THEN it reads that directory directly
+- AND it does not depend on `.pi/quests/meta-harness/` symlinks
+
+### Requirement: Session-only filtering
+
+The system SHALL count only valid Pi session files in canonical stats.
+
+#### Scenario: Filter corpus
+
+- GIVEN a mix of Pi session files, manifests, and non-Pi comparison files
+- WHEN the analyzer scans the corpus
+- THEN it parses the first record of each `.jsonl`
+- AND it counts the file only if the first record is `type: "session"`
+- AND it excludes non-session files from canonical per-source stats
 
 ### Requirement: Batch validation
 
-The system SHALL validate all community traces before use.
+The system SHALL validate the full corpus without collapsing the batch on a single bad file.
 
-#### Scenario: Validate batch
+#### Scenario: Validate corpus
 
 - GIVEN a directory of community trace files
-- WHEN the system validates the batch
-- THEN it attempts to parse each file
-- AND it logs failures with file name and error
-- AND it continues processing remaining files
+- WHEN the analyzer processes the batch
+- THEN it records parse failures with the file path
+- AND it continues processing the remaining files
 
 ### Requirement: Statistics aggregation
 
-The system SHALL aggregate statistics from community traces.
+The system SHALL aggregate statistics from community traces for proposer consumption.
 
 #### Scenario: Generate statistics
 
-- GIVEN validated community traces
+- GIVEN validated Pi session files
 - WHEN the system aggregates statistics
-- THEN it produces: model usage counts, tool usage patterns, session durations
-- AND it produces: failure tag frequency distributions
-- AND it writes statistics to JSON for proposer access
+- THEN it writes totals, per-source counts, model/provider distributions, failure tags, and usage metrics
+- AND it writes the output to `.pi/quests/trials/community-stats.json`
 
-### Requirement: No silent skipping
+### Requirement: No silent missing-data fallback
 
-The system SHALL NOT silently skip missing trace directories.
+The system SHALL fail loudly when a command requires community traces but the corpus is unavailable.
 
 #### Scenario: Missing community traces
 
-- GIVEN meta-harness traces directory does not exist
-- WHEN the system attempts to use community traces
-- THEN it fails with clear error message
+- GIVEN `.pi/quests/trials/community-traces/` does not exist
+- WHEN the system attempts to run community analysis
+- THEN it fails with a clear error message
 - AND it does not proceed with empty statistics

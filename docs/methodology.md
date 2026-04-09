@@ -5,7 +5,7 @@ Last reviewed: 2026-04-03
 Quest benchmark work is split into three layers:
 
 1. Quest-native evals
-2. Trials replay datasets
+2. Trials frontier optimization
 3. External benchmark runs
 
 ## System under test
@@ -26,23 +26,20 @@ The Quest path is:
 1. Harbor runs the installed Quest agent adapter
 2. the adapter invokes `quest-headless`
 3. Quest writes benchmark artifacts and trace bundles under `.pi/quests/`
-4. Trials turn failed runs into replay cases
+4. Trials archive benchmark scorecards, traces, and candidate summaries under `.pi/quests/trials/candidates/`
 
 Quest also ships local Harbor dry-run and substrate checks for development. Official claims should use the real Harbor sample/full datasets, not dry-run output.
 
 ## SlopCodeBench
 
-SlopCodeBench runs are checkpoint-oriented. Quest maintains two paths:
-
-- local smoke fixtures for fast adapter development
-- an official-run overlay for the upstream `slop-code run` CLI
+SlopCodeBench runs are checkpoint-oriented. Quest uses the official upstream `slop-code run` overlay for benchmark claims and frontier optimization.
 
 The Quest path is:
 
 1. a base specification is paired with one checkpoint
 2. one checkpoint maps to one bounded headless Quest run
-3. Quest records checkpoint-specific provenance on traces and replay cases
-4. Trials use those replay cases to tune prompt, budget, and context policies
+3. Quest records checkpoint-specific provenance on candidate traces and scorecards
+4. Trials use the resulting frontier artifacts to tune prompt, budget, and context policies
 
 Only the upstream-runner overlay path should back public SlopCodeBench claims.
 

@@ -14,6 +14,7 @@ from harbor.models.agent.context import AgentContext
 OUTPUT_FILE = PurePosixPath("/logs/agent/quest-headless-output.json")
 STDERR_FILE = PurePosixPath("/logs/agent/quest-headless-stderr.log")
 HOST_OUTPUT_FILE = "quest-headless-output.json"
+HOST_STDERR_FILE = "quest-headless-stderr.log"
 
 
 class QuestInstalledAgent(BaseInstalledAgent):
@@ -114,6 +115,14 @@ class QuestInstalledAgent(BaseInstalledAgent):
         await self.exec_as_agent(environment, command=command)
 
     def populate_context_post_run(self, context: AgentContext) -> None:
+        stderr_file = self.logs_dir / HOST_STDERR_FILE
+        if stderr_file.exists():
+            stderr_payload = stderr_file.read_text(errors="replace").strip()
+            if stderr_payload:
+                context.metadata = {
+                    **(context.metadata or {}),
+                    "quest_stderr_tail": stderr_payload[-4000:],
+                }
         output_file = self.logs_dir / HOST_OUTPUT_FILE
         if not output_file.exists():
             return

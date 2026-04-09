@@ -220,12 +220,12 @@ Each trace receives a composite grade: starting from 1.0, penalties are subtract
 
 ### 4.3  Evaluation Framework
 
-Trials maintains multiple evaluation datasets:
+Trials combines deterministic profile checks with benchmark-backed frontier scoring:
 
 1. **Core Regression** (12 seeded cases): Policy-based checks that enforce fundamental behaviors---e.g., "planning calls out weak validation," "workers check prerequisites," "revision preserves completed work."
-2. **Trace Replays**: Automatically generated from execution traces, one case per failure tag per trace.
-3. **Benchmark Replays**: Traces from Terminal-Bench and SlopCodeBench runs converted to replay cases.
-4. **Held-Out** (3 cases): Fixed overfitting guards---human QA preservation, weak validation honesty, and revision boundaries.
+2. **Community Trace Analysis**: Raw Pi session traces are aggregated into canonical failure-tag statistics for proposer context.
+3. **Benchmark Search Set**: Terminal-Bench or SlopCodeBench work items used to optimize the current profile.
+4. **Benchmark Held-Out Set**: A separate work-item slice used strictly as a regression gate.
 
 Each eval case specifies:
 
@@ -266,19 +266,18 @@ In both cases, prompt policies are *appended*, not replaced, preserving prior gu
 Candidate patches must pass three evaluation gates before adoption:
 
 ```
-Gate 1: Spot-Check
-  - 0-6 targeted replay cases matching candidate's failure tags
-  - If candidate score <= baseline score: REJECT
+Gate 1: Deterministic Profile Checks
+  - Validate required snippets and bounded policy values
+  - If invalid: REJECT
 
-Gate 2: Full Evaluation
-  - All cases across all datasets
-  - Candidate must score strictly higher than baseline
-  - If not: REJECT
+Gate 2: Search-Set Benchmark Score
+  - Run the explicit search split for the active benchmark family
+  - Candidate must improve the frontier objective or remain non-dominated
 
 Gate 3: Held-Out Guard
-  - 3 fixed cases testing fundamental behaviors
-  - Candidate must not regress on held-out cases
-  - If regression: REJECT (even if full eval improved)
+  - Run the explicit held-out split
+  - Candidate must not regress on held-out score
+  - If regression: REJECT
 ```
 
 This three-gate structure prevents two failure modes: (1) patches that improve targeted cases but break other behaviors (caught by Gate 2), and (2) patches that improve all measured cases but violate fundamental invariants like human QA preservation (caught by Gate 3).
@@ -614,13 +613,15 @@ Quest is open-source and available as a Pi extension package. We invite the comm
     runs/                             # Worker run records
     skills/                           # Generated reusable skills
   trials/
-    state.json                        # Trial state (active profile, experiment)
-    profiles/                         # Profile snapshots
-    datasets/                         # Evaluation datasets
-    traces/                           # Execution trace bundles
-    experiments/                      # Experiment records
-    baselines/                        # Baseline profile archives
-    reports/                          # Experiment analysis reports
+    state.json                        # Frontier state (active profile, leader, status)
+    current/profile.json              # Promoted frontier leader
+    profiles/                         # Benchmark-addressable profile snapshots
+    candidates/NNN/                   # Archived benchmark candidates
+    search-set.json                   # Explicit search split
+    hold-out-set.json                 # Explicit held-out split
+    frontier.json                     # Pareto frontier + leader
+    community-traces/                 # Raw Pi community corpus
+    community-stats.json              # Aggregated community failure statistics
 ```
 
 ## Appendix B: Default Quest Profile

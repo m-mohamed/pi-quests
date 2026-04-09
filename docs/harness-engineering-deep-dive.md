@@ -1,4 +1,4 @@
-# Harness Engineering & Meta-Harness: The Complete Guide
+# Harness Engineering & Frontier Trials: The Complete Guide
 
 *For the pi-quests project — A deep dive into the theory, research, and implementation of autonomous harness engineering.*
 
@@ -25,7 +25,7 @@
 4. [Part III: Quest's Implementation](#part-iii-quests-implementation)
    - 4.1 Architecture: Pi → Quest → Trials
    - 4.2 Harness Engineering in Quest
-   - 4.3 Meta-Harness in Quest (Trials)
+   - 4.3 Frontier Trials in Quest
    - 4.4 Model Ensemble & Routing
    - 4.5 Community Traces
 5. [Part IV: Key Primitives & Concepts](#part-iv-key-primitives--concepts)
@@ -538,15 +538,15 @@ Quest learns from other agents' traces:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                  COMMUNITY TRACES (773 Pi sessions)                │
+│                  COMMUNITY TRACES (768 valid Pi sessions)          │
 │                                                                     │
-│   badlogicgames/pi-mono                     627 sessions          │
-│   badlogicgames/pi-diff-review                7 sessions          │
-│   0xSero/pi-sessions                         96 sessions          │
-│   LarsEckart/approvaltests-java-sessions     15 sessions          │
-│   championswimmer/pi-coding-sessions         26 sessions          │
-│   cfahlgren1/agent-sessions-list (Pi)          2 sessions          │
-│   cfahlgren1/agent-sessions-list (other)       4 sessions          │
+│   badlogicgames/pi-mono                     626 sessions          │
+│   badlogicgames/pi-diff-review                6 sessions          │
+│   0xSero/pi-sessions                         95 sessions          │
+│   LarsEckart/approvaltests-java-sessions     14 sessions          │
+│   championswimmer/pi-coding-sessions         25 sessions          │
+│   cfahlgren1/agent-sessions-list (Pi)          2 sessions         │
+│   non-session / non-Pi files excluded          9 files            │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -586,7 +586,7 @@ planning → proposal_ready → running → completed
 | **Orchestrator** | Breaks down into milestones/features |
 | **Worker** | Implements features, writes code |
 | **Validator** | Reviews code, runs tests, checks quality |
-| **Trial** | Runs experiments, evaluates candidates |
+| **Trial** | Runs benchmark search/hold-out evaluations |
 | **Proposer** | Analyzes failures, proposes improvements |
 
 ### Validation Surfaces
@@ -615,24 +615,24 @@ planning → proposal_ready → running → completed
 │   ─────────                    ──────           ────────            │
 │                                                                     │
 │   HARNESS ENGINEERING                                                │
-│   ├─ Computational Guides     ✅ Implemented   Full                 │
-│   ├─ Inferential Guides       ✅ Implemented   Full                 │
-│   ├─ Computational Sensors    ✅ Implemented   Full                 │
-│   ├─ Inferential Sensors      ✅ Implemented   Full                 │
-│   ├─ Fitness Functions        ✅ Implemented   Full                 │
+│   ├─ Computational Guides     ⚠️  Sparse       Mostly empty defaults │
+│   ├─ Inferential Guides       ⚠️  Sparse       Mostly empty defaults │
+│   ├─ Computational Sensors    ⚠️  Sparse       Enabled, little filled│
+│   ├─ Inferential Sensors      ⚠️  Sparse       Disabled by default   │
+│   ├─ Fitness Functions        ⚠️  Sparse       Defined, not populated│
 │   ├─ Maintainability Harness  ✅ Implemented   Full                 │
 │   ├─ Architecture Fitness     ✅ Implemented   Full                 │
 │   └─ Behaviour Harness        ⚠️  Partial      Framework only       │
 │                                                                     │
-│   META-HARNESS                                                       │
+│   FRONTIER TRIALS                                                     │
 │   ├─ Trace Capture            ✅ Implemented   Full                 │
-│   ├─ Failure Tagging          ✅ Implemented   7 tags               │
+│   ├─ Failure Tagging          ✅ Implemented   10 tags              │
 │   ├─ Candidate Proposal       ✅ Implemented   Proposer role        │
-│   ├─ Experiment Framework     ✅ Implemented   Search/Hold-out      │
+│   ├─ Search/Hold-out Loop     ✅ Implemented   Frontier runtime     │
 │   ├─ Filesystem History       ✅ Implemented   .pi/quests/trials/   │
 │   ├─ Pareto Frontier          ✅ Implemented   Multi-objective      │
-│   ├─ Community Traces         ✅ Implemented   773 Pi sessions (6 sources) │
-│   └─ Auto-Optimization        ⚠️  Partial      Framework ready      │
+│   ├─ Community Traces         ✅ Implemented   768 valid sessions   │
+│   └─ Auto-Optimization        ✅ Implemented   Baseline + iterations│
 │                                                                     │
 │   BENCHMARKS                                                         │
 │   ├─ Terminal-Bench           ✅ Implemented   Harbor harness       │
@@ -671,9 +671,9 @@ planning → proposal_ready → running → completed
 
 | Gap | Priority | Description |
 |-----|----------|-------------|
-| **Auto-Optimization Loop** | High | Framework exists (proposer role, experiment framework) but not yet automated |
-| **Raw Trace Access for Proposer** | Medium | Traces are captured but proposer doesn't yet have full filesystem access to all prior candidates |
-| **Pareto Frontier Optimization** | Medium | Multi-objective optimization (accuracy vs context cost) not yet implemented |
+| **Harness Sensors Are Thin** | High | The frontier loop is automated, but most computational and inferential sensors are still empty defaults |
+| **Benchmark Readiness Probe** | High | Preflight does not yet prove a cheap real Harbor task before a sample run |
+| **Artifact Quality Controls** | Medium | Candidate traces exist, but richer per-task summaries and failure surfacing would improve proposer leverage |
 | **OOD Generalization Testing** | Low | No explicit out-of-distribution validation of discovered harnesses |
 | **Search Space Definition** | Medium | No explicit definition of what dimensions the proposer can search over |
 | **Interface Validation** | Low | No validation that proposed harnesses conform to expected interface |
@@ -682,27 +682,27 @@ planning → proposal_ready → running → completed
 
 | Gap | Priority | Description |
 |-----|----------|-------------|
-| **Community Trace Ingestion** | High | Can read traces but not yet integrated into proposer's decision-making |
-| **Benchmark Baseline** | Medium | Need to establish baseline scores on Terminal-Bench and SlopCodeBench |
+| **Community Trace Ingestion** | Low | Community stats are live and wired into the proposer prompt; remaining work is better exploitation |
+| **Benchmark Baseline** | High | The sample baseline still needs one uninterrupted successful run |
 | **Profile Versioning** | Low | No explicit versioning of profiles for rollback |
 | **Harness Template Library** | Low | No pre-built harness templates for common project types |
 
 ### What's Working Well
 
-1. **Clean architecture** — Pi native → Quest extension → Trials meta-harness
+1. **Clean architecture** — Pi native → Quest extension → frontier Trials
 2. **Harness Engineering foundations** — All three regulation categories implemented
-3. **Meta-Harness framework** — Trace capture, failure tagging, experiment framework
-4. **Community traces** — 773 Pi sessions from 6 sources across HuggingFace
+3. **Meta-Harness pattern** — Filesystem-visible proposer loop, held-out gating, Pareto promotion
+4. **Community traces** — 768 valid Pi sessions from 6 sources across HuggingFace
 5. **Benchmark integration** — Terminal-Bench and SlopCodeBench via headless mode
 6. **Code quality** — Typecheck passes, 20/20 tests, shared utilities, dead code removed
 
 ### What Needs Work
 
-1. **Auto-optimization loop** — The proposer exists but isn't yet automated
+1. **Harness sensors** — Most guide and sensor arrays are still empty, so the harness is under-instrumented
 2. **Behaviour harness** — AI-generated test quality problem not solved
 3. **Harness templates** — No pre-built harness bundles
-4. **Community trace integration** — Not yet feeding into proposer decisions
-5. **Benchmark baselines** — Need established scores to measure improvement against
+4. **Benchmark readiness** — Harbor preflight still needs a real cheap probe
+5. **Benchmark baselines** — Need the first uninterrupted sample baseline to measure improvement against
 
 ---
 

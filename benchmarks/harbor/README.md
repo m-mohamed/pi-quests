@@ -7,7 +7,7 @@ The integration path is:
 1. Harbor invokes `benchmarks.harbor.quest_installed_agent:QuestInstalledAgent`
 2. the installed agent runs `quest-headless`
 3. Quest writes machine-readable benchmark artifacts under `.pi/quests/<quest-id>/headless-run.json`
-4. Trials ingest the resulting traces and replay cases
+4. Trials archive the resulting scorecards, traces, and candidate summaries under `.pi/quests/trials/`
 
 Useful commands:
 
@@ -23,4 +23,4 @@ Official Harbor dataset identifiers:
 - sample/dev slice: `terminal-bench-sample@2.0`
 - full dataset: `terminal-bench@2.0`
 
-The preflight checks Harbor, Docker, `quest-headless`, and model credentials before the real sample or full run. The Harbor adapter compiles the current Quest checkout into a mounted headless bundle so the benchmark run reflects the current local package state without paying per-task npm install costs inside the task container.
+The preflight compiles the current Quest checkout into a mounted headless bundle, checks Harbor, Docker, `quest-headless`, and model credentials, and then runs a single cheap Harbor task as an end-to-end readiness probe. That keeps sample/full runs honest: benchmark readiness means the installed agent can actually start, emit Quest JSON, and produce Harbor job artifacts, not just print `--help`.

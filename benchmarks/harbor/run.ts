@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
-import { createWriteStream, existsSync, readFileSync } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -24,6 +24,7 @@ export interface HarborRunOptions {
 	dryRun?: boolean;
 	bundlePath?: string;
 	nodeRuntimePath?: string;
+	authDir?: string | null;
 	jobsDir?: string;
 	profileId?: string;
 	includeTaskNames?: string[];
@@ -67,18 +68,8 @@ export function buildHarborCommand(options: HarborRunOptions): { command: string
 	if (options.bundlePath) {
 		const mounts = [`${options.bundlePath}:/opt/quest-package:ro`];
 		if (options.nodeRuntimePath) mounts.push(`${options.nodeRuntimePath}:${BUNDLED_NODE_RUNTIME_DIR}:ro`);
-		const authFile = join(homedir(), ".pi", "agent", "auth.json");
-		if (existsSync(authFile)) {
-			try {
-				const auth = JSON.parse(readFileSync(authFile, "utf-8"));
-				const zaiKey = auth?.["zai"]?.key;
-				if (zaiKey) args.push("--ae", `ZAI_API_KEY=${zaiKey}`);
-				const codexToken = auth?.["openai-codex"]?.access;
-				if (codexToken) args.push("--ae", `OPENAI_API_KEY=${codexToken}`);
-			} catch {
-				// auth.json not readable — model credentials may fail inside the container
-			}
-		}
+		const authDir = options.authDir === undefined ? join(homedir(), ".pi", "agent") : options.authDir;
+		if (authDir && existsSync(authDir)) mounts.push(`${authDir}:/root/.pi/agent`);
 		args.push("--mounts-json", JSON.stringify(mounts));
 		args.push("--ae", "QUEST_PACKAGE_DIR=/opt/quest-package");
 		if (options.nodeRuntimePath) args.push("--ae", `QUEST_NODE_RUNTIME_DIR=${BUNDLED_NODE_RUNTIME_DIR}`);
@@ -223,12 +214,16 @@ async function ensureBundledLinuxNodeRuntime(arch: LinuxNodeArch): Promise<strin
 
 export async function materializeQuestBundle(
 	rootDir: string,
-): Promise<{ bundlePath: string; nodeRuntimePath: string; piVersion: string; cleanup(): Promise<void> }> {
+): Promise<{ bundlePath: string; nodeRuntimePath: string; authDir: string | null; piVersion: string; cleanup(): Promise<void> }> {
 	const outputDir = await mkdtemp(join(tmpdir(), "quest-harbor-pack-"));
 	const bundlePath = join(outputDir, "bundle");
 	const distPath = join(bundlePath, "dist");
+	const agentPath = join(outputDir, "pi-agent");
 	await mkdir(distPath, { recursive: true });
 	const piVersion = bundledPiVersion();
+	const hostAgentPath = join(homedir(), ".pi", "agent");
+	const authDir = existsSync(hostAgentPath) ? agentPath : null;
+	if (authDir) await cp(hostAgentPath, authDir, { recursive: true });
 	await writeFile(
 		join(bundlePath, "package.json"),
 		`${JSON.stringify({ type: "module", private: true, name: "quest-harbor-bundle" }, null, 2)}\n`,
@@ -295,6 +290,7 @@ export async function materializeQuestBundle(
 	return {
 		bundlePath,
 		nodeRuntimePath: nodeRuntimeRoot,
+		authDir,
 		piVersion,
 		async cleanup() {
 			await rm(outputDir, { recursive: true, force: true });
@@ -350,10 +346,17 @@ async function main() {
 			model,
 			bundlePath: bundle.bundlePath,
 			nodeRuntimePath: bundle.nodeRuntimePath,
+			authDir: bundle.authDir,
 		});
 		await writeInvocationSummary(
 			rootDir,
-			{ ...options, model, bundlePath: bundle.bundlePath, nodeRuntimePath: bundle.nodeRuntimePath },
+			{
+				...options,
+				model,
+				bundlePath: bundle.bundlePath,
+				nodeRuntimePath: bundle.nodeRuntimePath,
+				authDir: bundle.authDir,
+			},
 			command,
 			bundle.piVersion,
 		);

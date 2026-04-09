@@ -7,7 +7,7 @@
 3. [How Do Pi Extensions Work?](#how-do-pi-extensions-work)
 4. [What is Quest?](#what-is-quest)
 5. [Our Primitives](#our-primitives)
-6. [The Meta-Harness Optimization](#the-meta-harness-optimization)
+6. [Frontier Trials Optimization](#frontier-trials-optimization)
 7. [Harness Engineering](#harness-engineering)
 8. [What Are We Trying to Accomplish?](#what-are-we-trying-to-accomplish)
 
@@ -142,8 +142,8 @@ Quest provides:
 1. **Quest State Machine** — Planning → Proposal → Running → Completed/Blocked/Aborted
 2. **Milestones & Features** — Break work into chunks
 3. **Validation** — Assertions and readiness checks
-4. **Trials System** — Run experiments to improve the agent profile
-5. **Meta-Harness Optimization** — Iteratively improve the profile based on results
+4. **Trials System** — Optimize the agent profile against explicit benchmark splits
+5. **Frontier Optimization** — Iteratively improve the profile with held-out and Pareto controls
 
 ---
 
@@ -222,7 +222,7 @@ Why a run failed:
 
 ---
 
-## The Meta-Harness Optimization
+## Frontier Trials Optimization
 
 Based on the [Meta-Harness paper](https://arxiv.org/abs/2603.28052) from Stanford.
 
@@ -240,26 +240,32 @@ Based on the [Meta-Harness paper](https://arxiv.org/abs/2603.28052) from Stanfor
 ### Our Implementation
 
 ```
-.pi/quests/meta-harness/
-├── current/profile.json       # Active profile
-├── candidates/001/             # Each candidate gets a directory
-│   ├── profile.patch.json    # The proposed change
-│   ├── scores.json           # Search/hold-out scores
-│   └── traces/                # Saved traces
-├── search-set.json            # 7 tasks (70%)
-├── hold-out-set.json           # 3 tasks (30%)
-└── traces/community/          # 723 community traces
+.pi/quests/trials/
+├── current/profile.json        # Active frontier leader
+├── profiles/<profile-id>.json  # Benchmark-addressable profile store
+├── candidates/001/
+│   ├── profile.json
+│   ├── profile.patch.json
+│   ├── scores.json
+│   ├── hold-out.json
+│   ├── summary.json
+│   └── traces/<work-item-id>/
+├── search-set.json             # 7 search items in the sample split
+├── hold-out-set.json           # 3 held-out items in the sample split
+├── frontier.json               # Pareto frontier + leader
+├── community-traces/
+└── community-stats.json        # 768 valid Pi sessions from the current corpus
 ```
 
 ### The Loop
 
 ```
-1. Run search set with current profile → candidate 000
-2. Proposer reads all candidates + community traces
-3. Proposer proposes a patch to fix failure tags
-4. Apply patch, run search set again
-5. If search improves AND hold-out doesn't regress → archive
-6. Repeat 5 times
+1. Prepare explicit search and hold-out work-item lists
+2. Run the current profile as baseline candidate `000`
+3. Proposer reads prior candidates, frontier state, and community stats
+4. Proposer proposes a bounded profile patch
+5. Run search and hold-out, then archive the candidate
+6. Promote the deterministic leader from the Pareto frontier
 ```
 
 ### Why This Works
@@ -343,18 +349,18 @@ We implement this through:
 | Component | Status |
 |-----------|--------|
 | Pi-native trace parsing | ✅ Working (parsePiSession) |
-| Community traces | ✅ 723 sessions analyzed |
-| Meta-harness filesystem | ✅ Implemented |
+| Community traces | ✅ 768 valid sessions analyzed |
+| Frontier filesystem | ✅ Implemented |
 | Proposer agent | ✅ Can read candidates, community stats |
 | Harness policy | ✅ Computational/inferential guides |
-| Model routing | ✅ OpenCode Go / Codex models |
-| Evaluation pipeline | ⚠️ Needs benchmark credits |
+| Model routing | ✅ GLM-5.1 via Z.AI Coding Plan |
+| Evaluation pipeline | ⚠️ One live sample blocker remains (`qemu-alpine-ssh`) |
 
 ### What's Missing (Needs Credits)
 
-1. Run Terminal-Bench search set → candidate 000 baseline
-2. Run 5 iterations of propose → score → validate → archive
-3. Compute Pareto frontier
+1. Pass and archive the first uninterrupted Terminal-Bench sample baseline
+2. Fill the currently-empty harness guides and sensors with real project checks
+3. Run the first real proposer iteration on top of the archived baseline
 
 ---
 
@@ -369,8 +375,8 @@ We implement this through:
 | `src/state-core.ts` | Quest state management |
 | `src/plan-core.ts` | Plan parsing and validation |
 | `src/workers.ts` | Worker/validator subprocess execution |
-| `src/trials-core.ts` | Trials meta-harness (profiles, traces, experiments) |
-| `src/trials-runtime.ts` | Trials execution loop |
+| `src/trials-core.ts` | Trials profile defaults and proposer policy |
+| `src/frontier-trials.ts` | Frontier benchmark loop, candidate archive, Pareto promotion |
 | `src/telemetry-core.ts` | Live run snapshots |
 | `src/ui-core.ts` | Pi-native TUI widgets |
 | `src/workflows.ts` | Learned workflow extraction |

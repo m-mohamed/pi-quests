@@ -10,7 +10,7 @@ test("quest-headless keeps high thinking for non-benchmark runs by default", asy
 	assert.equal(parsed.input?.modelChoice.thinkingLevel, "high");
 });
 
-test("quest-headless uses medium thinking for benchmark runs unless explicitly overridden", async () => {
+test("quest-headless uses low thinking for sample benchmark runs unless explicitly overridden", async () => {
 	const benchmark = await parseArgs([
 		"run",
 		"--instruction",
@@ -22,7 +22,7 @@ test("quest-headless uses medium thinking for benchmark runs unless explicitly o
 		"--task-id",
 		"chess-best-move",
 	]);
-	assert.equal(benchmark.input?.modelChoice.thinkingLevel, "medium");
+	assert.equal(benchmark.input?.modelChoice.thinkingLevel, "low");
 
 	const overridden = await parseArgs([
 		"run",

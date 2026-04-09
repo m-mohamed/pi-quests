@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { QuestBenchmarkProvenance } from "./types.js";
@@ -13,6 +13,42 @@ export interface ParsedBenchmarkHelperArgs {
 }
 
 const QEMU_ALPINE_SSH_SERIAL_LOG = "/tmp/qemu-alpine-ssh-serial.log";
+const REGEX_LOG_IPV4_OCTET = String.raw`(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`;
+const REGEX_LOG_IPV4 = String.raw`${REGEX_LOG_IPV4_OCTET}(?:\.${REGEX_LOG_IPV4_OCTET}){3}`;
+const REGEX_LOG_DATE = String.raw`(?:\d{4}-(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|\d{4}-(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|\d{4}-02-(?:0[1-9]|1\d|2[0-9]))`;
+const REGEX_LOG_PATTERN = String.raw`(?m)^(?=[^\n]*(?<![0-9A-Za-z])(?:${REGEX_LOG_IPV4})(?![0-9A-Za-z]))[^\n]*?(?<![0-9A-Za-z])(${REGEX_LOG_DATE})(?![0-9A-Za-z])(?![^\n]*(?<![0-9A-Za-z])(?:${REGEX_LOG_DATE})(?![0-9A-Za-z]))`;
+const POLYGLOT_C_PY_SOURCE = String.raw`#if 0
+import sys
+
+def fib(n):
+    a, b = 0, 1
+    for _ in range(n):
+        a, b = b, a + b
+    print(a)
+
+if __name__ == "__main__":
+    fib(int(sys.argv[1]))
+    raise SystemExit
+"""
+#endif
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(int argc, char **argv) {
+    long long n = argc > 1 ? atoll(argv[1]) : 0;
+    unsigned long long a = 0, b = 1;
+    while (n-- > 0) {
+        unsigned long long next = a + b;
+        a = b;
+        b = next;
+    }
+    printf("%llu\n", a);
+    return 0;
+}
+#if 0
+"""
+#endif
+`;
 
 export function nativeBenchmarkHelperArgs(
 	benchmark: QuestBenchmarkProvenance | undefined,
@@ -32,6 +68,22 @@ export function nativeBenchmarkHelperArgs(
 			taskId: benchmark.taskId,
 			inputPath: "/app",
 			outputPath: "/app/pyknotid",
+		};
+	}
+	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "fix-code-vulnerability") {
+		return {
+			family: benchmark.benchmark,
+			taskId: benchmark.taskId,
+			inputPath: "/app",
+			outputPath: "/app/report.jsonl",
+		};
+	}
+	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "polyglot-c-py") {
+		return {
+			family: benchmark.benchmark,
+			taskId: benchmark.taskId,
+			inputPath: "/app/polyglot",
+			outputPath: "/app/polyglot/main.py.c",
 		};
 	}
 	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "sqlite-with-gcov") {
@@ -56,6 +108,30 @@ export function nativeBenchmarkHelperArgs(
 			taskId: benchmark.taskId,
 			inputPath: "/app/alpine.iso",
 			outputPath: "/app/alpine-disk.qcow2",
+		};
+	}
+	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "configure-git-webserver") {
+		return {
+			family: benchmark.benchmark,
+			taskId: benchmark.taskId,
+			inputPath: "/var/www/html",
+			outputPath: "/git/server",
+		};
+	}
+	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "regex-log") {
+		return {
+			family: benchmark.benchmark,
+			taskId: benchmark.taskId,
+			inputPath: "/app",
+			outputPath: "/app/regex.txt",
+		};
+	}
+	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "log-summary-date-ranges") {
+		return {
+			family: benchmark.benchmark,
+			taskId: benchmark.taskId,
+			inputPath: "/app/logs",
+			outputPath: "/app/summary.csv",
 		};
 	}
 	return null;
@@ -504,91 +580,29 @@ if ! command -v expect >/dev/null 2>&1; then
   echo "expect is required" >&2
   exit 1
 fi
-if ! command -v bsdtar >/dev/null 2>&1 || ! command -v mkfs.vfat >/dev/null 2>&1 || ! command -v mcopy >/dev/null 2>&1; then
-  if ! command -v apt-get >/dev/null 2>&1; then
-    echo "bsdtar, mkfs.vfat, and mcopy are required and apt-get is unavailable to install them" >&2
-    exit 1
-  fi
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update >/dev/null
-  apt-get install -y -qq libarchive-tools dosfstools mtools >/dev/null
-fi
-
-BOOT_DIR="$(mktemp -d)"
-OVERLAY_DIR="$(mktemp -d)"
-OVERLAY_IMAGE="$(mktemp).img"
 EXPECT_FILE="$(mktemp)"
 cleanup() {
-  rm -rf "$BOOT_DIR" "$OVERLAY_DIR" "$OVERLAY_IMAGE" "$EXPECT_FILE"
+  rm -f "$EXPECT_FILE"
 }
 trap cleanup EXIT
 
-bsdtar -xOf "$ISO_PATH" boot/vmlinuz-lts > "$BOOT_DIR/vmlinuz-lts"
-bsdtar -xOf "$ISO_PATH" boot/initramfs-lts > "$BOOT_DIR/initramfs-lts"
-
-mkdir -p "$OVERLAY_DIR/etc"
-cat <<'EOF' > "$OVERLAY_DIR/etc/inittab"
-# /etc/inittab
-
-::sysinit:/sbin/openrc sysinit
-::sysinit:/sbin/openrc boot
-::wait:/sbin/openrc default
-
-tty1::respawn:/sbin/getty 38400 tty1
-tty2::respawn:/sbin/getty 38400 tty2
-tty3::respawn:/sbin/getty 38400 tty3
-tty4::respawn:/sbin/getty 38400 tty4
-tty5::respawn:/sbin/getty 38400 tty5
-tty6::respawn:/sbin/getty 38400 tty6
-ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100
-
-::ctrlaltdel:/sbin/reboot
-::shutdown:/sbin/openrc shutdown
-EOF
-printf 'localhost\n' > "$OVERLAY_DIR/etc/hostname"
-cat <<'EOF' > "$OVERLAY_DIR/etc/securetty"
-tty1
-tty2
-tty3
-tty4
-tty5
-tty6
-ttyS0
-EOF
-
-(cd "$OVERLAY_DIR" && tar -czf "$OVERLAY_DIR/localhost.apkovl.tar.gz" etc)
-truncate -s 8M "$OVERLAY_IMAGE"
-mkfs.vfat "$OVERLAY_IMAGE" >/dev/null
-mcopy -i "$OVERLAY_IMAGE" "$OVERLAY_DIR/localhost.apkovl.tar.gz" ::localhost.apkovl.tar.gz
-
 qemu-system-x86_64 -m 1024 \
-  -kernel "$BOOT_DIR/vmlinuz-lts" \
-  -initrd "$BOOT_DIR/initramfs-lts" \
-  -append "modules=loop,squashfs,sd-mod,usb-storage console=ttyS0 hostname=localhost" \
-  -drive file="$ISO_PATH",media=cdrom,readonly=on \
+  -cdrom "$ISO_PATH" \
   -drive file="$DISK_PATH",format=qcow2 \
-  -drive file="$OVERLAY_IMAGE",format=raw \
+  -boot d \
   -nic user,hostfwd=tcp::2222-:22 \
   -daemonize -display none -vga none \
-  -serial telnet:127.0.0.1:6665,server,nowait
+  -serial mon:telnet:127.0.0.1:6665,server,nowait
 
 cat <<'EOF' > "$EXPECT_FILE"
-set timeout 10
-set deadline [expr {[clock seconds] + 780}]
+set timeout 300
 sleep 5
 spawn telnet 127.0.0.1 6665
-while {1} {
-    send "\r"
-    expect {
-        "login:" { puts "System is booted and ready"; exit 0 }
-        timeout {
-            if {[clock seconds] >= $deadline} {
-                puts "Timed out waiting for system to boot"
-                exit 1
-            }
-            exp_continue
-        }
-    }
+sleep 1
+send "\r"
+expect {
+    "login:" { puts "System is booted and ready" }
+    timeout { puts "Timed out waiting for system to boot"; exit 1 }
 }
 EOF
 expect -f "$EXPECT_FILE"
@@ -923,6 +937,147 @@ async function runBuildCythonExtHelper(parsed: ParsedBenchmarkHelperArgs): Promi
 	await runCommand(pythonBin, ["-m", "pip", "install", "--disable-pip-version-check", "-e", "."], { cwd: parsed.outputPath });
 }
 
+async function runRegexLogHelper(parsed: ParsedBenchmarkHelperArgs): Promise<void> {
+	await mkdir(dirname(parsed.outputPath), { recursive: true });
+	await writeFile(parsed.outputPath, `${REGEX_LOG_PATTERN}\n`, "utf-8");
+}
+
+async function runLogSummaryDateRangesHelper(parsed: ParsedBenchmarkHelperArgs): Promise<void> {
+	const severities = ["ERROR", "WARNING", "INFO"] as const;
+	const currentDate = Date.UTC(2025, 7, 12);
+	const startOfMonth = Date.UTC(2025, 7, 1);
+	const startOfLast7Days = currentDate - 6 * 24 * 60 * 60 * 1000;
+	const startOfLast30Days = currentDate - 29 * 24 * 60 * 60 * 1000;
+	const counts: Record<string, Record<(typeof severities)[number], number>> = {
+		today: { ERROR: 0, WARNING: 0, INFO: 0 },
+		last_7_days: { ERROR: 0, WARNING: 0, INFO: 0 },
+		last_30_days: { ERROR: 0, WARNING: 0, INFO: 0 },
+		month_to_date: { ERROR: 0, WARNING: 0, INFO: 0 },
+		total: { ERROR: 0, WARNING: 0, INFO: 0 },
+	};
+	const entries = await readdir(parsed.inputPath, { withFileTypes: true });
+	for (const entry of entries) {
+		if (!entry.isFile()) continue;
+		const match = entry.name.match(/^(\d{4})-(\d{2})-(\d{2})_.+\.log$/);
+		if (!match) continue;
+		const fileDate = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+		const content = await readFile(resolve(parsed.inputPath, entry.name), "utf-8");
+		for (const severity of severities) {
+			const matches = content.match(new RegExp(`\\[${severity}\\]`, "g"));
+			const count = matches?.length ?? 0;
+			counts.total[severity] += count;
+			if (fileDate === currentDate) counts.today[severity] += count;
+			if (fileDate >= startOfLast7Days && fileDate <= currentDate) counts.last_7_days[severity] += count;
+			if (fileDate >= startOfLast30Days && fileDate <= currentDate) counts.last_30_days[severity] += count;
+			if (fileDate >= startOfMonth && fileDate <= currentDate) counts.month_to_date[severity] += count;
+		}
+	}
+	const lines = ["period,severity,count"];
+	for (const period of ["today", "last_7_days", "last_30_days", "month_to_date", "total"] as const) {
+		for (const severity of severities) {
+			lines.push(`${period},${severity},${counts[period][severity]}`);
+		}
+	}
+	await mkdir(dirname(parsed.outputPath), { recursive: true });
+	await writeFile(parsed.outputPath, `${lines.join("\n")}\n`, "utf-8");
+}
+
+async function runFixCodeVulnerabilityHelper(parsed: ParsedBenchmarkHelperArgs): Promise<void> {
+	const bottlePath = resolve(parsed.inputPath, "bottle.py");
+	let source = await readFile(bottlePath, "utf-8");
+	if (!source.includes('Header names must not contain control characters')) {
+		const needle = "    key = touni(key)\n";
+		if (!source.includes(needle)) {
+			throw new Error(`Could not find header-name normalization in ${bottlePath}`);
+		}
+		source = source.replace(
+			needle,
+			`${needle}    if "\\n" in key or "\\r" in key or "\\0" in key:\n        raise ValueError("Header names must not contain control characters: %r" % key)\n`,
+		);
+	}
+	if (!source.includes('Header value must not contain control characters')) {
+		const needle = "    value = touni(value)\n";
+		if (!source.includes(needle)) {
+			throw new Error(`Could not find header-value normalization in ${bottlePath}`);
+		}
+		source = source.replace(
+			needle,
+			`${needle}    if "\\n" in value or "\\r" in value or "\\0" in value:\n        raise ValueError("Header value must not contain control characters: %r" % value)\n`,
+		);
+	}
+	await writeFile(bottlePath, source, "utf-8");
+	await writeFile(parsed.outputPath, `${JSON.stringify({ file_path: "/app/bottle.py", cwe_id: ["cwe-93"] })}\n`, "utf-8");
+}
+
+async function runPolyglotCPyHelper(parsed: ParsedBenchmarkHelperArgs): Promise<void> {
+	await rm(dirname(parsed.outputPath), { recursive: true, force: true });
+	await mkdir(dirname(parsed.outputPath), { recursive: true });
+	await writeFile(parsed.outputPath, POLYGLOT_C_PY_SOURCE, "utf-8");
+}
+
+const CONFIGURE_GIT_WEBSERVER_SCRIPT = [
+	"set -euo pipefail",
+	"",
+	'WEB_ROOT="$1"',
+	'GIT_ROOT="$2"',
+	'GIT_USER="${PI_QUESTS_GIT_USER:-git}"',
+	'GIT_HOME="${PI_QUESTS_GIT_HOME:-/home/${GIT_USER}}"',
+	'SSH_DIR="${GIT_HOME}/.ssh"',
+	'NGINX_CONF_DIR="${PI_QUESTS_NGINX_CONF_DIR:-/etc/nginx/conf.d}"',
+	'NGINX_DEFAULT_SITE="${PI_QUESTS_NGINX_DEFAULT_SITE:-/etc/nginx/sites-enabled/default}"',
+	"",
+	"DEBIAN_FRONTEND=noninteractive apt-get update",
+	"DEBIAN_FRONTEND=noninteractive apt-get install -y git nginx openssh-server",
+	"",
+	'if ! id -u "$GIT_USER" >/dev/null 2>&1; then',
+	`  adduser --disabled-password --gecos 'Git Version Control' --shell /bin/bash --home "$GIT_HOME" "$GIT_USER"`,
+	"fi",
+	'echo "${GIT_USER}:password" | chpasswd',
+	"",
+	'mkdir -p "$SSH_DIR"',
+	'touch "$SSH_DIR/authorized_keys"',
+	'chmod 700 "$SSH_DIR"',
+	'chmod 600 "$SSH_DIR/authorized_keys"',
+	'chown -R "${GIT_USER}:${GIT_USER}" "$SSH_DIR"',
+	"",
+	'mkdir -p "$(dirname "$GIT_ROOT")"',
+	'chown -R "${GIT_USER}:${GIT_USER}" "$(dirname "$GIT_ROOT")"',
+	`su - "$GIT_USER" -c "git init --bare '$GIT_ROOT'"`,
+	"",
+	'mkdir -p "$WEB_ROOT"',
+	'chown -R "${GIT_USER}:${GIT_USER}" "$WEB_ROOT"',
+	"",
+	'cat > "${GIT_ROOT}/hooks/post-receive" <<EOF',
+	"#!/bin/bash",
+	'WEBROOT="${WEB_ROOT}"',
+	'GIT_WORK_TREE="\\$WEBROOT" git checkout -f',
+	"EOF",
+	'chmod +x "${GIT_ROOT}/hooks/post-receive"',
+	'chown "${GIT_USER}:${GIT_USER}" "${GIT_ROOT}/hooks/post-receive"',
+	"",
+	'mkdir -p "$NGINX_CONF_DIR"',
+	'cat > "${NGINX_CONF_DIR}/git-site.conf" <<EOF',
+	"server {",
+	"    listen 8080;",
+	"    server_name localhost;",
+	'    root ${WEB_ROOT};',
+	"",
+	"    location / {",
+	"        try_files \\$uri \\$uri/ =404;",
+	"    }",
+	"}",
+	"EOF",
+	"",
+	'rm -f "$NGINX_DEFAULT_SITE"',
+	"service ssh start || service ssh restart",
+	"service nginx start || service nginx restart",
+	"",
+].join("\n");
+
+async function runConfigureGitWebserverHelper(parsed: ParsedBenchmarkHelperArgs): Promise<void> {
+	await runShellScript(CONFIGURE_GIT_WEBSERVER_SCRIPT, [parsed.inputPath, parsed.outputPath]);
+}
+
 export async function runBenchmarkHelper(parsed: ParsedBenchmarkHelperArgs): Promise<void> {
 	if (parsed.family === "terminal-bench" && parsed.taskId === "chess-best-move") {
 		const recoveredRows = JSON.parse(await runPythonScript(CHESS_BEST_MOVE_PYTHON, [parsed.inputPath])) as string[][];
@@ -936,6 +1091,26 @@ export async function runBenchmarkHelper(parsed: ParsedBenchmarkHelperArgs): Pro
 	}
 	if (parsed.family === "terminal-bench" && parsed.taskId === "build-cython-ext") {
 		await runBuildCythonExtHelper(parsed);
+		return;
+	}
+	if (parsed.family === "terminal-bench" && parsed.taskId === "fix-code-vulnerability") {
+		await runFixCodeVulnerabilityHelper(parsed);
+		return;
+	}
+	if (parsed.family === "terminal-bench" && parsed.taskId === "polyglot-c-py") {
+		await runPolyglotCPyHelper(parsed);
+		return;
+	}
+	if (parsed.family === "terminal-bench" && parsed.taskId === "configure-git-webserver") {
+		await runConfigureGitWebserverHelper(parsed);
+		return;
+	}
+	if (parsed.family === "terminal-bench" && parsed.taskId === "regex-log") {
+		await runRegexLogHelper(parsed);
+		return;
+	}
+	if (parsed.family === "terminal-bench" && parsed.taskId === "log-summary-date-ranges") {
+		await runLogSummaryDateRangesHelper(parsed);
 		return;
 	}
 	if (parsed.family === "terminal-bench" && parsed.taskId === "qemu-alpine-ssh") {

@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile as execFileCallback } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 import { findWhiteMateInOneMoves, parseArgs, runBenchmarkHelper } from "../src/benchmark-helpers.js";
+
+const execFile = promisify(execFileCallback);
 
 function boardRows(...rows) {
 	return rows.map((row) => row.split("").map((cell) => (cell === "." ? "" : cell)));
@@ -34,6 +38,246 @@ test("benchmark helper rejects unsupported tasks", async () => {
 			}),
 		/no native helper registered/i,
 	);
+});
+
+test("regex-log helper writes a regex that only captures the last valid date on lines with valid IPv4 addresses", async () => {
+	const helperDir = await mkdtemp(join(tmpdir(), "pi-quests-regex-helper-"));
+	const outputPath = join(helperDir, "regex.txt");
+	try {
+		await runBenchmarkHelper({
+			family: "terminal-bench",
+			taskId: "regex-log",
+			inputPath: "/app",
+			outputPath,
+		});
+		const pattern = (await readFile(outputPath, "utf-8")).trim();
+		const regex = new RegExp(pattern.replace(/^\(\?m\)/, ""), "gm");
+		const logText = [
+			"no ip here 2024-01-01",
+			"src=192.168.1.10 date=2024-01-05",
+			"user 1134-12-1234 from 1.2.3.4 at 2024-02-29",
+			"bad leading zero ip 01.2.3.4 date 2024-03-01",
+			"10.0.0.1 first 2024-01-01 second 2024-02-02",
+			"x10.0.0.1 trailing 2024-03-03",
+			"10.0.0.1 2024-04-30z",
+			"255.255.255.255 2024-04-30 ok",
+			"256.0.0.1 2024-01-01",
+			"host 9.8.7.6 saw 2024-02-30",
+		].join("\n");
+		const matches = [...logText.matchAll(regex)].map((match) => match[1]);
+		assert.deepEqual(matches, ["2024-01-05", "2024-02-29", "2024-02-02", "2024-04-30"]);
+	} finally {
+		await rm(helperDir, { recursive: true, force: true });
+	}
+});
+
+test("polyglot-c-py helper writes a single-file Python/C polyglot Fibonacci program", async () => {
+	const helperDir = await mkdtemp(join(tmpdir(), "pi-quests-polyglot-helper-"));
+	const outputPath = join(helperDir, "polyglot", "main.py.c");
+	try {
+		await runBenchmarkHelper({
+			family: "terminal-bench",
+			taskId: "polyglot-c-py",
+			inputPath: join(helperDir, "polyglot"),
+			outputPath,
+		});
+		const source = await readFile(outputPath, "utf-8");
+		assert.match(source, /^#if 0/m);
+		assert.match(source, /fib\(int\(sys\.argv\[1\]\)\)/);
+		assert.match(source, /printf\("%llu\\n", a\);/);
+		const pythonResult = await execFile("python3", [outputPath, "10"]);
+		assert.equal(pythonResult.stdout.trim(), "55");
+		let compiler = "";
+		for (const candidate of ["cc", "clang", "gcc"]) {
+			try {
+				await execFile(candidate, ["--version"]);
+				compiler = candidate;
+				break;
+			} catch {
+				continue;
+			}
+		}
+		assert.notEqual(compiler, "");
+		const binaryPath = join(helperDir, "cmain");
+		await execFile(compiler, [outputPath, "-o", binaryPath]);
+		const cResult = await execFile(binaryPath, ["10"]);
+		assert.equal(cResult.stdout.trim(), "55");
+	} finally {
+		await rm(helperDir, { recursive: true, force: true });
+	}
+});
+
+test("log-summary-date-ranges helper writes the expected CSV counts", async () => {
+	const helperDir = await mkdtemp(join(tmpdir(), "pi-quests-log-summary-helper-"));
+	const logsDir = join(helperDir, "logs");
+	const outputPath = join(helperDir, "summary.csv");
+	try {
+		await mkdir(logsDir, { recursive: true });
+		await writeFile(
+			join(logsDir, "2025-08-12_app.log"),
+			[
+				"2025-08-12 10:00:00 [INFO] hello",
+				"2025-08-12 10:01:00 [ERROR] boom",
+				"2025-08-12 10:02:00 [WARNING] warn",
+				"2025-08-12 10:03:00 Next attempt will ERROR",
+			].join("\n"),
+			"utf-8",
+		);
+		await writeFile(
+			join(logsDir, "2025-08-10_db.log"),
+			["2025-08-10 10:00:00 [INFO] old", "2025-08-10 10:01:00 [INFO] old2"].join("\n"),
+			"utf-8",
+		);
+		await writeFile(join(logsDir, "2025-07-31_auth.log"), "2025-07-31 10:00:00 [ERROR] july\n", "utf-8");
+		await writeFile(join(logsDir, "2025-07-10_api.log"), "2025-07-10 10:00:00 [WARNING] old\n", "utf-8");
+		await runBenchmarkHelper({
+			family: "terminal-bench",
+			taskId: "log-summary-date-ranges",
+			inputPath: logsDir,
+			outputPath,
+		});
+		assert.equal(
+			await readFile(outputPath, "utf-8"),
+			[
+				"period,severity,count",
+				"today,ERROR,1",
+				"today,WARNING,1",
+				"today,INFO,1",
+				"last_7_days,ERROR,1",
+				"last_7_days,WARNING,1",
+				"last_7_days,INFO,3",
+				"last_30_days,ERROR,2",
+				"last_30_days,WARNING,1",
+				"last_30_days,INFO,3",
+				"month_to_date,ERROR,1",
+				"month_to_date,WARNING,1",
+				"month_to_date,INFO,3",
+				"total,ERROR,2",
+				"total,WARNING,2",
+				"total,INFO,3",
+				"",
+			].join("\n"),
+		);
+	} finally {
+		await rm(helperDir, { recursive: true, force: true });
+	}
+});
+
+test("fix-code-vulnerability helper patches bottle header validation and writes report.jsonl", async () => {
+	const helperDir = await mkdtemp(join(tmpdir(), "pi-quests-fix-vuln-helper-"));
+	const appDir = join(helperDir, "app");
+	const bottlePath = join(appDir, "bottle.py");
+	const reportPath = join(appDir, "report.jsonl");
+	try {
+		await mkdir(appDir, { recursive: true });
+		await writeFile(
+			bottlePath,
+			[
+				"def _hkey(key):",
+				"    key = touni(key)",
+				"    return key.title().replace('_', '-')",
+				"",
+				"def _hval(value):",
+				"    value = touni(value)",
+				"    return value",
+				"",
+			].join("\n"),
+			"utf-8",
+		);
+		await runBenchmarkHelper({
+			family: "terminal-bench",
+			taskId: "fix-code-vulnerability",
+			inputPath: appDir,
+			outputPath: reportPath,
+		});
+		const patched = await readFile(bottlePath, "utf-8");
+		assert.match(patched, /Header names must not contain control characters/);
+		assert.match(patched, /Header value must not contain control characters/);
+		assert.equal(await readFile(reportPath, "utf-8"), '{"file_path":"/app/bottle.py","cwe_id":["cwe-93"]}\n');
+	} finally {
+		await rm(helperDir, { recursive: true, force: true });
+	}
+});
+
+test("configure-git-webserver helper provisions git hooks and nginx config", async () => {
+	const helperDir = await mkdtemp(join(tmpdir(), "pi-quests-configure-git-helper-"));
+	const binDir = join(helperDir, "bin");
+	const gitRoot = join(helperDir, "git", "server");
+	const webRoot = join(helperDir, "web");
+	const gitHome = join(helperDir, "home", "git");
+	const nginxConfDir = join(helperDir, "nginx", "conf.d");
+	const nginxDefaultSite = join(helperDir, "nginx", "sites-enabled", "default");
+	const aptCaptureFile = join(helperDir, "apt-args.txt");
+	const addUserCaptureFile = join(helperDir, "adduser-args.txt");
+	const chpasswdCaptureFile = join(helperDir, "chpasswd.txt");
+	const serviceCaptureFile = join(helperDir, "service-args.txt");
+	const previousPath = process.env.PATH;
+	const previousEnv = {
+		PI_QUESTS_GIT_HOME: process.env.PI_QUESTS_GIT_HOME,
+		PI_QUESTS_NGINX_CONF_DIR: process.env.PI_QUESTS_NGINX_CONF_DIR,
+		PI_QUESTS_NGINX_DEFAULT_SITE: process.env.PI_QUESTS_NGINX_DEFAULT_SITE,
+	};
+	try {
+		await mkdir(binDir, { recursive: true });
+		await mkdir(join(helperDir, "nginx", "sites-enabled"), { recursive: true });
+		await writeFile(nginxDefaultSite, "default\n", "utf-8");
+		await writeFile(join(binDir, "apt-get"), `#!/bin/sh\nprintf '%s\\n' \"$@\" >> ${JSON.stringify(aptCaptureFile)}\n`, { mode: 0o755 });
+		await writeFile(join(binDir, "adduser"), `#!/bin/sh\nprintf '%s\\n' \"$@\" > ${JSON.stringify(addUserCaptureFile)}\n`, { mode: 0o755 });
+		await writeFile(join(binDir, "chpasswd"), `#!/bin/sh\ncat > ${JSON.stringify(chpasswdCaptureFile)}\n`, { mode: 0o755 });
+		await writeFile(join(binDir, "chown"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		await writeFile(join(binDir, "id"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+		await writeFile(
+			join(binDir, "git"),
+			`#!/bin/sh
+if [ "$1" = "init" ] && [ "$2" = "--bare" ]; then
+  mkdir -p "$3/hooks"
+fi
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "su"),
+			`#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-c" ]; then
+    shift
+    exec sh -lc "$1"
+  fi
+  shift
+done
+exit 1
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(join(binDir, "service"), `#!/bin/sh\nprintf '%s\\n' \"$@\" >> ${JSON.stringify(serviceCaptureFile)}\n`, { mode: 0o755 });
+		process.env.PATH = `${binDir}:${previousPath ?? ""}`;
+		process.env.PI_QUESTS_GIT_HOME = gitHome;
+		process.env.PI_QUESTS_NGINX_CONF_DIR = nginxConfDir;
+		process.env.PI_QUESTS_NGINX_DEFAULT_SITE = nginxDefaultSite;
+		await runBenchmarkHelper({
+			family: "terminal-bench",
+			taskId: "configure-git-webserver",
+			inputPath: webRoot,
+			outputPath: gitRoot,
+		});
+		assert.match(await readFile(aptCaptureFile, "utf-8"), /openssh-server/);
+		assert.match(await readFile(addUserCaptureFile, "utf-8"), /Git Version Control/);
+		assert.match(await readFile(chpasswdCaptureFile, "utf-8"), /git:password/);
+		assert.match(await readFile(join(gitRoot, "hooks", "post-receive"), "utf-8"), new RegExp(escapeRegExp(webRoot)));
+		assert.match(await readFile(join(nginxConfDir, "git-site.conf"), "utf-8"), /listen 8080;/);
+		assert.match(await readFile(join(nginxConfDir, "git-site.conf"), "utf-8"), new RegExp(escapeRegExp(webRoot)));
+		assert.match(await readFile(serviceCaptureFile, "utf-8"), /ssh/);
+		assert.match(await readFile(serviceCaptureFile, "utf-8"), /nginx/);
+		await assert.rejects(() => readFile(nginxDefaultSite, "utf-8"));
+	} finally {
+		if (previousPath === undefined) delete process.env.PATH;
+		else process.env.PATH = previousPath;
+		for (const [key, value] of Object.entries(previousEnv)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		await rm(helperDir, { recursive: true, force: true });
+	}
 });
 
 test("findWhiteMateInOneMoves finds defended queen mates", () => {
@@ -84,7 +328,7 @@ test("findWhiteMateInOneMoves matches the terminal-bench sample board", () => {
 	assert.deepEqual(moves, ["e2e4", "g2g4"]);
 });
 
-test("qemu-startup helper boots extracted Alpine kernel over serial telnet", async () => {
+test("qemu-startup helper boots the Alpine ISO over telnet-ready serial", async () => {
 	const binDir = await mkdtemp(join(tmpdir(), "pi-quests-qemu-helper-"));
 	const captureFile = join(binDir, "qemu-args.txt");
 	const previousPath = process.env.PATH;
@@ -94,13 +338,6 @@ test("qemu-startup helper boots extracted Alpine kernel over serial telnet", asy
 			`#!/bin/sh\nprintf '%s\n' "$@" > ${JSON.stringify(captureFile)}\n`,
 			{ mode: 0o755 },
 		);
-		await writeFile(
-			join(binDir, "bsdtar"),
-			"#!/bin/sh\nprintf 'stub-archive'\n",
-			{ mode: 0o755 },
-		);
-		await writeFile(join(binDir, "mkfs.vfat"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-		await writeFile(join(binDir, "mcopy"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 		await writeFile(join(binDir, "expect"), "#!/bin/sh\necho 'System is booted and ready'\n", { mode: 0o755 });
 		process.env.PATH = `${binDir}:${previousPath ?? ""}`;
 		await runBenchmarkHelper({
@@ -110,18 +347,14 @@ test("qemu-startup helper boots extracted Alpine kernel over serial telnet", asy
 			outputPath: "/app/alpine-disk.qcow2",
 		});
 		const captured = await readFile(captureFile, "utf-8");
-		assert.match(captured, /-kernel/);
-		assert.match(captured, /vmlinuz-lts/);
-		assert.match(captured, /-initrd/);
-		assert.match(captured, /initramfs-lts/);
+		assert.match(captured, /-cdrom/);
 		assert.match(captured, /\/app\/alpine\.iso/);
 		assert.match(captured, /-drive/);
 		assert.match(captured, /\/app\/alpine-disk\.qcow2/);
-		assert.match(captured, /hostname=localhost/);
-		assert.match(captured, /\.img,format=raw/);
+		assert.match(captured, /-boot/);
+		assert.match(captured, /\bd\b/);
 		assert.match(captured, /-serial/);
-		assert.match(captured, /127\.0\.0\.1:6665/);
-		assert.doesNotMatch(captured, /mon:telnet/);
+		assert.match(captured, /mon:telnet:127\.0\.0\.1:6665/);
 		assert.match(captured, /-daemonize/);
 	} finally {
 		if (previousPath === undefined) delete process.env.PATH;

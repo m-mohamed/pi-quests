@@ -19,7 +19,7 @@ function usage(): string {
 Options:
   --cwd <path>                     Working directory (default: current directory)
   --model <provider/model>         Model to use (default: zai/glm-5.1)
-  --thinking <level>               Thinking level (default: high, or medium for --benchmark)
+  --thinking <level>               Thinking level (default: high, or low for sample/smoke benchmarks)
   --profile <id>                   Trials profile id
   --timeout-ms <ms>                Soft timeout budget in milliseconds
   --dry-run                        Stop after proposal generation
@@ -137,7 +137,10 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 		input: {
 			cwd,
 			instruction: instruction.trim(),
-			modelChoice: parseModelChoice(modelSpec, thinkingLevel ?? (benchmarkName ? "medium" : undefined)),
+			modelChoice: parseModelChoice(
+				modelSpec,
+				thinkingLevel ?? (benchmarkName ? (runMode === "full" ? "medium" : "low") : undefined),
+			),
 			profileId,
 			timeoutMs,
 			dryRun,

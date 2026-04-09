@@ -9,8 +9,14 @@ const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ACTIVE_FILES = [
 	"package.json",
 	"README.md",
+	"docs/benchmark-card.md",
+	"docs/methodology.md",
 	"docs/reproducibility.md",
 	"docs/baseline-results.md",
+	"docs/arxiv-paper.md",
+	"docs/tutorial.md",
+	"docs/harness-engineering-deep-dive.md",
+	"benchmarks/harbor/README.md",
 	"benchmarks/slopcodebench/README.md",
 ];
 const BANNED_REFERENCES = [

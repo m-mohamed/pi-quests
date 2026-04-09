@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { buildHarborCommand } from "../benchmarks/harbor/run.ts";
+import { inspectHarborSmokeJobs } from "../benchmarks/harbor/preflight.ts";
 import { buildOfficialSlopCodeBenchCommand, resolveSlopCodeBenchRepo } from "../benchmarks/slopcodebench/official-run.ts";
 
 const DEFAULT_MODEL = {
@@ -19,6 +20,7 @@ test("buildHarborCommand wires the Quest installed-agent adapter", () => {
 		model: "openai-codex/gpt-5.4",
 		bundlePath: "/tmp",
 		nodeRuntimePath: "/tmp/node-runtimes",
+		authDir: null,
 		profileId: "repo-project-candidate-001",
 		includeTaskNames: ["sample/chess-best-move", "sample/regex-log"],
 	});
@@ -46,6 +48,34 @@ test("buildHarborCommand wires the Quest installed-agent adapter", () => {
 	assert.ok(command.args.includes("sample/regex-log"));
 	assert.equal(command.env.QUEST_HARBOR_DATASET, "terminal-bench-sample@2.0");
 	assert.equal(command.env.QUEST_HARBOR_RUN_MODE, "sample");
+});
+
+test("buildHarborCommand mounts the Pi auth directory instead of injecting provider tokens", async () => {
+	const authDir = await mkdtemp(join(tmpdir(), "pi-quests-auth-"));
+	try {
+		const command = buildHarborCommand({
+			dataset: "terminal-bench-sample@2.0",
+			runMode: "smoke",
+			model: "zai/glm-5.1",
+			bundlePath: "/tmp/bundle",
+			nodeRuntimePath: "/tmp/node-runtimes",
+			authDir,
+		});
+		const mountsIndex = command.args.indexOf("--mounts-json");
+		assert.notEqual(mountsIndex, -1);
+		const mounts = JSON.parse(command.args[mountsIndex + 1]);
+		assert.deepEqual(mounts, [
+			"/tmp/bundle:/opt/quest-package:ro",
+			"/tmp/node-runtimes:/opt/quest-node-runtimes:ro",
+			`${authDir}:/root/.pi/agent`,
+		]);
+		assert.equal(command.args.includes("ZAI_API_KEY="), false);
+		assert.equal(command.args.includes("OPENAI_API_KEY="), false);
+		assert.equal(command.args.some((value) => value.startsWith("ZAI_API_KEY=")), false);
+		assert.equal(command.args.some((value) => value.startsWith("OPENAI_API_KEY=")), false);
+	} finally {
+		await rm(authDir, { recursive: true, force: true });
+	}
 });
 
 test("buildOfficialSlopCodeBenchCommand supports repeated problems and stable output roots", () => {
@@ -81,5 +111,35 @@ test("resolveSlopCodeBenchRepo prefers explicit repo over environment fallback",
 		else process.env.SLOPCODEBENCH_REPO = previous;
 		await rm(envRepo, { recursive: true, force: true });
 		await rm(explicitRepo, { recursive: true, force: true });
+	}
+});
+
+test("inspectHarborSmokeJobs validates a completed smoke run with Quest JSON output", async () => {
+	const jobsDir = await mkdtemp(join(tmpdir(), "pi-quests-harbor-preflight-"));
+	const runDir = join(jobsDir, "2026-04-08__10-00-00");
+	const trialDir = join(runDir, "regex-log__abc123", "agent");
+	try {
+		await mkdir(trialDir, { recursive: true });
+		await writeFile(
+			join(runDir, "result.json"),
+			JSON.stringify({
+				n_total_trials: 1,
+				stats: { n_errors: 0 },
+			}),
+		);
+		await writeFile(
+			join(trialDir, "quest-headless-output.json"),
+			JSON.stringify({
+				status: "ok",
+				data: {
+					status: "completed",
+				},
+			}),
+		);
+		const result = await inspectHarborSmokeJobs(jobsDir, "sample/regex-log");
+		assert.equal(result.ok, true);
+		assert.match(result.detail, /sample\/regex-log/);
+	} finally {
+		await rm(jobsDir, { recursive: true, force: true });
 	}
 });

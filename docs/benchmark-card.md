@@ -22,8 +22,8 @@ Last reviewed: 2026-04-03
 
 - Public site: [scbench.ai](https://www.scbench.ai/)
 - Measured axis: iterative specification refinement and code-quality degradation across checkpoints
-- Local adapter mode: Quest-owned checkpoint runner with benchmark provenance
 - Official adapter mode: upstream `slop-code run` overlay with Quest agent registration
+- Frontier mode: the same candidate archive, hold-out gate, and Pareto promotion flow used for Terminal-Bench
 
 ## What Quest adds on top of Pi
 
@@ -32,7 +32,8 @@ Last reviewed: 2026-04-03
 - serial-by-default feature workers
 - validator-driven blocking behavior
 - explicit human QA handoff
-- replayable traces for Trials optimization
+- filesystem-visible candidate artifacts for Trials optimization
+- Pi-native community trace ingestion for proposer guidance
 
 ## Out of scope
 

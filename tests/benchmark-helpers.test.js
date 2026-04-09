@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -131,57 +130,13 @@ test("qemu-startup helper boots extracted Alpine kernel over serial telnet", asy
 	}
 });
 
-test("qemu-alpine-ssh helper boots Alpine and provisions SSH via overlay", async () => {
+test("qemu-alpine-ssh helper provisions SSH from the overlay bootstrap script", async () => {
 	const binDir = await mkdtemp(join(tmpdir(), "pi-quests-qemu-ssh-helper-"));
 	const captureFile = join(binDir, "qemu-args.txt");
 	const overlayCaptureDir = join(binDir, "overlay");
 	const sshpassCaptureFile = join(binDir, "sshpass-args.txt");
-	const serialCommands = [];
 	const previousPath = process.env.PATH;
-	const previousSerialPort = process.env.PI_QUESTS_QEMU_SERIAL_PORT;
-	let serialPort = "0";
-	const serialServer = createServer((socket) => {
-		let buffer = "";
-		let loggedIn = false;
-		socket.setEncoding("utf8");
-		socket.write("localhost login: ");
-		socket.on("data", (chunk) => {
-			buffer += String(chunk).replace(/\r/g, "\n");
-			while (buffer.includes("\n")) {
-				const newlineIndex = buffer.indexOf("\n");
-				const line = buffer.slice(0, newlineIndex).trim();
-				buffer = buffer.slice(newlineIndex + 1);
-				if (!loggedIn) {
-					if (line === "root") {
-						loggedIn = true;
-						socket.write("localhost:~# ");
-					} else if (!line) {
-						socket.write("localhost login: ");
-					}
-					continue;
-				}
-				if (!line) {
-					socket.write("localhost:~# ");
-					continue;
-				}
-				serialCommands.push(line);
-				if (line === "uname -r") {
-					socket.write("6.6.4-1-lts\nlocalhost:~# ");
-					continue;
-				}
-				socket.write("localhost:~# ");
-			}
-		});
-	});
 	try {
-		await new Promise((resolvePromise, reject) => {
-			serialServer.once("error", reject);
-			serialServer.listen(0, "127.0.0.1", resolvePromise);
-		});
-		const address = serialServer.address();
-		assert.ok(address && typeof address === "object");
-		serialPort = String(address.port);
-		process.env.PI_QUESTS_QEMU_SERIAL_PORT = serialPort;
 		await writeFile(
 			join(binDir, "qemu-system-x86_64"),
 			`#!/bin/sh\nprintf '%s\n' "$@" > ${JSON.stringify(captureFile)}\n`,
@@ -200,6 +155,7 @@ test("qemu-alpine-ssh helper boots Alpine and provisions SSH via overlay", async
 rm -rf ${JSON.stringify(overlayCaptureDir)}
 mkdir -p ${JSON.stringify(overlayCaptureDir)}
 cp -R "$PWD/etc" ${JSON.stringify(overlayCaptureDir)}/etc
+cp -R "$PWD/root" ${JSON.stringify(overlayCaptureDir)}/root
 `,
 			{ mode: 0o755 },
 		);
@@ -215,6 +171,7 @@ exit 0
 			join(binDir, "sshpass"),
 			`#!/bin/sh
 printf '%s\n' "$@" > ${JSON.stringify(sshpassCaptureFile)}
+printf 'ready\n'
 printf '6.6.4-1-lts\n'
 `,
 			{ mode: 0o755 },
@@ -234,39 +191,36 @@ printf '6.6.4-1-lts\n'
 		assert.match(captured, /\/app\/alpine\.iso/);
 		assert.match(captured, /-drive/);
 		assert.match(captured, /\/app\/alpine-disk\.qcow2/);
+		assert.match(captured, /-device\nvirtio-rng-pci/);
 		assert.match(captured, /hostfwd=tcp::2222-:22/);
-		assert.match(captured, new RegExp(`127\\.0\\.0\\.1:${serialPort}`));
+		assert.match(captured, /alpine_dev=sr0/);
+		assert.match(captured, /modloop=\/boot\/modloop-lts/);
+		assert.match(captured, /alpine_repo=\/media\/cdrom\/apks/);
+		assert.match(captured, /apkovl=sdb:vfat:localhost\.apkovl\.tar\.gz/);
 		assert.match(captured, /\.img,format=raw/);
-		assert.doesNotMatch(captured, /mon:telnet/);
+		assert.match(captured, /-serial\nfile:\/tmp\/qemu-alpine-ssh-serial\.log/);
 		assert.match(captured, /-daemonize/);
 		const overlayInittab = await readFile(join(overlayCaptureDir, "etc/inittab"), "utf-8");
+		const overlaySetupScript = await readFile(join(overlayCaptureDir, "root/setup-ssh.sh"), "utf-8");
 		assert.match(overlayInittab, /ttyS0::respawn/);
+		assert.match(overlayInittab, /::once:\/root\/setup-ssh\.sh/);
 		assert.equal(await readFile(join(overlayCaptureDir, "etc/hostname"), "utf-8"), "localhost\n");
 		assert.match(await readFile(join(overlayCaptureDir, "etc/securetty"), "utf-8"), /ttyS0/);
+		assert.match(overlaySetupScript, /NET_IFACE="\$\(ip -o link show/);
+		assert.match(overlaySetupScript, /ip link set "\$NET_IFACE" up/);
+		assert.match(overlaySetupScript, /udhcpc -i "\$NET_IFACE"/);
+		assert.match(overlaySetupScript, /setup-sshd -c dropbear/);
+		assert.match(overlaySetupScript, /rc-service dropbear status/);
+		assert.match(overlaySetupScript, /root:password123/);
+		assert.match(overlaySetupScript, /touch "\$MARKER"/);
 		const sshpassArgs = await readFile(sshpassCaptureFile, "utf-8");
 		assert.match(sshpassArgs, /password123/);
 		assert.match(sshpassArgs, /StrictHostKeyChecking=no/);
 		assert.match(sshpassArgs, /-p/);
 		assert.match(sshpassArgs, /2222/);
 		assert.match(sshpassArgs, /root@localhost/);
-		assert.match(sshpassArgs, /uname\n-r/);
-		assert.deepEqual(serialCommands, [
-			"ip link set eth0 up",
-			"udhcpc -i eth0",
-			"apk update",
-			"apk add openssh",
-			"ssh-keygen -A",
-			"if grep -q '^#\\?PermitRootLogin' /etc/ssh/sshd_config; then sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; else echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config; fi",
-			"if grep -q '^#\\?PasswordAuthentication' /etc/ssh/sshd_config; then sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; else echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config; fi",
-			"echo 'root:password123' | chpasswd",
-			"rc-update add sshd default",
-			"service sshd restart",
-			"uname -r",
-		]);
+		assert.match(sshpassArgs, /sh\n-lc\necho ready && uname -r/);
 	} finally {
-		await new Promise((resolvePromise) => serialServer.close(resolvePromise));
-		if (previousSerialPort === undefined) delete process.env.PI_QUESTS_QEMU_SERIAL_PORT;
-		else process.env.PI_QUESTS_QEMU_SERIAL_PORT = previousSerialPort;
 		if (previousPath === undefined) delete process.env.PATH;
 		else process.env.PATH = previousPath;
 		await rm(binDir, { recursive: true, force: true });

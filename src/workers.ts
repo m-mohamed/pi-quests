@@ -984,6 +984,7 @@ export async function executeFeatureWorker(
 			};
 		} catch (error) {
 			nativeHelperFailure = error instanceof Error ? error.message : String(error);
+			console.error(`[quest] native helper failed for ${helperArgs.family}/${helperArgs.taskId}: ${nativeHelperFailure}`);
 		}
 	}
 	const result = await runPiTask({

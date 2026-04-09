@@ -55,13 +55,14 @@ async function createFakeSlopRepo(problemCount = 20) {
 	const repo = await mkdtemp(join(tmpdir(), "pi-quests-slop-repo-"));
 	for (let index = 0; index < problemCount; index += 1) {
 		const slug = `problem-${String(index + 1).padStart(2, "0")}`;
+		const category = index % 2 === 0 ? "cli" : "api";
 		const problemDir = join(repo, "problems", slug);
 		await mkdir(problemDir, { recursive: true });
 		await writeFile(
 			join(problemDir, "config.yaml"),
 			[
 				`name: ${slug}`,
-				"category: cli",
+				`category: ${category}`,
 				"difficulty: medium",
 				`description: ${slug} description`,
 				"checkpoints:",
@@ -88,6 +89,9 @@ test("prepareTrialBenchmark writes the deterministic 7/3 sample split", async ()
 		assert.equal(prepared.holdOutSet.items.length, 3);
 		assert.equal(prepared.searchSet.items.some((item) => item.name.includes("/")), false);
 		assert.equal(prepared.holdOutSet.items.some((item) => item.name.includes("/")), false);
+		assert.ok(prepared.manifest.items.every((item) => item.tags.includes("terminal-bench")));
+		assert.ok((prepared.searchSet.tagSummary["terminal-bench"] ?? 0) > 0);
+		assert.ok((prepared.holdOutSet.tagSummary["terminal-bench"] ?? 0) > 0);
 		assert.equal(new Set([...prepared.searchSet.items, ...prepared.holdOutSet.items].map((item) => item.name)).size, 10);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
@@ -109,6 +113,11 @@ test("prepareTrialBenchmark discovers slopcodebench manifests and writes a deter
 		assert.equal(prepared.holdOutSet.totalItems, 6);
 		assert.ok(prepared.manifest.sourceFingerprint.length > 10);
 		assert.ok(prepared.searchSet.items.every((item) => item.family === "slopcodebench"));
+		assert.ok(prepared.searchSet.items.every((item) => item.tags.includes("slopcodebench")));
+		assert.ok((prepared.searchSet.tagSummary.cli ?? 0) > 0);
+		assert.ok((prepared.searchSet.tagSummary.api ?? 0) > 0);
+		assert.ok((prepared.holdOutSet.tagSummary.cli ?? 0) > 0);
+		assert.ok((prepared.holdOutSet.tagSummary.api ?? 0) > 0);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 		await rm(repo, { recursive: true, force: true });

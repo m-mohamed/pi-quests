@@ -328,7 +328,7 @@ test("findWhiteMateInOneMoves matches the terminal-bench sample board", () => {
 	assert.deepEqual(moves, ["e2e4", "g2g4"]);
 });
 
-test("qemu-startup helper boots the Alpine ISO over telnet-ready serial", async () => {
+test("qemu-startup helper direct-boots Alpine with ttyS0 exposed over telnet", async () => {
 	const binDir = await mkdtemp(join(tmpdir(), "pi-quests-qemu-helper-"));
 	const captureFile = join(binDir, "qemu-args.txt");
 	const previousPath = process.env.PATH;
@@ -338,6 +338,10 @@ test("qemu-startup helper boots the Alpine ISO over telnet-ready serial", async 
 			`#!/bin/sh\nprintf '%s\n' "$@" > ${JSON.stringify(captureFile)}\n`,
 			{ mode: 0o755 },
 		);
+		await writeFile(join(binDir, "bsdtar"), "#!/bin/sh\ncat /dev/null\n", { mode: 0o755 });
+		await writeFile(join(binDir, "mkfs.vfat"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		await writeFile(join(binDir, "mcopy"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		await writeFile(join(binDir, "truncate"), "#!/bin/sh\n: > \"$3\"\n", { mode: 0o755 });
 		await writeFile(join(binDir, "expect"), "#!/bin/sh\necho 'System is booted and ready'\n", { mode: 0o755 });
 		process.env.PATH = `${binDir}:${previousPath ?? ""}`;
 		await runBenchmarkHelper({
@@ -347,14 +351,20 @@ test("qemu-startup helper boots the Alpine ISO over telnet-ready serial", async 
 			outputPath: "/app/alpine-disk.qcow2",
 		});
 		const captured = await readFile(captureFile, "utf-8");
-		assert.match(captured, /-cdrom/);
-		assert.match(captured, /\/app\/alpine\.iso/);
+		assert.match(captured, /-kernel/);
+		assert.match(captured, /vmlinuz-lts/);
+		assert.match(captured, /-initrd/);
+		assert.match(captured, /initramfs-lts/);
+		assert.match(captured, /console=ttyS0/);
+		assert.match(captured, /modloop=\/boot\/modloop-lts/);
+		assert.match(captured, /apkovl=sdb:vfat:localhost\.apkovl\.tar\.gz/);
 		assert.match(captured, /-drive/);
+		assert.match(captured, /\/app\/alpine\.iso/);
 		assert.match(captured, /\/app\/alpine-disk\.qcow2/);
-		assert.match(captured, /-boot/);
-		assert.match(captured, /\bd\b/);
 		assert.match(captured, /-serial/);
-		assert.match(captured, /mon:telnet:127\.0\.0\.1:6665/);
+		assert.match(captured, /telnet:127\.0\.0\.1:6665,server,nowait/);
+		assert.match(captured, /-device/);
+		assert.match(captured, /virtio-rng-pci/);
 		assert.match(captured, /-daemonize/);
 	} finally {
 		if (previousPath === undefined) delete process.env.PATH;

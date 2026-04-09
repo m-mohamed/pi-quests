@@ -100,6 +100,8 @@ interface TrialProposerContext {
 	candidatesDir: string;
 	searchSetPath: string;
 	holdOutSetPath: string;
+	searchTagSummary?: Record<string, number>;
+	holdOutTagSummary?: Record<string, number>;
 	communityStats?: {
 		totalSessions?: number;
 		parsedSessions?: number;
@@ -113,6 +115,14 @@ interface TrialProposerContext {
 			totalCost?: number;
 			totalDurationMs?: number;
 		};
+		tagBreakdown?: Record<
+			string,
+			{
+				itemCount?: number;
+				passed?: number;
+				meanScore?: number;
+			}
+		>;
 	};
 }
 
@@ -1141,6 +1151,18 @@ export async function executeTrialProposerAgent(
 		.sort((left, right) => (right[1] ?? 0) - (left[1] ?? 0))
 		.slice(0, 6)
 		.map(([tag, count]) => `${tag}: ${count}`);
+	const topSearchTags = Object.entries(context.searchTagSummary ?? {})
+		.sort((left, right) => (right[1] ?? 0) - (left[1] ?? 0) || left[0].localeCompare(right[0]))
+		.slice(0, 8)
+		.map(([tag, count]) => `${tag}: ${count}`);
+	const topHoldOutTags = Object.entries(context.holdOutTagSummary ?? {})
+		.sort((left, right) => (right[1] ?? 0) - (left[1] ?? 0) || left[0].localeCompare(right[0]))
+		.slice(0, 8)
+		.map(([tag, count]) => `${tag}: ${count}`);
+	const leaderTagBreakdown = Object.entries(context.leaderSummary?.tagBreakdown ?? {})
+		.sort((left, right) => ((left[1].meanScore ?? 0) - (right[1].meanScore ?? 0)) || left[0].localeCompare(right[0]))
+		.slice(0, 8)
+		.map(([tag, metrics]) => `${tag}: mean=${metrics.meanScore ?? 0} passed=${metrics.passed ?? 0}/${metrics.itemCount ?? 0}`);
 	const result = await runPiTask({
 		cwd,
 		modelChoice,
@@ -1175,6 +1197,14 @@ Current frontier leader:
 - mean score: ${context.leaderSummary?.searchScore?.meanScore ?? 0}
 - total cost: ${context.leaderSummary?.searchScore?.totalCost ?? 0}
 - total duration ms: ${context.leaderSummary?.searchScore?.totalDurationMs ?? 0}
+- weakest leader eval tags:
+${leaderTagBreakdown.length > 0 ? leaderTagBreakdown.map((line) => `  - ${line}`).join("\n") : "  - none"}
+
+Benchmark split coverage:
+- search tags:
+${topSearchTags.length > 0 ? topSearchTags.map((line) => `  - ${line}`).join("\n") : "  - none"}
+- hold-out tags:
+${topHoldOutTags.length > 0 ? topHoldOutTags.map((line) => `  - ${line}`).join("\n") : "  - none"}
 
 Community corpus summary:
 - parsed sessions: ${context.communityStats?.parsedSessions ?? 0}/${context.communityStats?.totalSessions ?? 0}

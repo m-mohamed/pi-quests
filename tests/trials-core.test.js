@@ -90,6 +90,11 @@ test("defaultQuestProfile keeps the high-confidence Trials defaults", () => {
 	assert.equal(profile.contextPolicy.spillLongOutputsToReports, true);
 	assert.match(profile.promptSurfaces.planningPolicy, /limited or unsupported/i);
 	assert.match(profile.promptSurfaces.workerPolicy, /Confirm prerequisites/i);
+	assert.match(profile.promptSurfaces.proposerPolicy, /behavioral tag cohorts/i);
+	assert.equal(profile.harnessPolicy.computationalGuides.enabled, true);
+	assert.equal(profile.harnessPolicy.inferentialGuides.enabled, true);
+	assert.equal(profile.harnessPolicy.sensors.inferential.enabled, true);
+	assert.equal(profile.harnessPolicy.fitnessFunctions.enabled, true);
 });
 
 test("traceBundleFromWorkerRun derives failure tags from worker traces", () => {

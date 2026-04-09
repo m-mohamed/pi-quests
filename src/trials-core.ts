@@ -46,7 +46,7 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 			revisionPolicy:
 				"- Preserve completed work.\n- Keep the remaining plan serial by default.\n- Revise only unfinished milestones, unfinished features, and unfinished validation.",
 			proposerPolicy:
-				"- Read candidate profiles, summaries, and benchmark artifacts from .pi/quests/trials/candidates/.\n- Read community trace statistics from .pi/quests/trials/community-stats.json.\n- Optimize for search-set mean score first, then lower cost, then lower duration.\n- Use hold-out results only as a regression gate, not as an overfitting target.\n- Propose a QuestProfilePatch only on profile-owned surfaces.\n- Output valid JSON only: summary, rationale, generalizationNote, targetedTags, targetedCaseIds, promptSurfaceIds, patch.\n- Do not execute code and do not mutate files.",
+				"- Read candidate profiles, summaries, and benchmark artifacts from .pi/quests/trials/candidates/.\n- Read community trace statistics from .pi/quests/trials/community-stats.json.\n- Optimize for search-set mean score first, then lower cost, then lower duration.\n- Use hold-out results only as a regression gate, not as an overfitting target.\n- Prefer changes that improve weak behavioral tag cohorts, not one-off task ids.\n- Propose a QuestProfilePatch only on profile-owned surfaces.\n- Output valid JSON only: summary, rationale, generalizationNote, targetedTags, targetedCaseIds, promptSurfaceIds, patch.\n- Do not execute code and do not mutate files.",
 		},
 		toolAllowlist: {
 			orchestrator: ["read", "bash"],
@@ -106,38 +106,51 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 		},
 		harnessPolicy: {
 			computationalGuides: {
-				enabled: false,
-				linterConfigs: [],
-				preCommitHooks: [],
-				structuralTests: [],
-				archConstraints: [],
+				enabled: true,
+				linterConfigs: ["Use the repo-native check or lint/typecheck entrypoint before promotion."],
+				preCommitHooks: ["Preserve canonical benchmark and quest artifacts; do not add side-channel state."],
+				structuralTests: ["Run the benchmark-facing preflight or smoke path after changing benchmark adapters or helpers."],
+				archConstraints: [
+					"Keep frontier Trials as the only optimization runtime.",
+					"Keep proposer edits constrained to profile-owned surfaces.",
+				],
 			},
 			inferentialGuides: {
-				enabled: false,
-				agentsMdPath: "",
-				skillsDir: "",
-				codeReviewAgents: [],
+				enabled: true,
+				agentsMdPath: "AGENTS.md",
+				skillsDir: ".codex/skills",
+				codeReviewAgents: ["validator-code-review"],
 			},
 			sensors: {
 				computational: {
 					enabled: true,
-					linters: [],
-					typeCheckers: [],
-					testRunners: [],
-					driftDetectors: [],
+					linters: ["repo-native check or lint command"],
+					typeCheckers: ["repo-native typecheck command"],
+					testRunners: ["repo-native test suite", "benchmark preflight or smoke for benchmark-facing changes"],
+					driftDetectors: ["benchmark split sourceFingerprint changes", "community corpus stats drift"],
 				},
 				inferential: {
-					enabled: false,
-					codeReviewAgents: [],
-					qualityJudges: [],
-					runtimeMonitors: [],
+					enabled: true,
+					codeReviewAgents: ["validator-code-review"],
+					qualityJudges: ["hold-out regression gate", "operator review for costly or low-signal edits"],
+					runtimeMonitors: ["quest-headless JSON artifact validation", "benchmark smoke probe"],
 				},
 			},
 			fitnessFunctions: {
-				enabled: false,
-				performanceRequirements: [],
-				observabilityRequirements: [],
-				architectureConstraints: [],
+				enabled: true,
+				performanceRequirements: [
+					{ metric: "meanScore", threshold: 0.0, unit: "maximize" },
+					{ metric: "totalCost", threshold: 0.0, unit: "minimize" },
+					{ metric: "totalDurationMs", threshold: 0.0, unit: "minimize" },
+				],
+				observabilityRequirements: [
+					{ standard: "quest-headless-output", required: true },
+					{ standard: "candidate-archive-artifacts", required: true },
+				],
+				architectureConstraints: [
+					"Community traces remain Pi-native JSONL.",
+					"Benchmark adapters share the canonical candidate archive and frontier gate.",
+				],
 			},
 		},
 		adoptedChanges: [],

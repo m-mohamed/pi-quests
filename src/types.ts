@@ -197,6 +197,7 @@ export interface QuestBenchmarkWorkItem {
 	family: QuestFrontierBenchmarkFamily;
 	dataset: string;
 	path?: string;
+	tags: string[];
 	metadata?: Record<string, unknown>;
 }
 
@@ -211,6 +212,7 @@ export interface QuestBenchmarkManifest {
 	source: "vendored" | "registry" | "generated" | "discovered";
 	sourceFingerprint: string;
 	items: QuestBenchmarkWorkItem[];
+	tagSummary: Record<string, number>;
 	notes?: string[];
 }
 
@@ -225,7 +227,17 @@ export interface QuestBenchmarkSplit {
 	sourceFingerprint: string;
 	totalItems: number;
 	items: QuestBenchmarkWorkItem[];
+	tagSummary: Record<string, number>;
 	notes?: string[];
+}
+
+export interface QuestCandidateTagMetrics {
+	itemCount: number;
+	passed: number;
+	totalScore: number;
+	meanScore: number;
+	totalCost: number;
+	totalDurationMs: number;
 }
 
 export interface QuestPromptSurfaces {
@@ -674,6 +686,7 @@ export interface QuestCandidateScorecard {
 	meanScore: number;
 	totalCost: number;
 	totalDurationMs: number;
+	tagBreakdown?: Record<string, QuestCandidateTagMetrics>;
 	benchmarkMetrics?: Record<string, unknown>;
 	items: QuestCandidateWorkItemResult[];
 }

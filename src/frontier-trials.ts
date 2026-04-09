@@ -19,6 +19,7 @@ import type {
 	QuestBenchmarkWorkItem,
 	QuestCandidateScorecard,
 	QuestCandidateSummary,
+	QuestCandidateTagMetrics,
 	QuestCandidateWorkItemResult,
 	QuestExperimentCandidate,
 	QuestFrontierBenchmarkFamily,
@@ -236,12 +237,162 @@ function sortWorkItems(items: QuestBenchmarkWorkItem[]): QuestBenchmarkWorkItem[
 	return [...items].sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }
 
+function uniqueTags(tags: Iterable<string | null | undefined>): string[] {
+	return [...new Set([...tags].map((tag) => String(tag ?? "").trim().toLowerCase()).filter(Boolean))];
+}
+
+function terminalBenchTags(name: string, path?: string): string[] {
+	const lower = `${name} ${path ?? ""}`.toLowerCase();
+	const tags = new Set<string>(["terminal-bench"]);
+	if (/\bqemu\b|\bvm\b|\bboot\b/.test(lower)) tags.add("virtualization");
+	if (/\bssh\b/.test(lower)) tags.add("remote-access");
+	if (/\btelnet\b|\bserial\b/.test(lower)) tags.add("console-access");
+	if (/\bregex\b|\blog\b/.test(lower)) tags.add("text-processing");
+	if (/\blog\b/.test(lower)) tags.add("log-analysis");
+	if (/\bsqlite\b|\bdb\b|\bgcov\b/.test(lower)) tags.add("database");
+	if (/\bgcov\b|\bcoverage\b/.test(lower)) tags.add("coverage");
+	if (/\bcython\b|\bbuild\b|\bcompile\b/.test(lower)) tags.add("native-build");
+	if (/\bpython\b|\bpy\b|\bcython\b/.test(lower)) tags.add("python");
+	if (/\bpolyglot\b/.test(lower)) tags.add("polyglot");
+	if (/\bchess\b/.test(lower)) tags.add("reasoning");
+	if (/\bvulnerability\b|\bsecurity\b/.test(lower)) tags.add("security");
+	if (/\bgit\b/.test(lower)) tags.add("git");
+	if (/\bwebserver\b|\bnginx\b|\bhttp\b/.test(lower)) tags.add("webserver");
+	return [...tags];
+}
+
+function slopCodeBenchTags(metadata?: Record<string, unknown>): string[] {
+	const category = typeof metadata?.category === "string" ? metadata.category : "";
+	const difficulty = typeof metadata?.difficulty === "string" ? metadata.difficulty : "";
+	const checkpointCount = Number(metadata?.checkpointCount ?? 0);
+	const tags = new Set<string>(["slopcodebench"]);
+	if (category) tags.add(category.toLowerCase());
+	if (difficulty) tags.add(`difficulty:${difficulty.toLowerCase()}`);
+	if (checkpointCount >= 3) tags.add("long-horizon");
+	if (checkpointCount >= 2) tags.add("multi-step");
+	return [...tags];
+}
+
+function deriveWorkItemTags(
+	family: QuestFrontierBenchmarkFamily,
+	name: string,
+	path?: string,
+	metadata?: Record<string, unknown>,
+	explicitTags?: Iterable<string | null | undefined>,
+): string[] {
+	const inferred = family === "slopcodebench" ? slopCodeBenchTags(metadata) : terminalBenchTags(name, path);
+	return uniqueTags([...(explicitTags ?? []), ...inferred]);
+}
+
+function summarizeTags(items: QuestBenchmarkWorkItem[]): Record<string, number> {
+	const summary: Record<string, number> = {};
+	for (const item of items) {
+		for (const tag of item.tags) summary[tag] = (summary[tag] ?? 0) + 1;
+	}
+	return Object.fromEntries(Object.entries(summary).sort((left, right) => left[0].localeCompare(right[0])));
+}
+
+function primaryTag(item: QuestBenchmarkWorkItem): string {
+	return item.tags[0] ?? "untagged";
+}
+
 function splitCounts(totalItems: number): { search: number; holdOut: number } {
 	if (totalItems <= 1) return { search: totalItems, holdOut: 0 };
 	if (totalItems <= DEFAULT_SAMPLE_HOLD_OUT_COUNT) return { search: totalItems - 1, holdOut: 1 };
 	if (totalItems === 10) return { search: 7, holdOut: 3 };
 	const holdOut = Math.max(1, Math.round(totalItems * 0.3));
 	return { search: Math.max(1, totalItems - holdOut), holdOut: totalItems - Math.max(1, totalItems - holdOut) };
+}
+
+function hashSeed(seed: number, label: string): number {
+	let value = seed >>> 0;
+	for (const char of label) {
+		value = Math.imul(value ^ char.charCodeAt(0), 1664525) + 1013904223;
+	}
+	return value >>> 0;
+}
+
+function stratifiedSplit(items: QuestBenchmarkWorkItem[], seed: number): { search: QuestBenchmarkWorkItem[]; holdOut: QuestBenchmarkWorkItem[] } {
+	const counts = splitCounts(items.length);
+	if (counts.holdOut <= 0) return { search: [...items], holdOut: [] };
+	const groups = new Map<string, QuestBenchmarkWorkItem[]>();
+	for (const item of items) {
+		const tag = primaryTag(item);
+		const bucket = groups.get(tag) ?? [];
+		bucket.push(item);
+		groups.set(tag, bucket);
+	}
+	const groupEntries = [...groups.entries()]
+		.map(([tag, groupItems]) => [tag, deterministicShuffle(sortWorkItems(groupItems), hashSeed(seed, tag))] as const)
+		.sort((left, right) => left[0].localeCompare(right[0]));
+	const quotas = new Map<string, number>();
+	const desired = counts.holdOut;
+	const total = items.length;
+	const remainders: Array<{ tag: string; remainder: number; capacity: number }> = [];
+	let assigned = 0;
+	for (const [tag, groupItems] of groupEntries) {
+		const exact = (groupItems.length / total) * desired;
+		const baseQuota = Math.floor(exact);
+		const capacity = groupItems.length;
+		const quota = Math.min(capacity, baseQuota);
+		quotas.set(tag, quota);
+		assigned += quota;
+		remainders.push({ tag, remainder: exact - baseQuota, capacity });
+	}
+	remainders.sort((left, right) => right.remainder - left.remainder || left.tag.localeCompare(right.tag));
+	for (const entry of remainders) {
+		if (assigned >= desired) break;
+		const current = quotas.get(entry.tag) ?? 0;
+		if (current >= entry.capacity) continue;
+		quotas.set(entry.tag, current + 1);
+		assigned += 1;
+	}
+
+	const holdOut: QuestBenchmarkWorkItem[] = [];
+	const search: QuestBenchmarkWorkItem[] = [];
+	for (const [tag, groupItems] of groupEntries) {
+		const quota = quotas.get(tag) ?? 0;
+		holdOut.push(...groupItems.slice(0, quota));
+		search.push(...groupItems.slice(quota));
+	}
+	return {
+		search: sortWorkItems(search),
+		holdOut: sortWorkItems(holdOut),
+	};
+}
+
+function buildTagBreakdown(results: QuestCandidateWorkItemResult[]): Record<string, QuestCandidateTagMetrics> {
+	const breakdown = new Map<string, { itemCount: number; passed: number; totalScore: number; totalCost: number; totalDurationMs: number }>();
+	for (const result of results) {
+		const rawTags = Array.isArray(result.benchmarkMetrics?.workItemTags) ? result.benchmarkMetrics?.workItemTags : [];
+		const tags = uniqueTags(rawTags as Array<string | null | undefined>);
+		for (const tag of tags) {
+			const bucket = breakdown.get(tag) ?? {
+				itemCount: 0,
+				passed: 0,
+				totalScore: 0,
+				totalCost: 0,
+				totalDurationMs: 0,
+			};
+			bucket.itemCount += 1;
+			if (result.status === "passed") bucket.passed += 1;
+			bucket.totalScore += result.score;
+			bucket.totalCost += result.totalCost;
+			bucket.totalDurationMs += result.durationMs;
+			breakdown.set(tag, bucket);
+		}
+	}
+	return Object.fromEntries(
+		[...breakdown.entries()]
+			.sort((left, right) => left[0].localeCompare(right[0]))
+			.map(([tag, metrics]) => [
+				tag,
+				{
+					...metrics,
+					meanScore: metrics.itemCount > 0 ? metrics.totalScore / metrics.itemCount : 0,
+				},
+			]),
+	);
 }
 
 function normalizeFrontierFamily(value: unknown): QuestFrontierBenchmarkFamily {
@@ -254,12 +405,14 @@ function normalizeWorkItem(raw: any, fallback: { family: QuestFrontierBenchmarkF
 	const path = typeof raw?.path === "string" && raw.path.trim() ? raw.path : undefined;
 	const id = String(raw?.id ?? path ?? raw?.name ?? "");
 	const name = String(raw?.name ?? id);
+	const explicitTags = Array.isArray(raw?.tags) ? raw.tags : Array.isArray(raw?.metadata?.tags) ? raw.metadata.tags : [];
 	return {
 		id,
 		name,
 		family,
 		dataset,
 		path,
+		tags: deriveWorkItemTags(family, name, path, raw?.metadata, explicitTags),
 		metadata: raw?.metadata && typeof raw.metadata === "object" ? raw.metadata : undefined,
 	};
 }
@@ -285,6 +438,7 @@ function normalizeStoredSplit(raw: any): QuestBenchmarkSplit | null {
 				: hashFingerprint(JSON.stringify(items.map((item: QuestBenchmarkWorkItem) => ({ id: item.id, name: item.name, path: item.path })))),
 		totalItems: Number(raw.totalItems ?? raw.totalTasks ?? items.length),
 		items,
+		tagSummary: raw.tagSummary && typeof raw.tagSummary === "object" ? Object.fromEntries(Object.entries(raw.tagSummary).map(([key, value]) => [key, Number(value)])) : summarizeTags(items),
 		notes: Array.isArray(raw.notes) ? raw.notes.map(String) : undefined,
 	};
 }
@@ -326,6 +480,7 @@ function normalizeTerminalBenchManifest(raw: any, dataset: string, runMode: Ques
 			family: "terminal-bench" as const,
 			dataset,
 			path: path || undefined,
+			tags: deriveWorkItemTags("terminal-bench", name, path || undefined),
 			metadata:
 				task.gitUrl || task.gitCommitId
 					? {
@@ -353,11 +508,13 @@ function normalizeTerminalBenchManifest(raw: any, dataset: string, runMode: Ques
 								id: item.id,
 								name: item.name,
 								path: item.path,
+								tags: item.tags,
 								metadata: item.metadata,
 							})),
 						),
 					),
 		items: sortWorkItems(items),
+		tagSummary: summarizeTags(items),
 		notes: Array.isArray(raw?.notes) ? raw.notes.map(String) : undefined,
 	};
 }
@@ -541,6 +698,7 @@ async function parseHarborScorecard(
 				modelChoice: fallbackModel,
 				artifactPaths: [],
 				failureReason: "Harbor did not produce a result for this task.",
+				benchmarkMetrics: { workItemTags: item.tags },
 				benchmark: benchmarkProvenance("terminal-bench", dataset, runMode, item.id, fallbackModel, 0, false),
 			});
 			continue;
@@ -577,7 +735,10 @@ async function parseHarborScorecard(
 			artifactPaths: [],
 			failureReason,
 			rewardValues: rewards,
-			benchmarkMetrics: rewards ? { rewardValues: rewards } : undefined,
+			benchmarkMetrics: {
+				workItemTags: item.tags,
+				...(rewards ? { rewardValues: rewards } : {}),
+			},
 			benchmark: questOutput?.data?.benchmark ?? benchmarkProvenance("terminal-bench", dataset, runMode, item.id, model, score, status === "passed"),
 		});
 	}
@@ -599,6 +760,7 @@ async function parseHarborScorecard(
 		meanScore: items.length > 0 ? totalScore / items.length : 0,
 		totalCost,
 		totalDurationMs,
+		tagBreakdown: buildTagBreakdown(results),
 		items: results,
 	};
 }
@@ -709,6 +871,14 @@ async function discoverSlopManifest(options: {
 			family: "slopcodebench",
 			dataset: options.dataset,
 			path: join(problemsDir, entry.name),
+			tags: deriveWorkItemTags("slopcodebench", name, join(problemsDir, entry.name), {
+				repo,
+				configPath,
+				category,
+				difficulty,
+				description,
+				checkpointCount,
+			}),
 			metadata: {
 				repo,
 				configPath,
@@ -731,6 +901,7 @@ async function discoverSlopManifest(options: {
 		source: "discovered",
 		sourceFingerprint: hashFingerprint(fingerprintParts.sort().join("\n---\n")),
 		items: sorted,
+		tagSummary: summarizeTags(sorted),
 		notes: [`Discovered from ${repo}.`],
 	};
 }
@@ -871,6 +1042,7 @@ async function parseSlopScorecard(
 				trialDir: existsSync(problemDir) ? problemDir : undefined,
 				artifactPaths: [],
 				failureReason: "Official SlopCodeBench run did not produce checkpoint results for this problem.",
+				benchmarkMetrics: { workItemTags: item.tags },
 				benchmark: benchmarkProvenance("slopcodebench", dataset, runMode, item.id, runSummary.model ?? fallbackModel, 0, false),
 			});
 			continue;
@@ -903,6 +1075,7 @@ async function parseSlopScorecard(
 			questOutputFile,
 			artifactPaths: [],
 			benchmarkMetrics: {
+				workItemTags: item.tags,
 				checkpointCount: checkpoints.length,
 				solvedCheckpoints,
 				passRateMean: score,
@@ -932,6 +1105,7 @@ async function parseSlopScorecard(
 		meanScore: items.length > 0 ? totalScore / items.length : 0,
 		totalCost,
 		totalDurationMs,
+		tagBreakdown: buildTagBreakdown(results),
 		benchmarkMetrics: {
 			runRoot,
 			model: runSummary.model ?? fallbackModel,
@@ -1305,8 +1479,8 @@ export async function prepareTrialBenchmark(
 	const runMode = adapter.resolveRunMode(dataset, options.runMode);
 	const seed = options.seed ?? DEFAULT_SAMPLE_SEED;
 	const manifest = await adapter.discoverManifest({ dataset, runMode, repo: options.repo, now: now(deps) });
-	const shuffled = deterministicShuffle(sortWorkItems(manifest.items), seed);
-	const counts = splitCounts(shuffled.length);
+	const splitItems = stratifiedSplit(sortWorkItems(manifest.items), seed);
+	const counts = splitCounts(manifest.items.length);
 	const createdAt = now(deps);
 	const searchSet: QuestBenchmarkSplit = {
 		id: `${family}-${dataset}-search`,
@@ -1318,7 +1492,8 @@ export async function prepareTrialBenchmark(
 		sourceManifestId: manifest.id,
 		sourceFingerprint: manifest.sourceFingerprint,
 		totalItems: counts.search,
-		items: shuffled.slice(0, counts.search),
+		items: splitItems.search,
+		tagSummary: summarizeTags(splitItems.search),
 		notes: [`Prepared from ${manifest.source} manifest ${manifest.id}.`],
 	};
 	const holdOutSet: QuestBenchmarkSplit = {
@@ -1331,7 +1506,8 @@ export async function prepareTrialBenchmark(
 		sourceManifestId: manifest.id,
 		sourceFingerprint: manifest.sourceFingerprint,
 		totalItems: counts.holdOut,
-		items: shuffled.slice(counts.search, counts.search + counts.holdOut),
+		items: splitItems.holdOut,
+		tagSummary: summarizeTags(splitItems.holdOut),
 		notes: [`Prepared from ${manifest.source} manifest ${manifest.id}.`],
 	};
 	await writeSplit(getQuestTrialPaths(cwd).searchSetFile, searchSet);
@@ -1472,8 +1648,22 @@ export async function runTrialOptimization(
 				candidatesDir: getQuestTrialPaths(cwd).candidatesDir,
 				searchSetPath: getQuestTrialPaths(cwd).searchSetFile,
 				holdOutSetPath: getQuestTrialPaths(cwd).holdOutSetFile,
+				searchTagSummary: searchSet.tagSummary,
+				holdOutTagSummary: holdOutSet.tagSummary,
 				communityStats,
-				leaderSummary: leader ?? undefined,
+				leaderSummary:
+					leader && leader.searchScore
+						? {
+								candidateId: leader.candidateId,
+								summary: leader.summary,
+								searchScore: {
+									meanScore: leader.searchScore.meanScore,
+									totalCost: leader.searchScore.totalCost,
+									totalDurationMs: leader.searchScore.totalDurationMs,
+								},
+								tagBreakdown: leader.searchScore.tagBreakdown,
+							}
+						: undefined,
 			},
 			options.onSnapshot,
 			options.onProcessStart,

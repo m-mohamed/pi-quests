@@ -580,19 +580,72 @@ if ! command -v expect >/dev/null 2>&1; then
   echo "expect is required" >&2
   exit 1
 fi
+if ! command -v bsdtar >/dev/null 2>&1 || ! command -v mkfs.vfat >/dev/null 2>&1 || ! command -v mcopy >/dev/null 2>&1; then
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "required helper dependencies are missing and apt-get is unavailable to install them" >&2
+    exit 1
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update >/dev/null
+  apt-get install -y -qq libarchive-tools dosfstools mtools >/dev/null
+fi
+BOOT_DIR="$(mktemp -d)"
+OVERLAY_DIR="$(mktemp -d)"
+OVERLAY_IMAGE="$(mktemp).img"
 EXPECT_FILE="$(mktemp)"
 cleanup() {
-  rm -f "$EXPECT_FILE"
+  rm -rf "$BOOT_DIR" "$OVERLAY_DIR" "$OVERLAY_IMAGE" "$EXPECT_FILE"
 }
 trap cleanup EXIT
 
+bsdtar -xOf "$ISO_PATH" boot/vmlinuz-lts > "$BOOT_DIR/vmlinuz-lts"
+bsdtar -xOf "$ISO_PATH" boot/initramfs-lts > "$BOOT_DIR/initramfs-lts"
+
+mkdir -p "$OVERLAY_DIR/etc"
+cat <<'EOF' > "$OVERLAY_DIR/etc/inittab"
+# /etc/inittab
+
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+
+tty1::respawn:/sbin/getty 38400 tty1
+tty2::respawn:/sbin/getty 38400 tty2
+tty3::respawn:/sbin/getty 38400 tty3
+tty4::respawn:/sbin/getty 38400 tty4
+tty5::respawn:/sbin/getty 38400 tty5
+tty6::respawn:/sbin/getty 38400 tty6
+ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100
+
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/openrc shutdown
+EOF
+printf 'localhost\n' > "$OVERLAY_DIR/etc/hostname"
+cat <<'EOF' > "$OVERLAY_DIR/etc/securetty"
+tty1
+tty2
+tty3
+tty4
+tty5
+tty6
+ttyS0
+EOF
+
+(cd "$OVERLAY_DIR" && tar -czf "$OVERLAY_DIR/localhost.apkovl.tar.gz" etc)
+truncate -s 8M "$OVERLAY_IMAGE"
+mkfs.vfat "$OVERLAY_IMAGE" >/dev/null
+mcopy -i "$OVERLAY_IMAGE" "$OVERLAY_DIR/localhost.apkovl.tar.gz" ::localhost.apkovl.tar.gz
+
 qemu-system-x86_64 -m 1024 \
-  -cdrom "$ISO_PATH" \
+  -kernel "$BOOT_DIR/vmlinuz-lts" \
+  -initrd "$BOOT_DIR/initramfs-lts" \
+  -append "modules=loop,squashfs,sd-mod,usb-storage console=ttyS0 hostname=localhost alpine_dev=sr0 modloop=/boot/modloop-lts alpine_repo=/media/cdrom/apks apkovl=sdb:vfat:localhost.apkovl.tar.gz" \
+  -drive file="$ISO_PATH",media=cdrom,readonly=on \
   -drive file="$DISK_PATH",format=qcow2 \
-  -boot d \
-  -nic user,hostfwd=tcp::2222-:22 \
+  -drive file="$OVERLAY_IMAGE",format=raw \
+  -device virtio-rng-pci \
   -daemonize -display none -vga none \
-  -serial mon:telnet:127.0.0.1:6665,server,nowait
+  -serial telnet:127.0.0.1:6665,server,nowait
 
 cat <<'EOF' > "$EXPECT_FILE"
 set timeout 300

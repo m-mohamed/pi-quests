@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { buildHarborCommand } from "../benchmarks/harbor/run.ts";
+import { evaluateHarborIntegrity } from "../src/harbor-integrity.js";
+import { buildHarborCommand, bundledLinuxNodeArchitectures } from "../benchmarks/harbor/run.ts";
 import { inspectHarborSmokeJobs } from "../benchmarks/harbor/preflight.ts";
 import { buildOfficialSlopCodeBenchCommand, resolveSlopCodeBenchRepo } from "../benchmarks/slopcodebench/official-run.ts";
 
@@ -78,6 +79,20 @@ test("buildHarborCommand mounts the Pi auth directory instead of injecting provi
 	}
 });
 
+test("bundledLinuxNodeArchitectures defaults to both Linux runtimes and honors overrides", () => {
+	const previous = process.env.PI_QUESTS_HARBOR_NODE_ARCHES;
+	try {
+		delete process.env.PI_QUESTS_HARBOR_NODE_ARCHES;
+		assert.deepEqual(bundledLinuxNodeArchitectures(), ["x64", "arm64"]);
+
+		process.env.PI_QUESTS_HARBOR_NODE_ARCHES = "arm64,x64,arm64,invalid";
+		assert.deepEqual(bundledLinuxNodeArchitectures(), ["arm64", "x64"]);
+	} finally {
+		if (previous === undefined) delete process.env.PI_QUESTS_HARBOR_NODE_ARCHES;
+		else process.env.PI_QUESTS_HARBOR_NODE_ARCHES = previous;
+	}
+});
+
 test("buildOfficialSlopCodeBenchCommand supports repeated problems and stable output roots", () => {
 	const command = buildOfficialSlopCodeBenchCommand({
 		repo: "/tmp/slop-code-bench",
@@ -139,7 +154,63 @@ test("inspectHarborSmokeJobs validates a completed smoke run with Quest JSON out
 		const result = await inspectHarborSmokeJobs(jobsDir, "sample/regex-log");
 		assert.equal(result.ok, true);
 		assert.match(result.detail, /sample\/regex-log/);
+		assert.equal(result.jobDir, runDir);
+		assert.equal(result.artifactPath, join(trialDir, "quest-headless-output.json"));
 	} finally {
 		await rm(jobsDir, { recursive: true, force: true });
 	}
+});
+
+test("inspectHarborSmokeJobs includes the most relevant Harbor artifact tail on failure", async () => {
+	const jobsDir = await mkdtemp(join(tmpdir(), "pi-quests-harbor-preflight-failure-"));
+	const runDir = join(jobsDir, "2026-04-08__10-00-00");
+	const trialDir = join(runDir, "qemu-startup__abc123", "agent");
+	try {
+		await mkdir(trialDir, { recursive: true });
+		await writeFile(
+			join(runDir, "result.json"),
+			JSON.stringify({
+				n_total_trials: 1,
+				stats: { n_errors: 1 },
+			}),
+		);
+		await writeFile(
+			join(trialDir, "quest-headless-stderr.log"),
+			[
+				"some earlier noise",
+				"Timed out waiting for login prompt",
+				"still blocked on serial boot",
+			].join("\n"),
+		);
+		const result = await inspectHarborSmokeJobs(jobsDir, "sample/qemu-startup");
+		assert.equal(result.ok, false);
+		assert.equal(result.jobDir, runDir);
+		assert.equal(result.artifactPath, join(trialDir, "quest-headless-stderr.log"));
+		assert.match(result.detail, /Job dir: /);
+		assert.match(result.detail, /Artifact tail/);
+		assert.match(result.detail, /Timed out waiting for login prompt/);
+	} finally {
+		await rm(jobsDir, { recursive: true, force: true });
+	}
+});
+
+test("evaluateHarborIntegrity fails closed for shared verifier environments", () => {
+	const report = evaluateHarborIntegrity({
+		harborVersion: "1.0.0",
+		trialExecuteAgentSource: "await self._agent.run(environment=self._environment, context=self.result.agent_result)",
+		trialRunVerificationSource: "await self._verify_with_retry()",
+		verifierVerifySource: [
+			"await self._environment.upload_dir(",
+			"    source_dir=self._task.paths.tests_dir,",
+			'    target_dir="/tests",',
+			")",
+			"await self._environment.exec(command=f\"{test_script_path} > {test_stdout_path} 2>&1\")",
+		].join("\n"),
+	});
+	assert.equal(report.ok, false);
+	assert.deepEqual(report.issues.map((issue) => issue.code), [
+		"shared_phase_environment",
+		"mutable_system_state_survives_verification",
+	]);
+	assert.match(report.summary, /failed the local benchmark integrity probe/);
 });

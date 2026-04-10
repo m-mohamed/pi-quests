@@ -54,7 +54,9 @@ export interface QuestHeadlessRunResult {
 	profileId: string;
 	traceBundleIds: string[];
 	validatorFindings: string[];
+	executionFindings: string[];
 	timeoutReason?: string;
+	failureCategory?: string;
 	artifactPaths: Record<string, string>;
 	benchmark?: QuestBenchmarkProvenance;
 }
@@ -128,16 +130,16 @@ function fallbackPlan(goal: string, readiness: ValidationReadiness | null): Ques
 
 function benchmarkFastPathReadiness(benchmark: QuestBenchmarkProvenance): ValidationReadiness {
 	return {
-		summary: `Benchmark mode for ${benchmark.benchmark}/${benchmark.dataset}: rely on the external verifier as the primary correctness sensor and keep internal quest validation minimal.`,
+		summary: `Benchmark mode for ${benchmark.benchmark}/${benchmark.dataset}: use the external verifier as a score sensor only, keep harness surfaces immutable, and rely on a lightweight Quest execution self-check before completion.`,
 		checks: [
 			{
 				id: "benchmark-verifier",
 				surface: "repo-checks",
-				description: "The benchmark harness verifier is authoritative for pass/fail scoring in benchmark mode.",
+				description: "The benchmark harness provides external scoring, but verifier and harness surfaces must remain immutable.",
 				status: "supported",
 				commands: [],
 				evidence: [`${benchmark.benchmark}:${benchmark.dataset}:${benchmark.taskId}`],
-				notes: "Skip the exploratory readiness/planning passes and focus on task execution.",
+				notes: "Skip the exploratory readiness/planning passes, but do not modify verifier scripts, reward files, PATH-critical tools, or system binaries.",
 			},
 			{
 				id: "human-qa",
@@ -146,7 +148,7 @@ function benchmarkFastPathReadiness(benchmark: QuestBenchmarkProvenance): Valida
 				status: "limited",
 				commands: [],
 				evidence: [],
-				notes: "Benchmark tasks are scored by the external verifier rather than internal UI review.",
+				notes: "Benchmark tasks still rely on the external harness for scoring, but only after integrity gates and the final Quest self-check are satisfied.",
 			},
 		],
 	};
@@ -192,6 +194,35 @@ function currentMilestones(quest: QuestState): QuestMilestone[] {
 	return [...(quest.plan?.milestones ?? [])].sort((left, right) => left.order - right.order);
 }
 
+function appendFindings(target: string[], findings: string[] | undefined): void {
+	if (!findings?.length) return;
+	for (const finding of findings) {
+		if (!finding || target.includes(finding)) continue;
+		target.push(finding);
+	}
+}
+
+function benchmarkExecutionFindings(run: WorkerRunRecord): string[] {
+	return [...new Set((run.issues ?? []).map((issue) => issue.trim()).filter(Boolean))];
+}
+
+function inferBenchmarkFailureCategory(
+	status: QuestHeadlessRunResult["status"],
+	executionFindings: string[],
+	summary?: string,
+	timeoutReason?: string,
+): string | undefined {
+	const text = [timeoutReason ?? "", summary ?? "", ...executionFindings].join(" ").toLowerCase();
+	if (status === "timeout" || /timed out|exceeded .*ms/.test(text)) return "quest_timeout";
+	if (/human handoff|human help|manual/.test(text)) return "human_handoff";
+	if (/contradict/.test(text)) return "contradictory_evidence";
+	if (/open question/.test(text)) return "open_questions";
+	if (/self-check|final submission/.test(text)) return "self_check_failed";
+	if (/install|dependency|package-manager|build from source|source build|setup path/.test(text)) return "setup_overreach";
+	if (status === "blocked") return "worker_failed";
+	return undefined;
+}
+
 function nextSummary(
 	status: QuestHeadlessRunResult["status"],
 	quest: QuestState,
@@ -207,7 +238,7 @@ function nextSummary(
 			return quest.lastError ?? validatorFindings[0] ?? "Quest blocked during benchmark execution.";
 		case "completed":
 			return benchmark
-				? "Quest completed execution; the external benchmark verifier remains authoritative for pass/fail."
+				? "Quest completed execution; benchmark scoring still depends on external harness integrity gates."
 				: "Quest completed with explicit human QA still pending.";
 		case "timeout":
 			return "Quest timed out before completion.";
@@ -259,8 +290,10 @@ export async function runQuestHeadless(
 
 	const traceBundleIds: string[] = [];
 	const validatorFindings: string[] = [];
+	const executionFindings: string[] = [];
 	const startedAt = Date.now();
 	const benchmarkFastPath = Boolean(benchmark);
+	let failureCategory: string | undefined;
 
 	let readiness: ValidationReadiness | null = benchmark ? benchmarkFastPathReadiness(benchmark) : null;
 	if (benchmarkFastPath && readiness) {
@@ -319,6 +352,8 @@ export async function runQuestHeadless(
 			profileId: profile.id,
 			traceBundleIds,
 			validatorFindings,
+			executionFindings,
+			failureCategory,
 			artifactPaths: {},
 			benchmark: benchmark ? { ...benchmark } : undefined,
 		};
@@ -336,6 +371,9 @@ export async function runQuestHeadless(
 
 	for (const milestone of currentMilestones(quest)) {
 		if (deadline && Date.now() > deadline) {
+			failureCategory = benchmark
+				? inferBenchmarkFailureCategory("timeout", executionFindings, quest.lastSummary, `Exceeded ${input.timeoutMs}ms before finishing the quest.`)
+				: undefined;
 			const timeoutResult: QuestHeadlessRunResult = {
 				status: "timeout",
 				summary: nextSummary("timeout", quest, validatorFindings, benchmark),
@@ -343,7 +381,9 @@ export async function runQuestHeadless(
 				profileId: profile.id,
 				traceBundleIds,
 				validatorFindings,
+				executionFindings,
 				timeoutReason: `Exceeded ${input.timeoutMs}ms before finishing the quest.`,
+				failureCategory,
 				artifactPaths: {},
 				benchmark: benchmark ? { ...benchmark } : undefined,
 			};
@@ -360,18 +400,24 @@ export async function runQuestHeadless(
 			feature.status = "running";
 			await saveQuest(quest);
 			const run = await executors.worker(quest, feature, milestone, input.modelChoice, workflows, profile, benchmark);
+			const benchmarkFindings = benchmarkFastPath ? benchmarkExecutionFindings(run) : [];
+			const runBlocked = !run.ok || (benchmarkFastPath && benchmarkFindings.length > 0);
+			appendFindings(executionFindings, benchmarkFindings);
 			feature.lastRunSummary = run.summary;
-			feature.lastError = run.ok ? undefined : run.stderr || run.summary;
-			feature.status = run.ok ? "completed" : "blocked";
+			feature.lastError = runBlocked ? (benchmarkFindings[0] ?? run.stderr ?? run.summary) : undefined;
+			feature.status = runBlocked ? "blocked" : "completed";
 			quest.recentRuns = trimRecentRuns([run, ...quest.recentRuns]);
 			await writeWorkerRun(quest.cwd, quest.id, run);
 			const trace = traceBundleFromWorkerRun(quest, run, profile);
 			traceBundleIds.push(trace.id);
 			await writeQuestTraceBundle(quest.cwd, trace);
-			if (!run.ok) {
+			if (runBlocked) {
 				milestone.status = "blocked";
 				quest.status = "blocked";
-				quest.lastError = run.summary;
+				quest.lastError = benchmarkFindings[0] ?? run.summary;
+				failureCategory = benchmark
+					? inferBenchmarkFailureCategory(quest.status, executionFindings, run.summary, run.stderr)
+					: undefined;
 				await saveQuest(quest);
 				const blockedResult: QuestHeadlessRunResult = {
 					status: quest.status,
@@ -380,6 +426,8 @@ export async function runQuestHeadless(
 					profileId: profile.id,
 					traceBundleIds,
 					validatorFindings,
+					executionFindings,
+					failureCategory,
 					artifactPaths: {},
 					benchmark: benchmark ? { ...benchmark } : undefined,
 				};
@@ -396,7 +444,7 @@ export async function runQuestHeadless(
 				quest,
 				(quest.validationState?.assertions ?? []).filter((assertion) => assertion.milestoneId === milestone.id),
 				"passed",
-				"Benchmark fast path: external benchmark verifier is authoritative.",
+				"Benchmark fast path: harness integrity still gates any external score.",
 			);
 			milestone.status = "completed";
 			await saveQuest(quest);
@@ -437,6 +485,8 @@ export async function runQuestHeadless(
 				profileId: profile.id,
 				traceBundleIds,
 				validatorFindings,
+				executionFindings,
+				failureCategory,
 				artifactPaths: {},
 				benchmark: benchmark ? { ...benchmark } : undefined,
 			};
@@ -455,7 +505,7 @@ export async function runQuestHeadless(
 	quest.shipReadiness = "validated_waiting_for_human_qa";
 	quest.completedAt = Date.now();
 	quest.lastSummary = benchmark
-		? "Benchmark quest completed execution. External verifier results remain authoritative for pass/fail."
+		? "Benchmark quest completed execution after a final self-check. External scores remain contingent on harness integrity."
 		: "Benchmark quest completed. Human QA remains explicit before any release claims or shipping.";
 	await saveQuest(quest);
 
@@ -466,6 +516,8 @@ export async function runQuestHeadless(
 		profileId: profile.id,
 		traceBundleIds,
 		validatorFindings,
+		executionFindings,
+		failureCategory,
 		artifactPaths: {},
 		benchmark: benchmark ? { ...benchmark } : undefined,
 	};

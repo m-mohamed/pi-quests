@@ -14,6 +14,7 @@ const DEFAULT_BUNDLED_PI_VERSION = "0.65.2";
 const BUNDLED_NODE_VERSION = "20.18.3";
 const BUNDLED_NODE_RUNTIME_DIR = "/opt/quest-node-runtimes";
 const LINUX_NODE_ARCHES = ["x64", "arm64"] as const;
+const HARBOR_NODE_ARCHES_ENV = "PI_QUESTS_HARBOR_NODE_ARCHES";
 
 type LinuxNodeArch = (typeof LINUX_NODE_ARCHES)[number];
 
@@ -176,6 +177,15 @@ function linuxNodeExtractedDirName(arch: LinuxNodeArch): string {
 	return `node-v${BUNDLED_NODE_VERSION}-linux-${arch}`;
 }
 
+export function bundledLinuxNodeArchitectures(): LinuxNodeArch[] {
+	const override = process.env[HARBOR_NODE_ARCHES_ENV]
+		?.split(",")
+		.map((value) => value.trim())
+		.filter((value): value is LinuxNodeArch => (LINUX_NODE_ARCHES as readonly string[]).includes(value));
+	if (override?.length) return [...new Set(override)];
+	return [...LINUX_NODE_ARCHES];
+}
+
 async function writeDownloadedFile(url: string, destination: string): Promise<void> {
 	const response = await fetch(url);
 	if (!response.ok || !response.body) {
@@ -283,7 +293,7 @@ export async function materializeQuestBundle(
 	await runCommand(join(bundlePath, "node_modules", ".bin", "pi"), ["--version"], rootDir);
 	const nodeRuntimeRoot = join(outputDir, "node-runtimes");
 	await mkdir(nodeRuntimeRoot, { recursive: true });
-	for (const arch of LINUX_NODE_ARCHES) {
+	for (const arch of bundledLinuxNodeArchitectures()) {
 		const cachedRuntimeDir = await ensureBundledLinuxNodeRuntime(arch);
 		await cp(cachedRuntimeDir, join(nodeRuntimeRoot, `node-linux-${arch}`), { recursive: true });
 	}

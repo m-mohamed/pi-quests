@@ -68,6 +68,18 @@ interface RunPiTaskResult {
 	aborted: boolean;
 }
 
+interface FeatureWorkerPayload {
+	status?: string;
+	summary?: string;
+	filesTouched?: string[];
+	followUps?: string[];
+	finalSubmissionReady?: boolean;
+	selfCheck?: string[];
+	contradictions?: string[];
+	openQuestions?: string[];
+	needsHuman?: boolean;
+}
+
 interface ValidatorPayload {
 	status?: string;
 	summary?: string;
@@ -123,6 +135,7 @@ interface TrialProposerContext {
 				meanScore?: number;
 			}
 		>;
+		failureCategoryBreakdown?: Record<string, number>;
 	};
 }
 
@@ -169,6 +182,40 @@ function extractJsonBlock<T>(text: string): T | null {
 	} catch {
 		return null;
 	}
+}
+
+function normalizeStringList(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value
+		.map((entry) => String(entry ?? "").trim())
+		.filter(Boolean);
+}
+
+function benchmarkExecutionIssues(parsed: FeatureWorkerPayload | null): string[] {
+	if (!parsed) {
+		return ["Worker did not return the required benchmark JSON block."];
+	}
+
+	const issues: string[] = [];
+	if (parsed.status !== "completed") {
+		issues.push("Worker did not declare the benchmark task completed.");
+	}
+	if (parsed.finalSubmissionReady !== true) {
+		issues.push("Worker did not confirm a single final submission was ready.");
+	}
+	if (normalizeStringList(parsed.selfCheck).length === 0) {
+		issues.push("Worker did not report a final self-check on the benchmark outputs.");
+	}
+	if (parsed.needsHuman === true) {
+		issues.push("Worker requested human handoff during benchmark execution.");
+	}
+	for (const contradiction of normalizeStringList(parsed.contradictions).slice(0, 3)) {
+		issues.push(`Worker reported unresolved contradictory evidence: ${contradiction}`);
+	}
+	for (const question of normalizeStringList(parsed.openQuestions).slice(0, 3)) {
+		issues.push(`Worker reported unresolved open question: ${question}`);
+	}
+	return [...new Set(issues)];
 }
 
 async function withTempPrompt(contents: string | undefined): Promise<{ file?: string; cleanup: () => Promise<void> }> {
@@ -254,6 +301,7 @@ Task note: terminal-bench task inputs and required output files usually live und
 }
 
 function benchmarkTaskSpecificHint(benchmark: QuestBenchmarkProvenance): string {
+	const taskId = benchmark.taskId;
 	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "chess-best-move") {
 		return `Task-specific hint:
 - A native helper is available at /opt/quest-package/dist/benchmark-helpers.js.
@@ -303,7 +351,7 @@ function benchmarkTaskSpecificHint(benchmark: QuestBenchmarkProvenance): string 
 - First action: run this exact command and stop if it leaves telnet on port 6665 ready:
   node /opt/quest-package/dist/benchmark-helpers.js terminal-bench qemu-startup /app/alpine.iso /app/alpine-disk.qcow2
 - Use the installed qemu-system-x86_64 binary; do not build QEMU from source.
-- On slower Apple Silicon hosts, the fastest path is to extract Alpine's kernel/initramfs from the ISO, boot them directly with the ISO still attached as the CD-ROM, and attach a tiny side-media overlay that enables ttyS0 login.
+- Prefer the simplest benchmark-native path: boot the ISO with QEMU in the background and expose the serial console on a telnet-backed port.
 - Block until the serial console actually emits the login prompt.`;
 	}
 	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "qemu-alpine-ssh") {
@@ -312,8 +360,8 @@ function benchmarkTaskSpecificHint(benchmark: QuestBenchmarkProvenance): string 
 - First action: run this exact command and stop if SSH on port 2222 succeeds:
   node /opt/quest-package/dist/benchmark-helpers.js terminal-bench qemu-alpine-ssh /app/alpine.iso /app/alpine-disk.qcow2
 - Use the installed qemu-system-x86_64 binary; do not build QEMU from source.
-- On slower Apple Silicon hosts, the fastest path is to extract Alpine's kernel/initramfs from the ISO, boot them directly with the ISO still attached as the CD-ROM, and attach a tiny side-media overlay that enables ttyS0 login.
-- Configure networking and OpenSSH from the serial console, then verify \`ssh -p 2222 root@localhost\` works with password \`password123\`.`;
+- Prefer the simplest benchmark-native path: boot the ISO with QEMU in the background, log in over the telnet-backed serial console, then bring up networking and OpenSSH from there.
+- Configure OpenSSH from that serial console, set the root password to \`password123\`, and verify \`ssh -p 2222 root@localhost\` works.`;
 	}
 	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "configure-git-webserver") {
 		return `Task-specific hint:
@@ -322,6 +370,69 @@ function benchmarkTaskSpecificHint(benchmark: QuestBenchmarkProvenance): string 
   node /opt/quest-package/dist/benchmark-helpers.js terminal-bench configure-git-webserver /var/www/html /git/server
 - The bare repository must deploy pushes into the web root through a post-receive hook.
 - The webserver must serve the deployed content on port 8080 without extra manual steps after the push.`;
+	}
+	if (
+		/(image|video|ocr|gcode|elf)/.test(taskId)
+	) {
+		return `Task-specific hint:
+- Treat this as a media or binary-inspection task first, not a general coding task.
+- Start with the exact input files using \`file\`, short Python scripts, and task-local metadata inspection before broader exploration.
+- Prefer deterministic extraction/transformation tools already on the machine over installing new stacks.
+- Write the exact required output path, then re-open it and spot-check bytes, rows, or decoded content before finishing.`;
+	}
+	if (
+		/(^git-|fix-git|sanitize-git-repo|multibranch|leak-recovery)/.test(taskId)
+	) {
+		return `Task-specific hint:
+- Treat this as a Git-state recovery task first.
+- Before editing anything, inspect \`git status --short\`, \`git branch -a\`, \`git log --oneline --decorate --all -n 20\`, and \`git reflog -n 20\`.
+- Prefer recovering the intended repo state from existing refs, reflog entries, stashes, or objects instead of re-creating content manually.
+- Keep the final repo state minimal and verifiable with the exact Git command that proves the task is solved.`;
+	}
+	if (
+		/(build-|compile-|install-|make-|modernization|modernize|compcert|ocaml|windows)/.test(taskId)
+	) {
+		return `Task-specific hint:
+- Treat this as a build or installation task first.
+- Read the nearest README, Makefile, configure script, or build config before changing code.
+- Prefer the lightest successful path: existing system packages, release tarballs, or documented build targets before custom source surgery.
+- Verify the requested binary, artifact, or command actually runs before you finish.`;
+	}
+	if (
+		/(server|nginx|grpc|mailman|pypi|headless-terminal|cert|request-logging)/.test(taskId)
+	) {
+		return `Task-specific hint:
+- Treat this as a local service task first.
+- Keep changes tightly scoped to the requested port, protocol, and on-disk config.
+- After configuration, verify the service locally with the exact client path the task implies, such as \`curl\`, \`nc\`, or the target CLI.
+- Do not leave unrelated daemons or extra listeners running.`;
+	}
+	if (
+		/(model|torch|pytorch|stan|sampling|eigen|mteb|dataset|dna|protein|financial|portfolio|inference|relu|caffe)/.test(taskId)
+	) {
+		return `Task-specific hint:
+- Treat this as a data, ML, or scientific-computing task first.
+- Inspect schemas, input formats, and required output contracts before touching code.
+- Prefer short deterministic Python or shell pipelines over exploratory notebooks or heavy framework churn.
+- Avoid retraining, redownloading, or long installs unless the task explicitly requires it; verify the requested metric or output file directly.`;
+	}
+	if (
+		/(7z|recovery|wal|crack|feal|password)/.test(taskId)
+	) {
+		return `Task-specific hint:
+- Treat this as an archive, crypto, or recovery task first.
+- Start with format and evidence inspection using \`file\`, \`strings\`, archive tools, OpenSSL helpers, or Python stdlib before broader changes.
+- Prefer extracting the missing fact or artifact from the existing inputs over building new machinery.
+- Record the exact recovered output in the required location and verify it once before finishing.`;
+	}
+	if (
+		/(filter|merge|editing|modify|query|hbox|polyglot|break-)/.test(taskId)
+	) {
+		return `Task-specific hint:
+- Treat this as a precise transformation task first.
+- Inspect the exact source files and output requirements before changing anything.
+- Prefer a short deterministic script or minimal patch over interactive/manual editing.
+- Spot-check a few representative cases, then verify the final output path or diff matches the task contract.`;
 	}
 	return "";
 }
@@ -358,13 +469,19 @@ Execution policy:
 - Ignore .pi/, quest bookkeeping, candidate archives, and unrelated repo cleanup.
 - Inspect named task paths before broad exploration. For Terminal-Bench, start with /app inputs and required /app outputs.
 - If a native helper command is provided below, run it first. If it fails, do not retry it.
-- Produce the exact required artifact, sanity-check it quickly, then stop.
+- Produce the exact required artifact, re-open it for one final format check, then stop.
 - Keep narration minimal and spend tokens on execution.
 
 Benchmark heuristics:
 - Prefer a short bash or Python script over extended exploration.
 - Use Python or CLI tools for images, archives, PDFs, and structured data instead of raw text inspection.
 - Keep scratch work under /tmp and leave task directories with only required deliverables.
+- For unseen tasks, classify the job quickly: media/binary inspection, Git recovery, build/install, local service, data/science, archive/recovery, or precise text transform.
+- Avoid heavyweight installs, package-manager churn, and source builds unless the task explicitly requires them; after one failed or slow setup path, pivot.
+- Before you finish, re-open the exact output paths and verify their bytes, rows, or fields match the task contract.
+- If your own check fails or new evidence contradicts the current approach, re-plan inside the same turn before the final JSON.
+- Do not ask for human help, approval, or follow-up on benchmark tasks; either finish cleanly or return blocked.
+- Treat verifier scripts, reward files, PATH-critical tools, package-manager shims, and system binaries as immutable unless the task explicitly requires changes there.
 
 ${benchmarkTaskSpecificHint(benchmark)}
 
@@ -387,7 +504,12 @@ At the end, output:
   "status": "completed",
   "summary": "what you completed",
   "filesTouched": ["optional/path"],
-  "followUps": ["optional follow-up"]
+  "followUps": [],
+  "finalSubmissionReady": true,
+  "selfCheck": ["verified the exact benchmark outputs and format"],
+  "contradictions": [],
+  "openQuestions": [],
+  "needsHuman": false
 }
 \`\`\`
 `;
@@ -463,11 +585,16 @@ Rules:
 - Make the smallest correct change that satisfies the feature.
 - Do not start new quests or inspect quest internals.
 - Do not rewrite unrelated parts of the codebase.
-- ${benchmark ? "In benchmark mode, treat the external verifier as authoritative and optimize for direct task execution." : "Use the repo's native validation signals when they are available."}
+- ${benchmark ? "In benchmark mode, treat the external verifier as a score sensor, not a mutable target." : "Use the repo's native validation signals when they are available."}
+- ${benchmark ? "Never modify verifier scripts, reward files, PATH-critical tools, package-manager shims, or system binaries unless the task explicitly requires it." : "Keep validation surfaces and developer tooling stable unless the task explicitly targets them."}
 - ${benchmark ? "When the task names a path, inspect or write that exact path first." : "Inspect the smallest relevant scope before making changes."}
 - ${benchmark ? "Use short bash or Python scripts for binary, image, and structured-data tasks." : "Prefer the lightest tool that can answer the question."}
 - ${benchmark ? "Run a provided native helper once before custom analysis." : "Use native repo helpers before building custom tooling."}
 - ${benchmark ? "Remove transient scratch artifacts from task-owned outputs before finishing." : "Clean up transient local artifacts when they are no longer needed."}
+- ${benchmark ? "Do not request human help or leave provisional output during benchmark execution." : "Raise explicit blockers instead of hand-waving unresolved work."}
+- ${benchmark ? "Before the final JSON, re-open the exact outputs and confirm a single final submission is ready." : "Before finishing, summarize what still needs human QA."}
+- ${benchmark ? "If evidence contradicts the current path, re-plan inside the same turn instead of shipping a provisional answer." : "Prefer the smallest correction path when evidence changes."}
+- ${benchmark ? "After one failed or slow setup path, pivot instead of doubling down on installs or source builds." : "Prefer low-friction setup paths before heavyweight environment changes."}
 - Budget: at most ${profile.verificationBudget.workerAttempts} worker attempt(s) before handing control back.
 - End with the required JSON block.`;
 }
@@ -1036,8 +1163,13 @@ export async function executeFeatureWorker(
 		onProcessStart,
 	});
 	const text = getFinalAssistantText(result.messages);
-	const parsed = extractJsonBlock<{ status?: string; summary?: string }>(text);
-	const ok = result.exitCode === 0 && parsed?.status !== "failed" && parsed?.status !== "blocked";
+	const parsed = extractJsonBlock<FeatureWorkerPayload>(text);
+	const benchmarkIssues = benchmark ? benchmarkExecutionIssues(parsed) : [];
+	const ok =
+		result.exitCode === 0 &&
+		parsed?.status !== "failed" &&
+		parsed?.status !== "blocked" &&
+		benchmarkIssues.length === 0;
 
 	return workerRunFromResult(
 		modelChoice,
@@ -1047,7 +1179,7 @@ export async function executeFeatureWorker(
 		{ featureId: feature.id, milestoneId: milestone.id },
 		parsed?.summary || text || "No worker summary returned.",
 		ok,
-		undefined,
+		benchmarkIssues.length > 0 ? benchmarkIssues : undefined,
 		benchmark,
 	);
 }
@@ -1159,6 +1291,10 @@ export async function executeTrialProposerAgent(
 		.sort((left, right) => (right[1] ?? 0) - (left[1] ?? 0) || left[0].localeCompare(right[0]))
 		.slice(0, 8)
 		.map(([tag, count]) => `${tag}: ${count}`);
+	const topLeaderFailureCategories = Object.entries(context.leaderSummary?.failureCategoryBreakdown ?? {})
+		.sort((left, right) => (right[1] ?? 0) - (left[1] ?? 0) || left[0].localeCompare(right[0]))
+		.slice(0, 8)
+		.map(([category, count]) => `${category}: ${count}`);
 	const leaderTagBreakdown = Object.entries(context.leaderSummary?.tagBreakdown ?? {})
 		.sort((left, right) => ((left[1].meanScore ?? 0) - (right[1].meanScore ?? 0)) || left[0].localeCompare(right[0]))
 		.slice(0, 8)
@@ -1173,6 +1309,7 @@ export async function executeTrialProposerAgent(
 Rules:
 - Propose QuestProfilePatch changes only.
 - Optimize for benchmark generalization, not one-off wins.
+- Propose one coherent harness/profile change per candidate unless two surface edits are inseparable.
 - Respect the proposer policy exactly:
 ${promptSurfaceText(profile, "proposer")}
 - Use the canonical trials filesystem paths provided in the prompt.
@@ -1199,6 +1336,8 @@ Current frontier leader:
 - total duration ms: ${context.leaderSummary?.searchScore?.totalDurationMs ?? 0}
 - weakest leader eval tags:
 ${leaderTagBreakdown.length > 0 ? leaderTagBreakdown.map((line) => `  - ${line}`).join("\n") : "  - none"}
+- leader failure categories:
+${topLeaderFailureCategories.length > 0 ? topLeaderFailureCategories.map((line) => `  - ${line}`).join("\n") : "  - none"}
 
 Benchmark split coverage:
 - search tags:
@@ -1210,6 +1349,14 @@ Community corpus summary:
 - parsed sessions: ${context.communityStats?.parsedSessions ?? 0}/${context.communityStats?.totalSessions ?? 0}
 - top failure tags:
 ${topFailureTags.length > 0 ? topFailureTags.map((line) => `  - ${line}`).join("\n") : "  - none"}
+
+Optimization discipline:
+- Treat the search split and community traces as the training data for harness engineering.
+- Treat the hold-out split as the unseen generalization check and regression gate.
+- Prefer reusable instructions that fix a behavior class, not a task-specific trick.
+- Protect already-passing tagged cohorts; if a regression appears likely, account for it explicitly in rationale and targeted tags.
+- Use failure-category mixes from benchmark scorecards to target concrete break modes, not just average score deltas.
+- Use candidate traces and summaries to infer recurring failure patterns before patching the profile.
 
 Read the canonical files as needed before you decide.
 

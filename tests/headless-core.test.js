@@ -181,3 +181,52 @@ test("benchmark trace bundles preserve slopcodebench provenance without replay d
 		await rm(repoDir, { recursive: true, force: true });
 	}
 });
+
+test("runQuestHeadless blocks benchmark runs with unresolved execution findings", async () => {
+	const repoDir = await mkdtemp(join(tmpdir(), "pi-quests-headless-blocked-"));
+	try {
+		let validatorCalls = 0;
+		const result = await runQuestHeadless(
+			{
+				cwd: repoDir,
+				instruction: "Finish the benchmark task.",
+				modelChoice: DEFAULT_MODEL,
+				benchmark: {
+					benchmark: "terminal-bench",
+					dataset: "terminal-bench-sample@2.0",
+					taskId: "task-002",
+					runMode: "sample",
+					adapterVersion: "quest-bench-v1",
+				},
+			},
+			{
+				async probe() {
+					throw new Error("benchmark fast path should not call probe");
+				},
+				async planner() {
+					throw new Error("benchmark fast path should not call planner");
+				},
+				async worker(_quest, _feature, _milestone, _modelChoice, _workflows, _profile, benchmark) {
+					return makeRun("worker", "Worker stopped with unresolved handoff.", benchmark, {
+						ok: true,
+						issues: ["Worker requested human handoff during benchmark execution."],
+						featureId: "f1",
+						milestoneId: "m1",
+					});
+				},
+				async validator() {
+					validatorCalls += 1;
+					throw new Error("benchmark fast path should not call validator");
+				},
+			},
+		);
+
+		assert.equal(result.status, "blocked");
+		assert.deepEqual(result.executionFindings, ["Worker requested human handoff during benchmark execution."]);
+		assert.equal(result.failureCategory, "human_handoff");
+		assert.equal(validatorCalls, 0);
+		assert.ok(existsSync(result.artifactPaths.result));
+	} finally {
+		await rm(repoDir, { recursive: true, force: true });
+	}
+});

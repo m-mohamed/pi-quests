@@ -34,19 +34,19 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 		promptSurfaces: {
 			version: PROFILE_VERSION,
 			planningPolicy:
-				"- Be explicit when validation is limited or unsupported.\n- Keep the first plan small and serial.\n- Preserve the final human QA handoff.\n- Prefer structured quest tools over ad-hoc file edits.",
+				"- Be explicit when validation is limited or unsupported.\n- Keep the first plan small and serial.\n- Preserve the final human QA handoff.\n- Prefer structured quest tools over ad-hoc file edits.\n- Prefer tagged eval cohorts and cheap real probes over anecdotal debugging when shaping benchmark work.",
 			workerPolicy:
-				"- Confirm prerequisites before deep implementation.\n- Prefer the shortest proof path that satisfies the assigned feature.\n- Spill very long evidence into trial reports instead of bloating inline summaries.",
+				"- Confirm prerequisites before deep implementation.\n- Prefer the shortest proof path that satisfies the assigned feature.\n- For benchmark work, classify unseen tasks quickly by modality: media/binary, Git recovery, build/install, local service, data/science, archive/recovery, or precise text transform.\n- Re-open named benchmark outputs before finishing and confirm one final submission is actually ready.\n- If evidence contradicts the current path, re-plan inside the same turn instead of shipping provisional output.\n- After one failed or slow setup path, pivot instead of doubling down on installs or source builds.\n- Spill very long evidence into trial reports instead of bloating inline summaries.\n- After benchmark-facing changes, run the cheapest real Harbor smoke that exercises the edited surface before expensive sample runs.",
 			validatorCodeReviewPolicy:
 				"- Stay read-only and call out weak validation honestly.\n- Prefer root-cause findings over adding repetitive corrective work.\n- Treat missing prerequisites as first-class issues.",
 			validatorUserSurfacePolicy:
 				"- Stay read-only and describe what remains limited.\n- Preserve the explicit human QA gate for final polish.\n- Prefer concise operator-facing findings over verbose transcripts.",
 			readinessPolicy:
-				"- Mark unsupported surfaces as unsupported.\n- Capture prerequisites, services, and commands that affect validation confidence.\n- Note when browser or user-surface checks still require manual coverage.",
+				"- Mark unsupported surfaces as unsupported.\n- Capture prerequisites, services, and commands that affect validation confidence.\n- Note when browser or user-surface checks still require manual coverage.\n- Prefer real cheap probes over static guesses when a benchmark-facing path changed.",
 			revisionPolicy:
 				"- Preserve completed work.\n- Keep the remaining plan serial by default.\n- Revise only unfinished milestones, unfinished features, and unfinished validation.",
 			proposerPolicy:
-				"- Read candidate profiles, summaries, and benchmark artifacts from .pi/quests/trials/candidates/.\n- Read community trace statistics from .pi/quests/trials/community-stats.json.\n- Optimize for search-set mean score first, then lower cost, then lower duration.\n- Use hold-out results only as a regression gate, not as an overfitting target.\n- Prefer changes that improve weak behavioral tag cohorts, not one-off task ids.\n- Propose a QuestProfilePatch only on profile-owned surfaces.\n- Output valid JSON only: summary, rationale, generalizationNote, targetedTags, targetedCaseIds, promptSurfaceIds, patch.\n- Do not execute code and do not mutate files.",
+				"- Read candidate profiles, summaries, and benchmark artifacts from .pi/quests/trials/candidates/.\n- Read community trace statistics from .pi/quests/trials/community-stats.json.\n- Treat tagged benchmark splits and mined community traces as the training data for harness engineering.\n- Optimize for search-set mean score first, then lower cost, then lower duration.\n- Use hold-out results only as a regression gate and generalization check, not as an overfitting target.\n- Use benchmark failure-category mixes to target concrete break modes, not just pass-rate deltas.\n- Prefer changes that improve weak behavioral tag cohorts, not one-off task ids.\n- Propose one coherent harness/profile change per candidate unless two surface edits are inseparable.\n- Protect already-passing cohorts; use new regressions as next-iteration input instead of accepting silent backslides.\n- Propose a QuestProfilePatch only on profile-owned surfaces.\n- Output valid JSON only: summary, rationale, generalizationNote, targetedTags, targetedCaseIds, promptSurfaceIds, patch.\n- Do not execute code and do not mutate files.",
 		},
 		toolAllowlist: {
 			orchestrator: ["read", "bash"],
@@ -108,11 +108,18 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 			computationalGuides: {
 				enabled: true,
 				linterConfigs: ["Use the repo-native check or lint/typecheck entrypoint before promotion."],
-				preCommitHooks: ["Preserve canonical benchmark and quest artifacts; do not add side-channel state."],
-				structuralTests: ["Run the benchmark-facing preflight or smoke path after changing benchmark adapters or helpers."],
+				preCommitHooks: [
+					"Preserve canonical benchmark and quest artifacts; do not add side-channel state.",
+					"Archive regressions and benchmark traces instead of hiding them behind summaries.",
+				],
+				structuralTests: [
+					"Run the benchmark-facing preflight or smoke path after changing benchmark adapters or helpers.",
+					"Use the cheapest real Harbor smoke that covers the edited surface before a sample run.",
+				],
 				archConstraints: [
 					"Keep frontier Trials as the only optimization runtime.",
 					"Keep proposer edits constrained to profile-owned surfaces.",
+					"Keep benchmark splits tagged and source-fingerprinted so drift is explicit.",
 				],
 			},
 			inferentialGuides: {
@@ -127,13 +134,25 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 					linters: ["repo-native check or lint command"],
 					typeCheckers: ["repo-native typecheck command"],
 					testRunners: ["repo-native test suite", "benchmark preflight or smoke for benchmark-facing changes"],
-					driftDetectors: ["benchmark split sourceFingerprint changes", "community corpus stats drift"],
+					driftDetectors: [
+						"benchmark split sourceFingerprint changes",
+						"benchmark tag distribution drift",
+						"community corpus stats drift",
+					],
 				},
 				inferential: {
 					enabled: true,
 					codeReviewAgents: ["validator-code-review"],
-					qualityJudges: ["hold-out regression gate", "operator review for costly or low-signal edits"],
-					runtimeMonitors: ["quest-headless JSON artifact validation", "benchmark smoke probe"],
+					qualityJudges: [
+						"hold-out regression gate",
+						"always-pass regression subset",
+						"operator review for costly, overfit, or low-signal edits",
+					],
+					runtimeMonitors: [
+						"quest-headless JSON artifact validation",
+						"benchmark smoke probe",
+						"candidate trace and failure-tag drift review",
+					],
 				},
 			},
 			fitnessFunctions: {

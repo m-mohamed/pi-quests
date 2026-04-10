@@ -4,9 +4,12 @@ import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inspectHarborInstallation } from "./harbor-integrity.js";
+import { resolveHarborPython } from "./harbor-runtime.js";
 import { applyQuestProfilePatch } from "./trials-core.js";
 import { getQuestTrialPaths, loadQuestProfile, loadQuestTrialState, saveQuestProfile, saveQuestTrialState } from "./state.js";
 import { analyzeCommunityTraces, loadCommunityStats, writeCommunityStats } from "./trace-analyzer.js";
+import { compact } from "./utils.js";
 import { executeTrialProposerAgent } from "./workers.js";
 import type {
 	CommunityStats,
@@ -66,6 +69,18 @@ interface FrontierTrialDependencies {
 	proposeCandidate?: typeof executeTrialProposerAgent;
 	runBenchmarkSet?: RunBenchmarkSetFn;
 	now?: () => number;
+}
+
+interface QuestHeadlessOutputPayload {
+	data?: {
+		status?: string;
+		summary?: string;
+		timeoutReason?: string;
+		validatorFindings?: string[];
+		executionFindings?: string[];
+		failureCategory?: string;
+		benchmark?: QuestBenchmarkProvenance;
+	};
 }
 
 export interface FrontierTrialStatus {
@@ -395,6 +410,69 @@ function buildTagBreakdown(results: QuestCandidateWorkItemResult[]): Record<stri
 	);
 }
 
+function normalizeFailureCategory(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const normalized = value.trim();
+	return normalized ? normalized : undefined;
+}
+
+function inferFailureCategoryFromText(text: string): string | undefined {
+	const normalized = text.toLowerCase();
+	if (!normalized) return undefined;
+	if (/harbor integrity gate|shared mutable environment|restores \/tests only/.test(normalized)) return "harness_integrity";
+	if (/quest-headless output file was empty|invalid quest-headless json|did not produce/.test(normalized)) return "missing_result";
+	if (/timed out|timeout|exceeded .*ms/.test(normalized)) return "quest_timeout";
+	if (/human handoff|human help|manual/.test(normalized)) return "human_handoff";
+	if (/contradict/.test(normalized)) return "contradictory_evidence";
+	if (/open question/.test(normalized)) return "open_questions";
+	if (/self-check|final submission/.test(normalized)) return "self_check_failed";
+	if (/install|dependency|package-manager|build from source|source build|setup path/.test(normalized)) return "setup_overreach";
+	if (/blocked|error|exception|failed/.test(normalized)) return "worker_failed";
+	return undefined;
+}
+
+function classifyFailureCategory(params: {
+	status: QuestCandidateWorkItemResult["status"];
+	score: number;
+	maxScore: number;
+	failureReason?: string;
+	questOutput?: QuestHeadlessOutputPayload | null;
+}): string | undefined {
+	const explicit = normalizeFailureCategory(params.questOutput?.data?.failureCategory);
+	if (explicit) return explicit;
+
+	const combinedText = compact(
+		[
+			params.failureReason ?? "",
+			params.questOutput?.data?.timeoutReason ?? "",
+			params.questOutput?.data?.summary ?? "",
+			...(params.questOutput?.data?.executionFindings ?? []),
+			...(params.questOutput?.data?.validatorFindings ?? []),
+		].join(" "),
+	);
+	const inferred = inferFailureCategoryFromText(combinedText);
+	if (inferred) return inferred;
+
+	if (params.questOutput?.data?.status === "timeout") return "quest_timeout";
+	if (params.questOutput?.data?.status === "blocked") return "worker_failed";
+	if (params.status === "failed" && params.score < params.maxScore) return "score_shortfall";
+	if (params.status === "error") return "worker_failed";
+	return undefined;
+}
+
+function buildFailureCategoryBreakdown(results: QuestCandidateWorkItemResult[]): Record<string, number> {
+	const counts = new Map<string, number>();
+	for (const result of results) {
+		const category = normalizeFailureCategory(result.benchmarkMetrics?.failureCategory);
+		if (!category) continue;
+		counts.set(category, (counts.get(category) ?? 0) + 1);
+	}
+	return Object.fromEntries(
+		[...counts.entries()]
+			.sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])),
+	);
+}
+
 function normalizeFrontierFamily(value: unknown): QuestFrontierBenchmarkFamily {
 	return value === "slopcodebench" ? "slopcodebench" : "terminal-bench";
 }
@@ -521,17 +599,6 @@ function normalizeTerminalBenchManifest(raw: any, dataset: string, runMode: Ques
 
 function vendoredTerminalBenchManifestFile(dataset: string): string {
 	return join(PACKAGE_ROOT, "benchmarks", "harbor", "manifests", `${dataset}.json`);
-}
-
-async function resolveHarborPython(): Promise<string> {
-	const harborExecutable = process.env.HARBOR_BIN ?? process.env.HARBOR_CLI ?? "/Users/mohamedmohamed/.local/bin/harbor";
-	const harborPath = existsSync(harborExecutable) ? harborExecutable : "harbor";
-	const resolvedHarbor = harborPath === "harbor" ? await realpath("/Users/mohamedmohamed/.local/bin/harbor").catch(() => null) : await realpath(harborPath);
-	const pythonPath = resolvedHarbor ? join(dirname(resolvedHarbor), "python") : "";
-	if (!pythonPath || !existsSync(pythonPath)) {
-		throw new Error("Unable to locate Harbor's Python runtime for dataset metadata loading.");
-	}
-	return pythonPath;
 }
 
 async function loadTerminalBenchRegistryManifest(dataset: string, runMode: QuestBenchmarkRunMode): Promise<QuestBenchmarkManifest> {
@@ -698,7 +765,7 @@ async function parseHarborScorecard(
 				modelChoice: fallbackModel,
 				artifactPaths: [],
 				failureReason: "Harbor did not produce a result for this task.",
-				benchmarkMetrics: { workItemTags: item.tags },
+				benchmarkMetrics: { workItemTags: item.tags, failureCategory: "missing_result" },
 				benchmark: benchmarkProvenance("terminal-bench", dataset, runMode, item.id, fallbackModel, 0, false),
 			});
 			continue;
@@ -716,8 +783,9 @@ async function parseHarborScorecard(
 				: undefined;
 		const model = harborModelChoiceLabel(trial.result, fallbackModel);
 		const questOutputFile = join(trial.trialDir, "artifacts", "quest-headless-output.json");
-		const questOutput = await readJsonFile<{ data?: { benchmark?: QuestBenchmarkProvenance } }>(questOutputFile);
+		const questOutput = await readJsonFile<QuestHeadlessOutputPayload>(questOutputFile);
 		const status = failureReason ? "error" : score >= maxScore ? "passed" : "failed";
+		const failureCategory = classifyFailureCategory({ status, score, maxScore, failureReason, questOutput });
 		results.push({
 			itemId: item.id,
 			itemName: item.name,
@@ -737,6 +805,7 @@ async function parseHarborScorecard(
 			rewardValues: rewards,
 			benchmarkMetrics: {
 				workItemTags: item.tags,
+				...(failureCategory ? { failureCategory } : {}),
 				...(rewards ? { rewardValues: rewards } : {}),
 			},
 			benchmark: questOutput?.data?.benchmark ?? benchmarkProvenance("terminal-bench", dataset, runMode, item.id, model, score, status === "passed"),
@@ -761,6 +830,9 @@ async function parseHarborScorecard(
 		totalCost,
 		totalDurationMs,
 		tagBreakdown: buildTagBreakdown(results),
+		benchmarkMetrics: {
+			failureCategories: buildFailureCategoryBreakdown(results),
+		},
 		items: results,
 	};
 }
@@ -773,6 +845,10 @@ async function runTerminalBenchSplit(options: {
 	candidateId: string;
 	onProcessStart?: (pid: number) => void | Promise<void>;
 }): Promise<QuestCandidateScorecard> {
+	const integrity = await inspectHarborInstallation();
+	if (!integrity.ok) {
+		throw new Error(`Harbor integrity gate failed. ${integrity.summary}`);
+	}
 	const jobsDir = benchmarkRoot(options.cwd, options.candidateId, options.split.split);
 	await mkdir(jobsDir, { recursive: true });
 	const args = [
@@ -1042,7 +1118,7 @@ async function parseSlopScorecard(
 				trialDir: existsSync(problemDir) ? problemDir : undefined,
 				artifactPaths: [],
 				failureReason: "Official SlopCodeBench run did not produce checkpoint results for this problem.",
-				benchmarkMetrics: { workItemTags: item.tags },
+				benchmarkMetrics: { workItemTags: item.tags, failureCategory: "missing_result" },
 				benchmark: benchmarkProvenance("slopcodebench", dataset, runMode, item.id, runSummary.model ?? fallbackModel, 0, false),
 			});
 			continue;
@@ -1059,6 +1135,7 @@ async function parseSlopScorecard(
 		}, 0);
 		const status: QuestCandidateWorkItemResult["status"] = solvedCheckpoints === checkpoints.length ? "passed" : "failed";
 		const questOutputFile = existsSync(problemDir) ? await findQuestHeadlessOutput(problemDir) : undefined;
+		const failureCategory = status === "passed" ? undefined : "score_shortfall";
 		results.push({
 			itemId: item.id,
 			itemName: item.name,
@@ -1076,6 +1153,7 @@ async function parseSlopScorecard(
 			artifactPaths: [],
 			benchmarkMetrics: {
 				workItemTags: item.tags,
+				...(failureCategory ? { failureCategory } : {}),
 				checkpointCount: checkpoints.length,
 				solvedCheckpoints,
 				passRateMean: score,
@@ -1116,6 +1194,7 @@ async function parseSlopScorecard(
 			time: runSummary.time,
 			tokens: runSummary.tokens,
 			passRates: runSummary.pass_rates,
+			failureCategories: buildFailureCategoryBreakdown(results),
 		},
 		items: results,
 	};
@@ -1662,6 +1741,7 @@ export async function runTrialOptimization(
 									totalDurationMs: leader.searchScore.totalDurationMs,
 								},
 								tagBreakdown: leader.searchScore.tagBreakdown,
+								failureCategoryBreakdown: (leader.searchScore.benchmarkMetrics?.failureCategories as Record<string, number> | undefined) ?? undefined,
 							}
 						: undefined,
 			},
@@ -1746,8 +1826,13 @@ export function summarizeTrialStatus(status: FrontierTrialStatus): string {
 	const searchSummary = status.searchSet ? `${status.searchSet.totalItems} search` : "no search split";
 	const holdOutSummary = status.holdOutSet ? `${status.holdOutSet.totalItems} hold-out` : "no hold-out split";
 	const communitySummary = status.communityStats ? `${status.communityStats.parsedSessions}/${status.communityStats.totalSessions} community sessions` : "no community stats";
+	const leaderFailureCategories = Object.entries((status.leader?.searchScore?.benchmarkMetrics?.failureCategories as Record<string, number> | undefined) ?? {})
+		.sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+		.slice(0, 3)
+		.map(([category, count]) => `${category}:${count}`)
+		.join(", ");
 	const leaderSummary = status.leader?.searchScore
-		? `leader ${status.leader.candidateId} mean=${status.leader.searchScore.meanScore.toFixed(3)} cost=${status.leader.searchScore.totalCost.toFixed(3)} duration=${status.leader.searchScore.totalDurationMs}ms`
+		? `leader ${status.leader.candidateId} mean=${status.leader.searchScore.meanScore.toFixed(3)} cost=${status.leader.searchScore.totalCost.toFixed(3)} duration=${status.leader.searchScore.totalDurationMs}ms${leaderFailureCategories ? ` failures=${leaderFailureCategories}` : ""}`
 		: "no frontier leader";
 	return [
 		`Trials status: ${status.state.status}`,

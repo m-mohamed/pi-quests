@@ -13,7 +13,7 @@ const DEFAULT_MODEL = {
 	thinkingLevel: "high",
 };
 
-function fakeScorecard(split, meanScore, totalCost, totalDurationMs) {
+function fakeScorecard(split, meanScore, totalCost, totalDurationMs, benchmarkMetrics = undefined) {
 	const perItemScore = split.items.length > 0 ? meanScore : 0;
 	return {
 		family: split.family,
@@ -28,6 +28,7 @@ function fakeScorecard(split, meanScore, totalCost, totalDurationMs) {
 		meanScore,
 		totalCost,
 		totalDurationMs,
+		benchmarkMetrics,
 		items: split.items.map((item) => ({
 			itemId: item.id,
 			itemName: item.name,
@@ -93,6 +94,86 @@ test("prepareTrialBenchmark writes the deterministic 7/3 sample split", async ()
 		assert.ok((prepared.searchSet.tagSummary["terminal-bench"] ?? 0) > 0);
 		assert.ok((prepared.holdOutSet.tagSummary["terminal-bench"] ?? 0) > 0);
 		assert.equal(new Set([...prepared.searchSet.items, ...prepared.holdOutSet.items].map((item) => item.name)).size, 10);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runTrialOptimization passes leader failure categories into proposer context", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-failure-cats-"));
+	try {
+		await seedCommunityDir(cwd);
+		let capturedContext = null;
+		await runTrialOptimization(
+			cwd,
+			DEFAULT_MODEL,
+			{ iterations: 1 },
+			{
+				analyzeCommunity: async () => ({
+					generatedAt: Date.now(),
+					totalFiles: 1,
+					totalSessions: 1,
+					parsedSessions: 1,
+					failedSessions: 0,
+					failedPaths: [],
+					sources: {},
+					models: {},
+					providers: {},
+					totalInputTokens: 0,
+					totalOutputTokens: 0,
+					totalCacheRead: 0,
+					totalCacheWrite: 0,
+					totalCost: 0,
+					avgDurationMs: 0,
+					avgToolCalls: 0,
+					avgErrors: 0,
+					avgMessages: 0,
+					failureTags: { weak_validation: 2 },
+					topToolNames: {},
+					sessionDurationBuckets: [],
+				}),
+				proposeCandidate: async (_cwd, _model, _profile, _target, context) => {
+					capturedContext = context;
+					return {
+						run: {
+							id: "proposer-run",
+							role: "proposer",
+							startedAt: Date.now(),
+							endedAt: Date.now(),
+							provider: DEFAULT_MODEL.provider,
+							model: DEFAULT_MODEL.model,
+							thinkingLevel: DEFAULT_MODEL.thinkingLevel,
+							exitCode: 0,
+							ok: true,
+							summary: "Candidate",
+							phase: "propose",
+							events: [],
+						},
+						candidate: {
+							id: "candidate-agent",
+							source: "agent",
+							summary: "Candidate",
+							rationale: "Candidate rationale",
+							generalizationNote: "Candidate generalization note",
+							targetedTags: ["weak_validation"],
+							targetedCaseIds: [],
+							promptSurfaceIds: ["feature-worker"],
+							patch: { promptSurfaces: { workerPolicy: "New worker policy" } },
+						},
+					};
+				},
+				runBenchmarkSet: async (_cwd, _model, _profileId, split, candidateId) => {
+					if (candidateId === "000") {
+						return fakeScorecard(split, 0.4, 5, 500, { failureCategories: { score_shortfall: 4, self_check_failed: 2 } });
+					}
+					return fakeScorecard(split, 1, 1, 200, { failureCategories: {} });
+				},
+			},
+		);
+		assert.deepEqual(capturedContext?.leaderSummary?.failureCategoryBreakdown, {
+			score_shortfall: 4,
+			self_check_failed: 2,
+		});
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

@@ -615,11 +615,11 @@ planning → proposal_ready → running → completed
 │   ─────────                    ──────           ────────            │
 │                                                                     │
 │   HARNESS ENGINEERING                                                │
-│   ├─ Computational Guides     ⚠️  Sparse       Mostly empty defaults │
-│   ├─ Inferential Guides       ⚠️  Sparse       Mostly empty defaults │
-│   ├─ Computational Sensors    ⚠️  Sparse       Enabled, little filled│
-│   ├─ Inferential Sensors      ⚠️  Sparse       Disabled by default   │
-│   ├─ Fitness Functions        ⚠️  Sparse       Defined, not populated│
+│   ├─ Computational Guides     ✅ Implemented   Populated defaults     │
+│   ├─ Inferential Guides       ✅ Implemented   Populated defaults     │
+│   ├─ Computational Sensors    ⚠️  Partial      Enabled, needs depth   │
+│   ├─ Inferential Sensors      ⚠️  Partial      Enabled, needs depth   │
+│   ├─ Fitness Functions        ✅ Implemented   Defined and enforced   │
 │   ├─ Maintainability Harness  ✅ Implemented   Full                 │
 │   ├─ Architecture Fitness     ✅ Implemented   Full                 │
 │   └─ Behaviour Harness        ⚠️  Partial      Framework only       │
@@ -671,8 +671,8 @@ planning → proposal_ready → running → completed
 
 | Gap | Priority | Description |
 |-----|----------|-------------|
-| **Harness Sensors Are Thin** | High | The frontier loop is automated, but most computational and inferential sensors are still empty defaults |
-| **Benchmark Readiness Probe** | High | Preflight does not yet prove a cheap real Harbor task before a sample run |
+| **Harness Sensors Are Thin** | High | The frontier loop is automated and the sensor arrays are populated, but the repo-specific checks and always-pass regression coverage are still shallow |
+| **Benchmark Readiness Probe** | Medium | Preflight already supports a real Harbor smoke task; remaining work is better task-specific smoke defaults for expensive benchmark surfaces |
 | **Artifact Quality Controls** | Medium | Candidate traces exist, but richer per-task summaries and failure surfacing would improve proposer leverage |
 | **OOD Generalization Testing** | Low | No explicit out-of-distribution validation of discovered harnesses |
 | **Search Space Definition** | Medium | No explicit definition of what dimensions the proposer can search over |
@@ -682,7 +682,7 @@ planning → proposal_ready → running → completed
 
 | Gap | Priority | Description |
 |-----|----------|-------------|
-| **Community Trace Ingestion** | Low | Community stats are live and wired into the proposer prompt; remaining work is better exploitation |
+| **Community Trace Ingestion** | Low | Community stats are live, tag-aware, and wired into the proposer prompt; remaining work is better automatic eval mining from traces |
 | **Benchmark Baseline** | High | The sample baseline still needs one uninterrupted successful run |
 | **Profile Versioning** | Low | No explicit versioning of profiles for rollback |
 | **Harness Template Library** | Low | No pre-built harness templates for common project types |
@@ -698,10 +698,10 @@ planning → proposal_ready → running → completed
 
 ### What Needs Work
 
-1. **Harness sensors** — Most guide and sensor arrays are still empty, so the harness is under-instrumented
+1. **Harness sensors** — The arrays are now populated, but they still need deeper repo-specific checks and a stronger always-pass regression subset
 2. **Behaviour harness** — AI-generated test quality problem not solved
 3. **Harness templates** — No pre-built harness bundles
-4. **Benchmark readiness** — Harbor preflight still needs a real cheap probe
+4. **Benchmark readiness** — Harbor preflight needs better smoke-task defaults for benchmark-specific surfaces like QEMU helpers
 5. **Benchmark baselines** — Need the first uninterrupted sample baseline to measure improvement against
 
 ---
@@ -728,5 +728,5 @@ planning → proposal_ready → running → completed
 
 ---
 
-*Last updated: 2026-04-07*
+*Last updated: 2026-04-08*
 *Part of the pi-quests project*

@@ -359,8 +359,8 @@ We implement this through:
 ### What's Missing (Needs Credits)
 
 1. Pass and archive the first uninterrupted Terminal-Bench sample baseline
-2. Fill the currently-empty harness guides and sensors with real project checks
-3. Run the first real proposer iteration on top of the archived baseline
+2. Deepen the harness sensors with repo-specific checks, always-pass regression subsets, and richer candidate summaries
+3. Run the first real proposer iteration on top of the archived baseline and review the resulting regressions by tag
 
 ---
 

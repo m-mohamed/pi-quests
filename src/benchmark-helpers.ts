@@ -12,6 +12,7 @@ export interface ParsedBenchmarkHelperArgs {
 	outputPath: string;
 }
 
+const QEMU_STARTUP_SERIAL_LOG = "/tmp/qemu-startup-serial.log";
 const QEMU_ALPINE_SSH_SERIAL_LOG = "/tmp/qemu-alpine-ssh-serial.log";
 const REGEX_LOG_IPV4_OCTET = String.raw`(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`;
 const REGEX_LOG_IPV4 = String.raw`${REGEX_LOG_IPV4_OCTET}(?:\.${REGEX_LOG_IPV4_OCTET}){3}`;
@@ -571,23 +572,23 @@ const QEMU_STARTUP_SCRIPT = String.raw`
 set -euo pipefail
 ISO_PATH="$1"
 DISK_PATH="$2"
+SERIAL_LOG="$3"
+if [ -z "$SERIAL_LOG" ]; then
+  SERIAL_LOG=/tmp/qemu-startup-serial.log
+fi
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
   echo "qemu-system-x86_64 is required" >&2
   exit 1
 fi
-if ! command -v expect >/dev/null 2>&1; then
-  echo "expect is required" >&2
-  exit 1
-fi
-if ! command -v bsdtar >/dev/null 2>&1 || ! command -v mkfs.vfat >/dev/null 2>&1 || ! command -v mcopy >/dev/null 2>&1; then
+if ! command -v bsdtar >/dev/null 2>&1 || ! command -v mkfs.vfat >/dev/null 2>&1 || ! command -v mcopy >/dev/null 2>&1 || ! command -v expect >/dev/null 2>&1 || ! command -v telnet >/dev/null 2>&1; then
   if ! command -v apt-get >/dev/null 2>&1; then
     echo "required helper dependencies are missing and apt-get is unavailable to install them" >&2
     exit 1
   fi
   export DEBIAN_FRONTEND=noninteractive
   apt-get update >/dev/null
-  apt-get install -y -qq libarchive-tools dosfstools mtools >/dev/null
+  apt-get install -y -qq libarchive-tools dosfstools mtools expect inetutils-telnet >/dev/null
 fi
 BOOT_DIR="$(mktemp -d)"
 OVERLAY_DIR="$(mktemp -d)"
@@ -597,6 +598,123 @@ cleanup() {
   rm -rf "$BOOT_DIR" "$OVERLAY_DIR" "$OVERLAY_IMAGE" "$EXPECT_FILE"
 }
 trap cleanup EXIT
+rm -f "$SERIAL_LOG"
+
+bsdtar -xOf "$ISO_PATH" boot/vmlinuz-lts > "$BOOT_DIR/vmlinuz-lts"
+bsdtar -xOf "$ISO_PATH" boot/initramfs-lts > "$BOOT_DIR/initramfs-lts"
+
+mkdir -p "$OVERLAY_DIR/etc"
+cat <<'EOF' > "$OVERLAY_DIR/etc/inittab"
+# /etc/inittab
+
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+
+tty1::respawn:/sbin/getty 38400 tty1
+tty2::respawn:/sbin/getty 38400 tty2
+tty3::respawn:/sbin/getty 38400 tty3
+tty4::respawn:/sbin/getty 38400 tty4
+tty5::respawn:/sbin/getty 38400 tty5
+tty6::respawn:/sbin/getty 38400 tty6
+ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100
+
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/openrc shutdown
+EOF
+printf 'localhost\n' > "$OVERLAY_DIR/etc/hostname"
+cat <<'EOF' > "$OVERLAY_DIR/etc/securetty"
+tty1
+tty2
+tty3
+tty4
+tty5
+tty6
+ttyS0
+EOF
+
+(cd "$OVERLAY_DIR" && tar -czf "$OVERLAY_DIR/localhost.apkovl.tar.gz" etc)
+truncate -s 8M "$OVERLAY_IMAGE"
+mkfs.vfat "$OVERLAY_IMAGE" >/dev/null
+mcopy -i "$OVERLAY_IMAGE" "$OVERLAY_DIR/localhost.apkovl.tar.gz" ::localhost.apkovl.tar.gz
+
+qemu-system-x86_64 -m 1024 \
+  -kernel "$BOOT_DIR/vmlinuz-lts" \
+  -initrd "$BOOT_DIR/initramfs-lts" \
+  -append "modules=loop,squashfs,sd-mod,usb-storage console=ttyS0 hostname=localhost" \
+  -drive file="$ISO_PATH",media=cdrom,readonly=on \
+  -drive file="$DISK_PATH",format=qcow2 \
+  -drive file="$OVERLAY_IMAGE",format=raw \
+  -device virtio-rng-pci \
+  -nic user,hostfwd=tcp::2222-:22 \
+  -daemonize -display none -vga none \
+  -serial telnet:127.0.0.1:6665,server,nowait
+
+cat <<'EOF' > "$EXPECT_FILE"
+log_user 1
+set timeout 15
+set serial_log [lindex $argv 0]
+log_file -a $serial_log
+set deadline [expr {[clock seconds] + 780}]
+sleep 5
+spawn telnet 127.0.0.1 6665
+while {1} {
+    send "\r"
+    expect {
+        "localhost login: " { puts "System is booted and ready"; exit 0 }
+        "login:" { puts "System is booted and ready"; exit 0 }
+        timeout {
+            if {[clock seconds] >= $deadline} {
+                puts stderr "Timed out waiting for system to boot"
+                exit 1
+            }
+            exp_continue
+        }
+        eof {
+            if {[clock seconds] >= $deadline} {
+                puts stderr "Serial console closed before login prompt"
+                exit 1
+            }
+            exp_continue
+        }
+    }
+}
+EOF
+expect -f "$EXPECT_FILE" "$SERIAL_LOG"
+`;
+
+const QEMU_ALPINE_SSH_BOOT_SCRIPT = String.raw`
+set -euo pipefail
+ISO_PATH="$1"
+DISK_PATH="$2"
+SERIAL_LOG="$3"
+if [ -z "$SERIAL_LOG" ]; then
+  SERIAL_LOG=/tmp/qemu-alpine-ssh-serial.log
+fi
+
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+  echo "qemu-system-x86_64 is required" >&2
+  exit 1
+fi
+if ! command -v bsdtar >/dev/null 2>&1 || ! command -v mkfs.vfat >/dev/null 2>&1 || ! command -v mcopy >/dev/null 2>&1 || ! command -v expect >/dev/null 2>&1 || ! command -v telnet >/dev/null 2>&1 || ! command -v sshpass >/dev/null 2>&1; then
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "required helper dependencies are missing and apt-get is unavailable to install them" >&2
+    exit 1
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update >/dev/null
+  apt-get install -y -qq libarchive-tools dosfstools mtools expect inetutils-telnet sshpass >/dev/null
+fi
+
+BOOT_DIR="$(mktemp -d)"
+OVERLAY_DIR="$(mktemp -d)"
+OVERLAY_IMAGE="$(mktemp).img"
+EXPECT_FILE="$(mktemp)"
+cleanup() {
+  rm -rf "$BOOT_DIR" "$OVERLAY_DIR" "$OVERLAY_IMAGE" "$EXPECT_FILE"
+}
+trap cleanup EXIT
+rm -f "$SERIAL_LOG"
 
 bsdtar -xOf "$ISO_PATH" boot/vmlinuz-lts > "$BOOT_DIR/vmlinuz-lts"
 bsdtar -xOf "$ISO_PATH" boot/initramfs-lts > "$BOOT_DIR/initramfs-lts"
@@ -644,152 +762,159 @@ qemu-system-x86_64 -m 1024 \
   -drive file="$DISK_PATH",format=qcow2 \
   -drive file="$OVERLAY_IMAGE",format=raw \
   -device virtio-rng-pci \
+  -nic user,hostfwd=tcp::2222-:22 \
   -daemonize -display none -vga none \
   -serial telnet:127.0.0.1:6665,server,nowait
 
 cat <<'EOF' > "$EXPECT_FILE"
-set timeout 300
+log_user 1
+set timeout 120
+set serial_log [lindex $argv 0]
+log_file -a $serial_log
+set debug_log [open $serial_log a]
+set prompt_deadline [expr {[clock seconds] + 900}]
 sleep 5
 spawn telnet 127.0.0.1 6665
-sleep 1
-send "\r"
+while {1} {
+    send "\r"
+    expect {
+        "localhost login: " { break }
+        "login:" { break }
+        timeout {
+            if {[clock seconds] >= $prompt_deadline} {
+                puts stderr "Timed out waiting for login prompt"
+                exit 1
+            }
+            exp_continue
+        }
+        eof {
+            if {[clock seconds] >= $prompt_deadline} {
+                puts stderr "Serial console closed before login prompt"
+                exit 1
+            }
+            exp_continue
+        }
+    }
+}
+puts $debug_log "\[helper\] reached login prompt"
+flush $debug_log
+send -- "root\r"
 expect {
-    "login:" { puts "System is booted and ready" }
-    timeout { puts "Timed out waiting for system to boot"; exit 1 }
+    -re {localhost:.*# } {}
+    -re {# } {}
+    timeout { puts stderr "Timed out waiting for root shell"; exit 1 }
 }
-EOF
-expect -f "$EXPECT_FILE"
-`;
-
-const QEMU_ALPINE_SSH_BOOT_SCRIPT = String.raw`
-set -euo pipefail
-ISO_PATH="$1"
-DISK_PATH="$2"
-SERIAL_LOG="$3"
-if [ -z "$SERIAL_LOG" ]; then
-  SERIAL_LOG=/tmp/qemu-alpine-ssh-serial.log
-fi
-
-if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-  echo "qemu-system-x86_64 is required" >&2
-  exit 1
-fi
-if ! command -v bsdtar >/dev/null 2>&1 || ! command -v mkfs.vfat >/dev/null 2>&1 || ! command -v mcopy >/dev/null 2>&1 || ! command -v sshpass >/dev/null 2>&1; then
-  if ! command -v apt-get >/dev/null 2>&1; then
-    echo "required helper dependencies are missing and apt-get is unavailable to install them" >&2
-    exit 1
-  fi
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update >/dev/null
-  apt-get install -y -qq libarchive-tools dosfstools mtools sshpass >/dev/null
-fi
-
-BOOT_DIR="$(mktemp -d)"
-OVERLAY_DIR="$(mktemp -d)"
-OVERLAY_IMAGE="$(mktemp).img"
-cleanup() {
-  rm -rf "$BOOT_DIR" "$OVERLAY_DIR" "$OVERLAY_IMAGE"
+send -- "export PS1='__PI_READY__# '\r"
+expect "__PI_READY__# "
+send -- "set -e\r"
+expect "__PI_READY__# "
+set commands [list \
+  "NET_IFACE=\$(ip -o link show | awk -F': ' '\$2 != \"lo\" {print \$2; exit}')" \
+  "test -n \"\$NET_IFACE\"" \
+  "ip link set \"\$NET_IFACE\" up" \
+  "i=0; until udhcpc -n -q -i \"\$NET_IFACE\"; do i=\$((i+1)); test \"\$i\" -lt 15; sleep 2; done" \
+  "echo 'root:password123' | chpasswd" \
+  "apk add --no-cache --repository /media/cdrom/apks openssh-server openssh-sftp-server" \
+  "ssh-keygen -A" \
+  "mkdir -p /run/sshd" \
+  "/usr/sbin/sshd -o PermitRootLogin=yes -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=no -o UseDNS=no -o PidFile=/run/sshd.pid" \
+  "echo setup-ssh complete" \
+]
+foreach cmd $commands {
+    send -- "$cmd; printf '__PI_EXIT__:%s\\n' \$?\r"
+    expect {
+        "__PI_EXIT__:0" {}
+        -re {__PI_EXIT__:[1-9][0-9]*} { puts stderr "Command failed while provisioning SSH: $cmd"; exit 1 }
+        timeout { puts stderr "Timed out running command: $cmd"; exit 1 }
+    }
+    expect {
+        "__PI_READY__# " {}
+        timeout { puts stderr "Timed out waiting for shell prompt after command: $cmd"; exit 1 }
+    }
 }
-trap cleanup EXIT
-rm -f "$SERIAL_LOG"
-
-bsdtar -xOf "$ISO_PATH" boot/vmlinuz-lts > "$BOOT_DIR/vmlinuz-lts"
-bsdtar -xOf "$ISO_PATH" boot/initramfs-lts > "$BOOT_DIR/initramfs-lts"
-
-mkdir -p "$OVERLAY_DIR/etc" "$OVERLAY_DIR/root"
-cat <<'EOF' > "$OVERLAY_DIR/etc/inittab"
-# /etc/inittab
-
-::sysinit:/sbin/openrc sysinit
-::sysinit:/sbin/openrc boot
-::wait:/sbin/openrc default
-::once:/root/setup-ssh.sh
-
-tty1::respawn:/sbin/getty 38400 tty1
-tty2::respawn:/sbin/getty 38400 tty2
-tty3::respawn:/sbin/getty 38400 tty3
-tty4::respawn:/sbin/getty 38400 tty4
-tty5::respawn:/sbin/getty 38400 tty5
-tty6::respawn:/sbin/getty 38400 tty6
-ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100
-
-::ctrlaltdel:/sbin/reboot
-::shutdown:/sbin/openrc shutdown
+puts $debug_log "\[helper\] completed provisioning"
+flush $debug_log
+close $debug_log
 EOF
-printf 'localhost\n' > "$OVERLAY_DIR/etc/hostname"
-cat <<'EOF' > "$OVERLAY_DIR/etc/securetty"
-tty1
-tty2
-tty3
-tty4
-tty5
-tty6
-ttyS0
-EOF
-cat <<'EOF' > "$OVERLAY_DIR/root/setup-ssh.sh"
-#!/bin/sh
-set -eu
-
-LOG_FILE="/var/log/setup-ssh.log"
-MARKER="/var/lib/setup-ssh.done"
-mkdir -p /var/log /var/lib
-if [ -f "$MARKER" ]; then
-  exit 0
-fi
-
-log() {
-  printf '%s\n' "$1" | tee -a "$LOG_FILE" >/dev/ttyS0 2>/dev/null || printf '%s\n' "$1" >>"$LOG_FILE"
-}
-
-log "starting setup-ssh"
-NET_IFACE="$(ip -o link show | awk -F': ' '$2 != "lo" {print $2; exit}')"
-if [ -z "$NET_IFACE" ]; then
-  log "no non-loopback network interface found"
-  exit 1
-fi
-
-log "using network interface $NET_IFACE"
-ip link set "$NET_IFACE" up
-
-i=0
-until udhcpc -i "$NET_IFACE"; do
-  i=$((i + 1))
-  if [ "$i" -ge 10 ]; then
-    log "dhcp failed"
-    exit 1
-  fi
-  sleep 2
-done
-
-echo 'root:password123' | chpasswd
-setup-sshd -c dropbear
-rc-service dropbear status
-touch "$MARKER"
-log "setup-ssh complete"
-EOF
-chmod +x "$OVERLAY_DIR/root/setup-ssh.sh"
-
-(cd "$OVERLAY_DIR" && tar -czf "$OVERLAY_DIR/localhost.apkovl.tar.gz" etc root)
-truncate -s 8M "$OVERLAY_IMAGE"
-mkfs.vfat "$OVERLAY_IMAGE" >/dev/null
-mcopy -i "$OVERLAY_IMAGE" "$OVERLAY_DIR/localhost.apkovl.tar.gz" ::localhost.apkovl.tar.gz
-
-qemu-system-x86_64 -m 1024 \
-  -kernel "$BOOT_DIR/vmlinuz-lts" \
-  -initrd "$BOOT_DIR/initramfs-lts" \
-  -append "modules=loop,squashfs,sd-mod,usb-storage console=ttyS0 hostname=localhost alpine_dev=sr0 modloop=/boot/modloop-lts alpine_repo=/media/cdrom/apks apkovl=sdb:vfat:localhost.apkovl.tar.gz" \
-  -drive file="$ISO_PATH",media=cdrom,readonly=on \
-  -drive file="$DISK_PATH",format=qcow2 \
-  -drive file="$OVERLAY_IMAGE",format=raw \
-  -device virtio-rng-pci \
-  -nic user,hostfwd=tcp::2222-:22 \
-  -daemonize -display none -vga none \
-  -serial file:"$SERIAL_LOG"
-sleep 2
+expect -f "$EXPECT_FILE" "$SERIAL_LOG"
 `;
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+function classifyQemuAlpineSshFailure(message: string, serialTail: string): string {
+	const lowerTail = serialTail.toLowerCase();
+	if (lowerTail.includes("timed out waiting for login prompt")) {
+		return `Serial boot never reached a login prompt on port 6665. ${message}`;
+	}
+	if (lowerTail.includes("serial console closed before login prompt")) {
+		return `Serial console dropped before Alpine reached a login prompt. ${message}`;
+	}
+	if (lowerTail.includes("no non-loopback network interface found")) {
+		return `Guest booted, but SSH provisioning could not find a usable network interface. ${message}`;
+	}
+	if (lowerTail.includes("dhcp failed")) {
+		return `Guest booted, but DHCP never completed during SSH provisioning. ${message}`;
+	}
+	if (
+		lowerTail.includes("openssh-server") &&
+		(lowerTail.includes("no such package") || lowerTail.includes("unable to select packages"))
+	) {
+		return `Guest booted, but Alpine could not install OpenSSH from the ISO repository. ${message}`;
+	}
+	if (
+		lowerTail.includes("sshd") &&
+		(lowerTail.includes("fatal") || lowerTail.includes("missing privilege separation directory") || lowerTail.includes("unsupported option"))
+	) {
+		return `Guest booted, but sshd failed to start after provisioning. ${message}`;
+	}
+	if (lowerTail.includes("command failed while provisioning ssh:")) {
+		return `Guest booted, but a serial provisioning command failed after login. ${message}`;
+	}
+	if (lowerTail.includes("timed out running command:")) {
+		return `Serial provisioning stalled while configuring SSH after login. ${message}`;
+	}
+	if (lowerTail.includes("timed out waiting for shell prompt after command:")) {
+		return `Serial provisioning lost the shell prompt while configuring SSH after login. ${message}`;
+	}
+	if (lowerTail.includes("setup-ssh complete")) {
+		return `Serial provisioning completed, but SSH on port 2222 never became ready. ${message}`;
+	}
+	if (lowerTail.includes("localhost login:") || lowerTail.includes("login:")) {
+		return `Serial boot reached a login prompt, but SSH provisioning never finished. ${message}`;
+	}
+	return message;
+}
+
+function classifyQemuStartupFailure(message: string, serialTail: string): string {
+	const lowerTail = serialTail.toLowerCase();
+	if (lowerTail.includes("timed out waiting for system to boot")) {
+		return `Serial boot never reached a login prompt on port 6665. ${message}`;
+	}
+	if (lowerTail.includes("serial console closed before login prompt")) {
+		return `Serial console dropped before Alpine reached a login prompt. ${message}`;
+	}
+	return message;
+}
+
+async function runQemuStartupHelper(parsed: ParsedBenchmarkHelperArgs): Promise<void> {
+	try {
+		await runShellScript(QEMU_STARTUP_SCRIPT, [parsed.inputPath, parsed.outputPath, QEMU_STARTUP_SERIAL_LOG]);
+	} catch (error) {
+		let serialTail = "";
+		try {
+			const serialLog = await readFile(QEMU_STARTUP_SERIAL_LOG, "utf-8");
+			serialTail = serialLog.trim().split("\n").slice(-80).join("\n");
+		} catch {
+			// Ignore missing serial logs; the primary error is still useful.
+		}
+		const message = classifyQemuStartupFailure(error instanceof Error ? error.message : String(error), serialTail);
+		if (!serialTail) {
+			throw new Error(message);
+		}
+		throw new Error(`${message}\nSerial log tail:\n${serialTail}`);
+	}
 }
 
 async function waitForSshReady(timeoutMs: number): Promise<void> {
@@ -806,7 +931,7 @@ async function waitForSshReady(timeoutMs: number): Promise<void> {
 				"-o",
 				"UserKnownHostsFile=/dev/null",
 				"-o",
-				"ConnectTimeout=5",
+				"ConnectTimeout=15",
 				"-p",
 				"2222",
 				"root@localhost",
@@ -840,7 +965,7 @@ async function runQemuAlpineSshHelper(parsed: ParsedBenchmarkHelperArgs): Promis
 		} catch {
 			// Ignore missing serial logs; the primary error is still useful.
 		}
-		const message = error instanceof Error ? error.message : String(error);
+		const message = classifyQemuAlpineSshFailure(error instanceof Error ? error.message : String(error), serialTail);
 		if (!serialTail) {
 			throw new Error(message);
 		}
@@ -909,7 +1034,8 @@ async function runCommand(command: string, args: string[], options: CommandOptio
 		proc.on("error", reject);
 		proc.on("close", (code) => {
 			if ((code ?? 1) !== 0) {
-				reject(new Error(stderr.trim() || stdout.trim() || `${command} exited with code ${code ?? 1}`));
+				const details = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
+				reject(new Error(details || `${command} exited with code ${code ?? 1}`));
 				return;
 			}
 			resolvePromise(stdout.trim());
@@ -933,7 +1059,8 @@ async function runShellScript(script: string, args: string[]): Promise<void> {
 		proc.on("error", reject);
 		proc.on("close", (code) => {
 			if ((code ?? 1) !== 0) {
-				reject(new Error(stderr.trim() || stdout.trim() || `bash exited with code ${code ?? 1}`));
+				const details = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
+				reject(new Error(details || `bash exited with code ${code ?? 1}`));
 				return;
 			}
 			resolvePromise();
@@ -1171,7 +1298,7 @@ export async function runBenchmarkHelper(parsed: ParsedBenchmarkHelperArgs): Pro
 		return;
 	}
 	if (parsed.family === "terminal-bench" && parsed.taskId === "qemu-startup") {
-		await runShellScript(QEMU_STARTUP_SCRIPT, [parsed.inputPath, parsed.outputPath]);
+		await runQemuStartupHelper(parsed);
 		return;
 	}
 	if (parsed.family === "terminal-bench" && parsed.taskId === "sqlite-with-gcov") {

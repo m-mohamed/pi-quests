@@ -145,12 +145,14 @@ It keeps Quest execution and Quest optimization separate:
 
 1. normal `/quest` runs stay focused on the current repo task
 2. Trials ingest raw Pi community sessions from `.pi/quests/trials/community-traces/` and generate canonical aggregate stats in `.pi/quests/trials/community-stats.json`
-3. `/quest trials prepare-benchmark` writes explicit search and hold-out work-item lists under `.pi/quests/trials/`
-4. `/quest trials baseline` archives the current profile as candidate `000`
-5. `/quest trials run` asks the `proposer` role to patch only trial-owned profile surfaces, then scores each candidate on the search split and validates it on hold-out
+3. `/quest trials prepare-benchmark` writes tagged, source-fingerprinted search and hold-out work-item lists under `.pi/quests/trials/`
+4. `/quest trials baseline` archives the current profile as candidate `000` so every hill-climb is grounded against a real baseline
+5. `/quest trials run` asks the `proposer` role to patch only trial-owned profile surfaces, one coherent change per candidate, then scores each candidate on the search split and validates it on hold-out
 6. non-dominated candidates stay on the Pareto frontier, and the current frontier leader is promoted to `.pi/quests/trials/current/profile.json`
 
 Trials do not mutate Quest runtime code during normal task execution, and they never auto-publish, auto-tag, or auto-release.
+
+Trials treat tagged evals and mined community traces as the training data for harness engineering. The search split is the optimization set, the hold-out split is the generalization gate, and candidate traces are preserved so regressions and wins stay inspectable.
 
 ### Trials Commands
 
@@ -242,6 +244,8 @@ npm run pack:check
 node --import tsx scripts/evals.ts --suite offline-core
 npm run benchmark:local
 ```
+
+When touching benchmark helpers or adapters, run the cheapest real Harbor smoke that covers the edited surface before an expensive sample run. `npm run benchmark:tbench:preflight -- --smoke-task <task>` is the canonical probe.
 
 Maintainer-only manual harnesses also live under `scripts/`, but they are not part of the publish gate.
 

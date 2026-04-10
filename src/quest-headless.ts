@@ -16,6 +16,9 @@ function usage(): string {
   quest-headless run --instruction "Fix the failing task" [options]
   quest-headless run --instruction-file ./task.txt [options]
 
+What it does:
+  Run a headless Quest and write result artifacts under .pi/quests/<quest-id>/.
+
 Options:
   --cwd <path>                     Working directory (default: current directory)
   --model <provider/model>         Model to use (default: zai/glm-5.1)
@@ -33,7 +36,11 @@ Options:
 
 Examples:
   quest-headless run --instruction-file ./task.txt --json
-  quest-headless run --instruction "Solve the task" --benchmark terminal-bench --dataset terminal-bench-sample@2.0 --task-id task-001 --run-mode sample --json`;
+  quest-headless run --instruction "Solve the task" --benchmark terminal-bench --dataset terminal-bench-sample@2.0 --task-id task-001 --run-mode smoke
+
+Notes:
+  Human mode prints a compact status summary plus the key artifact path.
+  JSON mode preserves the machine-readable Harbor/script contract.`;
 }
 
 export function parseModelChoice(modelSpec: string | undefined, thinkingLevel: string | undefined): ModelChoice {
@@ -159,16 +166,42 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 	};
 }
 
+function humanNextSteps(result: Awaited<ReturnType<typeof runQuestHeadless>>): string[] {
+	if (result.status === "blocked" || result.status === "timeout") {
+		const steps = [`bat ${result.artifactPaths.result}`];
+		if (result.artifactPaths.validationState) steps.push(`bat ${result.artifactPaths.validationState}`);
+		return steps;
+	}
+	if (result.status === "completed" && result.benchmark) {
+		return [`bat ${result.artifactPaths.result}`];
+	}
+	return [];
+}
+
 function printHumanSummary(result: Awaited<ReturnType<typeof runQuestHeadless>>): void {
-	console.log(`Quest ${result.questId} finished with status ${result.status}`);
-	console.log(result.summary);
+	console.log(`Quest ${result.questId}`);
+	console.log(`Status: ${result.status}`);
+	console.log(`Summary: ${result.summary}`);
 	console.log(`Profile: ${result.profileId}`);
+	console.log(`Result artifact: ${result.artifactPaths.result}`);
+	if (result.status === "blocked" || result.status === "timeout") {
+		console.log(`Failure: ${result.timeoutReason ?? result.executionFindings[0] ?? result.validatorFindings[0] ?? result.summary}`);
+		if (result.failureCategory) console.log(`Failure category: ${result.failureCategory}`);
+	}
 	console.log(`Traces: ${result.traceBundleIds.join(", ") || "none"}`);
+	if (result.executionFindings.length > 0) {
+		console.log("Execution findings:");
+		for (const finding of result.executionFindings) console.log(`- ${finding}`);
+	}
 	if (result.validatorFindings.length > 0) {
 		console.log("Validator findings:");
 		for (const finding of result.validatorFindings) console.log(`- ${finding}`);
 	}
-	console.log(`Result artifact: ${result.artifactPaths.result}`);
+	const nextSteps = humanNextSteps(result);
+	if (nextSteps.length > 0) {
+		console.log("Next:");
+		for (const step of nextSteps) console.log(`- ${step}`);
+	}
 }
 
 async function main() {

@@ -328,9 +328,15 @@ test("findWhiteMateInOneMoves matches the terminal-bench sample board", () => {
 	assert.deepEqual(moves, ["e2e4", "g2g4"]);
 });
 
-test("qemu-startup helper direct-boots Alpine with ttyS0 exposed over telnet", async () => {
+test("qemu-startup helper boots Alpine with an extracted serial kernel path and apkovl overlay", async () => {
 	const binDir = await mkdtemp(join(tmpdir(), "pi-quests-qemu-helper-"));
 	const captureFile = join(binDir, "qemu-args.txt");
+	const bsdtarCaptureFile = join(binDir, "bsdtar-args.txt");
+	const tarArgsFile = join(binDir, "tar-args.txt");
+	const overlayCaptureDir = join(binDir, "overlay");
+	const mcopyCaptureFile = join(binDir, "mcopy-args.txt");
+	const expectCaptureFile = join(binDir, "expect-args.txt");
+	const expectScriptFile = join(binDir, "expect-script.tcl");
 	const previousPath = process.env.PATH;
 	try {
 		await writeFile(
@@ -338,11 +344,62 @@ test("qemu-startup helper direct-boots Alpine with ttyS0 exposed over telnet", a
 			`#!/bin/sh\nprintf '%s\n' "$@" > ${JSON.stringify(captureFile)}\n`,
 			{ mode: 0o755 },
 		);
-		await writeFile(join(binDir, "bsdtar"), "#!/bin/sh\ncat /dev/null\n", { mode: 0o755 });
+		await writeFile(
+			join(binDir, "bsdtar"),
+			`#!/bin/sh
+printf '%s\n' "$@" >> ${JSON.stringify(bsdtarCaptureFile)}
+printf 'stub-boot-data\n'
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "tar"),
+			`#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(tarArgsFile)}
+output=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "-czf" ]; then
+    output="$arg"
+    break
+  fi
+  previous="$arg"
+done
+[ -d ${JSON.stringify(overlayCaptureDir)} ] && rm -rf ${JSON.stringify(overlayCaptureDir)}
+mkdir -p ${JSON.stringify(overlayCaptureDir)}
+[ -d "$PWD/etc" ] && cp -R "$PWD/etc" ${JSON.stringify(overlayCaptureDir)}/etc
+[ -n "$output" ] && : > "$output"
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "truncate"),
+			`#!/bin/sh
+last=""
+for arg in "$@"; do
+  last="$arg"
+done
+[ -n "$last" ] && : > "$last"
+`,
+			{ mode: 0o755 },
+		);
 		await writeFile(join(binDir, "mkfs.vfat"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-		await writeFile(join(binDir, "mcopy"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-		await writeFile(join(binDir, "truncate"), "#!/bin/sh\n: > \"$3\"\n", { mode: 0o755 });
-		await writeFile(join(binDir, "expect"), "#!/bin/sh\necho 'System is booted and ready'\n", { mode: 0o755 });
+		await writeFile(
+			join(binDir, "mcopy"),
+			`#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(mcopyCaptureFile)}
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "expect"),
+			`#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(expectCaptureFile)}
+cat "$2" > ${JSON.stringify(expectScriptFile)}
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(join(binDir, "telnet"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 		process.env.PATH = `${binDir}:${previousPath ?? ""}`;
 		await runBenchmarkHelper({
 			family: "terminal-bench",
@@ -350,22 +407,35 @@ test("qemu-startup helper direct-boots Alpine with ttyS0 exposed over telnet", a
 			inputPath: "/app/alpine.iso",
 			outputPath: "/app/alpine-disk.qcow2",
 		});
+		const bsdtarArgs = await readFile(bsdtarCaptureFile, "utf-8");
+		assert.match(bsdtarArgs, /\/app\/alpine\.iso/);
+		assert.match(bsdtarArgs, /boot\/vmlinuz-lts/);
+		assert.match(bsdtarArgs, /boot\/initramfs-lts/);
 		const captured = await readFile(captureFile, "utf-8");
-		assert.match(captured, /-kernel/);
-		assert.match(captured, /vmlinuz-lts/);
-		assert.match(captured, /-initrd/);
-		assert.match(captured, /initramfs-lts/);
-		assert.match(captured, /console=ttyS0/);
-		assert.match(captured, /modloop=\/boot\/modloop-lts/);
-		assert.match(captured, /apkovl=sdb:vfat:localhost\.apkovl\.tar\.gz/);
-		assert.match(captured, /-drive/);
-		assert.match(captured, /\/app\/alpine\.iso/);
-		assert.match(captured, /\/app\/alpine-disk\.qcow2/);
-		assert.match(captured, /-serial/);
-		assert.match(captured, /telnet:127\.0\.0\.1:6665,server,nowait/);
-		assert.match(captured, /-device/);
-		assert.match(captured, /virtio-rng-pci/);
+		assert.match(captured, /-kernel\n.*vmlinuz-lts/);
+		assert.match(captured, /-initrd\n.*initramfs-lts/);
+		assert.match(captured, /console=ttyS0 hostname=localhost/);
+		assert.match(captured, /-drive\nfile=\/app\/alpine\.iso,media=cdrom,readonly=on/);
+		assert.match(captured, /-drive\nfile=\/app\/alpine-disk\.qcow2,format=qcow2/);
+		assert.match(captured, /-drive\nfile=.*\.img,format=raw/);
+		assert.match(captured, /hostfwd=tcp::2222-:22/);
+		assert.match(captured, /-device\nvirtio-rng-pci/);
+		assert.match(captured, /-serial\ntelnet:127\.0\.0\.1:6665,server,nowait/);
 		assert.match(captured, /-daemonize/);
+		const tarArgs = await readFile(tarArgsFile, "utf-8");
+		assert.match(tarArgs, /-czf/);
+		assert.match(tarArgs, /localhost\.apkovl\.tar\.gz/);
+		assert.match(await readFile(join(overlayCaptureDir, "etc", "inittab"), "utf-8"), /ttyS0::respawn/);
+		assert.match(await readFile(join(overlayCaptureDir, "etc", "securetty"), "utf-8"), /ttyS0/);
+		const mcopyArgs = await readFile(mcopyCaptureFile, "utf-8");
+		assert.match(mcopyArgs, /localhost\.apkovl\.tar\.gz/);
+		const expectArgs = await readFile(expectCaptureFile, "utf-8");
+		assert.match(expectArgs, /-f/);
+		assert.match(expectArgs, /\/tmp\/qemu-startup-serial\.log/);
+		const expectScript = await readFile(expectScriptFile, "utf-8");
+		assert.match(expectScript, /localhost login/);
+		assert.match(expectScript, /set deadline/);
+		assert.match(expectScript, /Serial console closed before login prompt/);
 	} finally {
 		if (previousPath === undefined) delete process.env.PATH;
 		else process.env.PATH = previousPath;
@@ -373,10 +443,15 @@ test("qemu-startup helper direct-boots Alpine with ttyS0 exposed over telnet", a
 	}
 });
 
-test("qemu-alpine-ssh helper provisions SSH from the overlay bootstrap script", async () => {
+test("qemu-alpine-ssh helper uses the extracted serial boot path and provisions SSH over the console", async () => {
 	const binDir = await mkdtemp(join(tmpdir(), "pi-quests-qemu-ssh-helper-"));
 	const captureFile = join(binDir, "qemu-args.txt");
+	const bsdtarCaptureFile = join(binDir, "bsdtar-args.txt");
+	const tarArgsFile = join(binDir, "tar-args.txt");
 	const overlayCaptureDir = join(binDir, "overlay");
+	const mcopyCaptureFile = join(binDir, "mcopy-args.txt");
+	const expectCaptureFile = join(binDir, "expect-args.txt");
+	const expectScriptFile = join(binDir, "expect-script.tcl");
 	const sshpassCaptureFile = join(binDir, "sshpass-args.txt");
 	const previousPath = process.env.PATH;
 	try {
@@ -387,29 +462,61 @@ test("qemu-alpine-ssh helper provisions SSH from the overlay bootstrap script", 
 		);
 		await writeFile(
 			join(binDir, "bsdtar"),
-			"#!/bin/sh\nprintf 'stub-archive'\n",
+			`#!/bin/sh
+printf '%s\n' "$@" >> ${JSON.stringify(bsdtarCaptureFile)}
+printf 'stub-boot-data\n'
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "tar"),
+			`#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(tarArgsFile)}
+output=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "-czf" ]; then
+    output="$arg"
+    break
+  fi
+  previous="$arg"
+done
+[ -d ${JSON.stringify(overlayCaptureDir)} ] && rm -rf ${JSON.stringify(overlayCaptureDir)}
+mkdir -p ${JSON.stringify(overlayCaptureDir)}
+[ -d "$PWD/etc" ] && cp -R "$PWD/etc" ${JSON.stringify(overlayCaptureDir)}/etc
+[ -d "$PWD/root" ] && cp -R "$PWD/root" ${JSON.stringify(overlayCaptureDir)}/root
+[ -n "$output" ] && : > "$output"
+`,
+			{ mode: 0o755 },
+		);
+		await writeFile(
+			join(binDir, "truncate"),
+			`#!/bin/sh
+last=""
+for arg in "$@"; do
+  last="$arg"
+done
+[ -n "$last" ] && : > "$last"
+`,
 			{ mode: 0o755 },
 		);
 		await writeFile(join(binDir, "mkfs.vfat"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 		await writeFile(
-			join(binDir, "tar"),
+			join(binDir, "mcopy"),
 			`#!/bin/sh
-: > "$2"
-rm -rf ${JSON.stringify(overlayCaptureDir)}
-mkdir -p ${JSON.stringify(overlayCaptureDir)}
-cp -R "$PWD/etc" ${JSON.stringify(overlayCaptureDir)}/etc
-cp -R "$PWD/root" ${JSON.stringify(overlayCaptureDir)}/root
+printf '%s\n' "$@" > ${JSON.stringify(mcopyCaptureFile)}
 `,
 			{ mode: 0o755 },
 		);
 		await writeFile(
-			join(binDir, "mcopy"),
+			join(binDir, "expect"),
 			`#!/bin/sh
-printf '%s\n' "$@" > ${JSON.stringify(join(binDir, "mcopy-args.txt"))}
-exit 0
+printf '%s\n' "$@" > ${JSON.stringify(expectCaptureFile)}
+cat "$2" > ${JSON.stringify(expectScriptFile)}
 `,
 			{ mode: 0o755 },
 		);
+		await writeFile(join(binDir, "telnet"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 		await writeFile(
 			join(binDir, "sshpass"),
 			`#!/bin/sh
@@ -426,36 +533,50 @@ printf '6.6.4-1-lts\n'
 			inputPath: "/app/alpine.iso",
 			outputPath: "/app/alpine-disk.qcow2",
 		});
+		const bsdtarArgs = await readFile(bsdtarCaptureFile, "utf-8");
+		assert.match(bsdtarArgs, /\/app\/alpine\.iso/);
+		assert.match(bsdtarArgs, /boot\/vmlinuz-lts/);
+		assert.match(bsdtarArgs, /boot\/initramfs-lts/);
 		const captured = await readFile(captureFile, "utf-8");
-		assert.match(captured, /-kernel/);
-		assert.match(captured, /vmlinuz-lts/);
-		assert.match(captured, /-initrd/);
-		assert.match(captured, /initramfs-lts/);
-		assert.match(captured, /\/app\/alpine\.iso/);
-		assert.match(captured, /-drive/);
-		assert.match(captured, /\/app\/alpine-disk\.qcow2/);
-		assert.match(captured, /-device\nvirtio-rng-pci/);
-		assert.match(captured, /hostfwd=tcp::2222-:22/);
-		assert.match(captured, /alpine_dev=sr0/);
-		assert.match(captured, /modloop=\/boot\/modloop-lts/);
+		assert.match(captured, /-kernel\n.*vmlinuz-lts/);
+		assert.match(captured, /-initrd\n.*initramfs-lts/);
+		assert.match(captured, /console=ttyS0 hostname=localhost/);
 		assert.match(captured, /alpine_repo=\/media\/cdrom\/apks/);
 		assert.match(captured, /apkovl=sdb:vfat:localhost\.apkovl\.tar\.gz/);
-		assert.match(captured, /\.img,format=raw/);
-		assert.match(captured, /-serial\nfile:\/tmp\/qemu-alpine-ssh-serial\.log/);
+		assert.match(captured, /-drive\nfile=\/app\/alpine\.iso,media=cdrom,readonly=on/);
+		assert.match(captured, /-drive\nfile=\/app\/alpine-disk\.qcow2,format=qcow2/);
+		assert.match(captured, /-drive\nfile=.*\.img,format=raw/);
+		assert.match(captured, /-device\nvirtio-rng-pci/);
+		assert.match(captured, /hostfwd=tcp::2222-:22/);
+		assert.match(captured, /-serial\ntelnet:127\.0\.0\.1:6665,server,nowait/);
 		assert.match(captured, /-daemonize/);
-		const overlayInittab = await readFile(join(overlayCaptureDir, "etc/inittab"), "utf-8");
-		const overlaySetupScript = await readFile(join(overlayCaptureDir, "root/setup-ssh.sh"), "utf-8");
-		assert.match(overlayInittab, /ttyS0::respawn/);
-		assert.match(overlayInittab, /::once:\/root\/setup-ssh\.sh/);
-		assert.equal(await readFile(join(overlayCaptureDir, "etc/hostname"), "utf-8"), "localhost\n");
-		assert.match(await readFile(join(overlayCaptureDir, "etc/securetty"), "utf-8"), /ttyS0/);
-		assert.match(overlaySetupScript, /NET_IFACE="\$\(ip -o link show/);
-		assert.match(overlaySetupScript, /ip link set "\$NET_IFACE" up/);
-		assert.match(overlaySetupScript, /udhcpc -i "\$NET_IFACE"/);
-		assert.match(overlaySetupScript, /setup-sshd -c dropbear/);
-		assert.match(overlaySetupScript, /rc-service dropbear status/);
-		assert.match(overlaySetupScript, /root:password123/);
-		assert.match(overlaySetupScript, /touch "\$MARKER"/);
+		const tarArgs = await readFile(tarArgsFile, "utf-8");
+		assert.match(tarArgs, /-czf/);
+		assert.match(tarArgs, /localhost\.apkovl\.tar\.gz/);
+		assert.doesNotMatch(await readFile(join(overlayCaptureDir, "etc", "inittab"), "utf-8"), /::once:\/root\/setup-ssh\.sh/);
+		const expectArgs = await readFile(expectCaptureFile, "utf-8");
+		assert.match(expectArgs, /-f/);
+		assert.match(expectArgs, /\/tmp\/qemu-alpine-ssh-serial\.log/);
+		const expectScript = await readFile(expectScriptFile, "utf-8");
+		assert.match(expectScript, /set prompt_deadline/);
+		assert.match(expectScript, /localhost login/);
+		assert.match(expectScript, /Timed out waiting for login prompt/);
+		assert.match(expectScript, /Timed out running command/);
+		assert.match(expectScript, /Timed out waiting for shell prompt after command/);
+		assert.match(expectScript, /Command failed while provisioning SSH/);
+		assert.match(expectScript, /__PI_EXIT__:%s/);
+		assert.match(expectScript, /NET_IFACE/);
+		assert.match(expectScript, /udhcpc -n -q -i/);
+		assert.match(expectScript, /root:password123/);
+		assert.match(expectScript, /apk add --no-cache --repository \/media\/cdrom\/apks openssh-server openssh-sftp-server/);
+		assert.match(expectScript, /ssh-keygen -A/);
+		assert.match(expectScript, /mkdir -p \/run\/sshd/);
+		assert.match(expectScript, /\/usr\/sbin\/sshd -o PermitRootLogin=yes -o PasswordAuthentication=yes/);
+		assert.match(expectScript, /UseDNS=no/);
+		assert.doesNotMatch(expectScript, /UsePAM=no/);
+		assert.match(expectScript, /setup-ssh complete/);
+		const mcopyArgs = await readFile(mcopyCaptureFile, "utf-8");
+		assert.match(mcopyArgs, /localhost\.apkovl\.tar\.gz/);
 		const sshpassArgs = await readFile(sshpassCaptureFile, "utf-8");
 		assert.match(sshpassArgs, /password123/);
 		assert.match(sshpassArgs, /StrictHostKeyChecking=no/);

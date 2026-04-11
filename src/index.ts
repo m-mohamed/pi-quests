@@ -134,12 +134,16 @@ let frontierTrialsModulePromise: Promise<FrontierTrialsModule> | null = null;
 let internalUiModulePromise: Promise<InternalUiModule> | null = null;
 
 async function loadFrontierTrials(): Promise<FrontierTrialsModule> {
-	frontierTrialsModulePromise ??= import("./frontier-trials.js");
+	frontierTrialsModulePromise ??= import("./frontier-trials.js").catch((error) => {
+		throw new Error(`Internal Quest optimizer surfaces require the repo checkout. ${error instanceof Error ? error.message : String(error)}`);
+	});
 	return frontierTrialsModulePromise;
 }
 
 async function loadInternalUi(): Promise<InternalUiModule> {
-	internalUiModulePromise ??= import("./internal-ui.js");
+	internalUiModulePromise ??= import("./internal-ui.js").catch((error) => {
+		throw new Error(`Internal Quest optimizer UI requires the repo checkout. ${error instanceof Error ? error.message : String(error)}`);
+	});
 	return internalUiModulePromise;
 }
 
@@ -592,9 +596,14 @@ export default function questExtension(pi: ExtensionAPI) {
 				ctx.ui.setWidget(WIDGET_KEY, createQuestModeWidgetComponent(contextLabel));
 			} else if (internalModeEnabled() && currentTrialState?.status === "running") {
 				const trialState = currentTrialState;
-				const internalUi = await loadInternalUi();
-				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `trials:${trialState.status}${contextLabel ? ` · ${contextLabel}` : ""}`));
-				ctx.ui.setWidget(WIDGET_KEY, internalUi.createTrialsWidgetComponent(internalUi.buildTrialsWidgetModel(trialState, trialState.activeProfileId, trialLiveRun, contextLabel)));
+				try {
+					const internalUi = await loadInternalUi();
+					ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `trials:${trialState.status}${contextLabel ? ` · ${contextLabel}` : ""}`));
+					ctx.ui.setWidget(WIDGET_KEY, internalUi.createTrialsWidgetComponent(internalUi.buildTrialsWidgetModel(trialState, trialState.activeProfileId, trialLiveRun, contextLabel)));
+				} catch {
+					ctx.ui.setStatus(STATUS_KEY, undefined);
+					ctx.ui.setWidget(WIDGET_KEY, undefined);
+				}
 			} else {
 				ctx.ui.setStatus(STATUS_KEY, undefined);
 				ctx.ui.setWidget(WIDGET_KEY, undefined);
@@ -795,7 +804,13 @@ ${
 			await emitNote(pi, ctx, "Quest Trials is maintainer-only and not part of the public package surface.", "warning");
 			return;
 		}
-		const trials = await loadFrontierTrials();
+		let trials: FrontierTrialsModule;
+		try {
+			trials = await loadFrontierTrials();
+		} catch (error) {
+			await emitNote(pi, ctx, error instanceof Error ? error.message : String(error), "warning");
+			return;
+		}
 		const status = await trials.collectFrontierTrialStatus(ctx.cwd);
 		const summary = trials.summarizeTrialStatus(status);
 		currentTrialState = status.state;
@@ -810,7 +825,13 @@ ${
 			const nextStatus = await trials.collectFrontierTrialStatus(ctx.cwd);
 			currentTrialState = nextStatus.state;
 			currentProfile = nextStatus.profile;
-			const internalUi = await loadInternalUi();
+			let internalUi: InternalUiModule;
+			try {
+				internalUi = await loadInternalUi();
+			} catch (error) {
+				await emitNote(pi, ctx, error instanceof Error ? error.message : String(error), "warning");
+				return;
+			}
 			const actions: ControlPanelAction<"baseline" | "run" | "stop" | "profile" | "refresh">[] =
 				nextStatus.state.status === "running"
 					? [
@@ -843,7 +864,13 @@ ${
 			await emitNote(pi, ctx, "Quest Trials is maintainer-only and not part of the public package surface.", "warning");
 			return;
 		}
-		const trials = await loadFrontierTrials();
+		let trials: FrontierTrialsModule;
+		try {
+			trials = await loadFrontierTrials();
+		} catch (error) {
+			await emitNote(pi, ctx, error instanceof Error ? error.message : String(error), "warning");
+			return;
+		}
 		const trimmed = args.trim();
 		const readFlag = (flag: string): string | undefined => {
 			const parts = trimmed.split(/\s+/);

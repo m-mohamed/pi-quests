@@ -62,8 +62,8 @@ test("saveQuestProfile keeps current/profile.json and profiles/<id>.json in sync
 
 		assert.equal(currentProfile.id, profile.id);
 		assert.equal(stagedProfile.id, profile.id);
-		assert.equal(currentProfile.promptSurfaces.workerPolicy, profile.promptSurfaces.workerPolicy);
-		assert.equal(stagedProfile.promptSurfaces.workerPolicy, profile.promptSurfaces.workerPolicy);
+		assert.match(currentProfile.promptSurfaces.workerPolicy, /^Confirm prerequisites and benchmark constraints before editing\./);
+		assert.match(stagedProfile.promptSurfaces.workerPolicy, /^Confirm prerequisites and benchmark constraints before editing\./);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

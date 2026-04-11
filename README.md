@@ -1,6 +1,8 @@
 # Pi Quests
 
-`@m-mohamed/pi-quests` is a standalone Pi package that adds validation-first quest orchestration on top of Pi core.
+`@m-mohamed/pi-quests` is a standalone Pi package for large, multi-feature coding work with structured Quest orchestration.
+
+Describe the goal, collaborate on the plan, and let Quest manage the work through bounded features, fresh workers, fresh validators, and repo-local state.
 
 Pi core stays upstream. Quest is your package. That means:
 
@@ -13,6 +15,8 @@ Pi core stays upstream. Quest is your package. That means:
 ![Quest Control](https://raw.githubusercontent.com/m-mohamed/pi-quests/main/docs/quest-control.png)
 
 ## Installation
+
+Pi Quests now targets the current Pi package line: `@mariozechner/pi-*` `0.66.1+`.
 
 Install from a local checkout:
 
@@ -62,6 +66,14 @@ Typical flow:
 4. monitor progress in Quest Control with `/quest`
 5. finish with the explicit human QA handoff before shipping anything
 
+## What A Quest Is
+
+A Quest is the structured way to take on substantial repo work in Pi.
+
+Instead of pushing everything through one long session, Quest turns the goal into an explicit contract, breaks the work into bounded features, runs implementation with fresh workers, runs checks with fresh validators, and keeps the state on disk so progress stays inspectable.
+
+You still steer the work. Quest handles decomposition, execution, validation, and handoff.
+
 ## Commands
 
 - `/quest new <goal>`
@@ -73,97 +85,36 @@ Typical flow:
 - `/quest resume`
 - `/quest abort`
 - `/quest model <orchestrator|worker|validator> <provider/model[:thinking]>`
-- `/quest trials`
-- `/quest trials status`
-- `/quest trials prepare-benchmark [--benchmark terminal-bench|slopcodebench] [--dataset <id>] [--repo <path>]`
-- `/quest trials analyze-community [--force]`
-- `/quest trials baseline [--benchmark ...] [--dataset <id>] [--repo <path>]`
-- `/quest trials run [--iterations <n>] [--benchmark ...] [--dataset <id>] [--repo <path>]`
-- `/quest trials stop`
-- `/quest trials profile`
 - `/quests`
 
-## Headless Benchmarking
+## Headless Runs
 
-Quest now ships a machine-driven benchmark entrypoint:
+For repeatable non-interactive runs, use the headless entrypoint:
 
 ```bash
 quest-headless run \
-  --instruction "Solve the assigned task" \
-  --cwd "$(pwd)" \
-  --json
+  --instruction "Implement the assigned feature" \
+  --cwd "$(pwd)"
 ```
 
-The headless runner writes a machine-readable contract under `.pi/quests/<quest-id>/headless-run.json` and keeps benchmark provenance on Quest artifacts plus Harbor trial directories.
+The headless runner writes a machine-readable contract under `.pi/quests/<quest-id>/headless-run.json`.
 
-Local development substrate:
+Read [docs/quest-architecture.md](docs/quest-architecture.md) for the runtime model.
+Read [docs/tutorial.md](docs/tutorial.md) for the public Quest walkthrough.
 
-```bash
-npm run benchmark:local
-npm run benchmark:tbench:preflight
-npm run benchmark:tbench:sample -- --dry-run
-npm run benchmark:tbench:sample
-```
+## Quest Architecture
 
-Official benchmark run entrypoints:
-
-```bash
-npm run benchmark:tbench:preflight
-npm run benchmark:tbench:sample
-npm run benchmark:tbench:full
-npm run benchmark:slop:official -- --problem <problem-id> --repo /path/to/slop-code-bench
-```
-
-Benchmark targets:
-
-- **Terminal-Bench** via Harbor and the installed-agent adapter in `benchmarks/harbor/README.md`
-- **SlopCodeBench** through the official-run overlay described in `benchmarks/slopcodebench/README.md`
-
-Quest is released methodology-first: the package, adapters, and reproducibility docs are public before any benchmark-number claims are made.
-
-Current verified benchmark state lives in `docs/baseline-results.md`.
-
-## Runtime Model
-
-Quest is proposal-first and validation-first:
+Quest is a structured execution loop for substantial coding work:
 
 1. `/quest new` creates a repo-local quest under `.pi/quests/<quest-id>/`
 2. the orchestrator runs a dry-run validation readiness probe before proposal approval
-3. proposal artifacts are written to disk for review
+3. the orchestrator defines the validation contract before the feature list, then writes both to disk for review
 4. `/quest accept` starts execution
-5. workers run one feature at a time in isolated `pi --mode json --no-session` subprocesses
-6. validators run milestone checks and can append corrective features before work continues
+5. workers run one bounded feature at a time in isolated `pi --mode json --no-session` subprocesses
+6. fresh validators run milestone checks and surface issues; the orchestrator turns those into targeted fix features before work continues
 7. completion always ends with an explicit human QA checklist and a limited-coverage summary
 
 Quest never auto-commits, auto-deploys, or auto-ships.
-
-## Trials
-
-Trials are the benchmark-and-frontier improvement layer around the normal `/quest` runtime.
-
-It keeps Quest execution and Quest optimization separate:
-
-1. normal `/quest` runs stay focused on the current repo task
-2. Trials ingest raw Pi community sessions from `.pi/quests/trials/community-traces/` and generate canonical aggregate stats in `.pi/quests/trials/community-stats.json`
-3. `/quest trials prepare-benchmark` writes tagged, source-fingerprinted search and hold-out work-item lists under `.pi/quests/trials/`
-4. `/quest trials baseline` archives the current profile as candidate `000` so every hill-climb is grounded against a real baseline
-5. `/quest trials run` asks the `proposer` role to patch only trial-owned profile surfaces, one coherent change per candidate, then scores each candidate on the search split and validates it on hold-out
-6. non-dominated candidates stay on the Pareto frontier, and the current frontier leader is promoted to `.pi/quests/trials/current/profile.json`
-
-Trials do not mutate Quest runtime code during normal task execution, and they never auto-publish, auto-tag, or auto-release.
-
-Trials treat tagged evals and mined community traces as the training data for harness engineering. The search split is the optimization set, the hold-out split is the generalization gate, and candidate traces are preserved so regressions and wins stay inspectable.
-
-### Trials Commands
-
-- `/quest trials` opens Trials Control in interactive mode and prints a summary in print/RPC mode
-- `/quest trials status` prints the canonical benchmark/community/frontier status
-- `/quest trials prepare-benchmark [--benchmark ...] [--dataset <id>] [--repo <path>]` writes the explicit search/hold-out split
-- `/quest trials analyze-community [--force]` regenerates canonical Pi-native community stats
-- `/quest trials baseline [--benchmark ...] [--dataset <id>] [--repo <path>]` archives candidate `000` for the active benchmark family
-- `/quest trials run [--iterations <n>] [--benchmark ...] [--dataset <id>] [--repo <path>]` runs the frontier optimization loop for the active profile
-- `/quest trials stop` stops the active trial run without changing the leader profile
-- `/quest trials profile` prints the active profile, adopted changes, and latest score summary
 
 ## Stored Artifacts
 
@@ -179,47 +130,32 @@ Quest state is stored in the working repository under `.pi/quests/<quest-id>/`:
 - `skills/*.md`
 
 Shared learned workflow guidance is stored under `.pi/quests/shared-skills/`.
+Quest skill directories are auto-discovered as Pi skills on startup and `/reload`.
 
-Trials store their own improvement artifacts under `.pi/quests/trials/`:
-
-- `state.json`
-- `current/profile.json`
-- `profiles/<profile-id>.json`
-- `candidates/NNN/profile.json`
-- `candidates/NNN/profile.patch.json`
-- `candidates/NNN/scores.json`
-- `candidates/NNN/hold-out.json`
-- `candidates/NNN/summary.json`
-- `candidates/NNN/traces/<task-name>/...`
-- `search-set.json`
-- `hold-out-set.json`
-- `frontier.json`
-- `community-traces/`
-- `community-stats.json`
-
-Trials are canonical on `.pi/quests/trials/`. Runtime code does not read any pre-frontier optimization roots.
-
-Quest artifacts are the source of truth. `pi.appendEntry()` is only used for session-local UI state such as quest mode and the last-opened Quest Control tab.
+Quest artifacts are the source of truth. `pi.appendEntry()` is only used for session-local UI state such as quest mode.
 
 ## Quest Control
 
 `/quest` opens Quest Control in interactive mode and prints a summary in print/RPC mode.
 
-Quest Control uses Pi’s native custom UI surface through `ctx.ui.custom()` and shows:
+Quest Control uses Pi’s native custom UI surface through `ctx.ui.custom()` with Pi TUI components (`SelectList`, `Markdown`, `Box`, `DynamicBorder`) and the injected Pi keybinding manager, and shows:
 
 - quest summary, status, and role models
 - current milestone and feature progress
 - validation readiness and assertion counts
 - worker and validator run state
 - latest run details and handoff information
+- live context-pressure snapshots from Pi’s `before_provider_request` hook
+- a single native widget panel above the editor instead of a separate text/actions sidecar
 
-Trials use the same native Pi custom UI surface and show:
+Native shortcuts:
 
-- active profile and optimization target
-- benchmark family and dataset
-- search and hold-out split counts
-- frontier leader and candidate count
-- community ingestion status
+- `ctrl+alt+q` opens Quest Control
+- `ctrl+alt+l` opens the project quest picker
+
+Quest also uses Pi’s native `tool_result` hook to add focused follow-up hints when bash output spills to a file or a read result is truncated, instead of relying only on prompt wording.
+For agent `bash` tool calls, Quest also uses Pi’s native `tool_call` mutation path to inject active quest context directly into the shell command, rather than maintaining a separate wrapper runtime.
+During live Quest runs, Quest also sets Pi’s native working message and hidden-thinking label so the active role and phase are visible in the core runtime chrome.
 
 ## Package Shape
 
@@ -242,23 +178,15 @@ npm run test
 npm run check
 npm run pack:check
 node --import tsx scripts/evals.ts --suite offline-core
-npm run benchmark:local
 ```
 
-When touching benchmark helpers or adapters, run the cheapest real Harbor smoke that covers the edited surface before an expensive sample run. `npm run benchmark:tbench:preflight -- --smoke-task <task>` is the canonical probe.
-
-Maintainer-only manual harnesses also live under `scripts/`, but they are not part of the publish gate.
+Maintainer-only optimization, benchmark, and trace-mining workflows also live in this repo, but they are intentionally outside the main package story. They are documented under `docs/internal/`.
 
 ## Release Workflow
 
-Use these docs before tagging or announcing a new baseline:
+Use `docs/quest-architecture.md` before publishing or announcing a new release.
 
-- `docs/baseline-results.md`
-- `docs/benchmark-card.md`
-- `docs/reproducibility.md`
-
-Quest is publish-ready when the package gate is green and the verified baseline
-docs are current, even if npm publication is intentionally deferred.
+Quest is publish-ready when the package gate is green and the core docs are current, even if npm publication is intentionally deferred.
 
 ## Blueprints
 
@@ -271,5 +199,3 @@ This repo now keeps its forward plan in a Quest-native planning workspace:
 The active roadmap change is:
 
 - `blueprints/changes/meta-harness-optimization/`
-
-Targeted against Pi `0.65.x`.

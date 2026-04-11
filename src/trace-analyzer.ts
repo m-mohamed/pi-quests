@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { deriveIssuesFromTags } from "./trials-core.js";
+import { deriveIssuesFromTags } from "./profile-core.js";
 import { getQuestTrialPaths } from "./state-core.js";
 import { compact } from "./utils.js";
 import type {

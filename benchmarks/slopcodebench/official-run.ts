@@ -112,6 +112,7 @@ export function buildOfficialSlopCodeBenchCommand(options: OfficialRunOptions): 
 		env: {
 			...process.env,
 			...authEnvironment(),
+			PI_QUESTS_INTERNAL: "1",
 			PYTHONPATH: [overlayDir, resolve(options.repo, "src"), process.env.PYTHONPATH].filter(Boolean).join(":"),
 			SLOPCODEBENCH_QUEST_BIN: `${process.execPath} ${resolve(repoRoot, "bin", "quest-headless.mjs")}`,
 		},

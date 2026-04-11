@@ -6,7 +6,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectHarborInstallation } from "./harbor-integrity.js";
 import { resolveHarborPython } from "./harbor-runtime.js";
-import { applyQuestProfilePatch } from "./trials-core.js";
+import { applyQuestProfilePatch } from "./internal-profile-core.js";
 import { getQuestTrialPaths, loadQuestProfile, loadQuestTrialState, saveQuestProfile, saveQuestTrialState } from "./state.js";
 import { analyzeCommunityTraces, loadCommunityStats, writeCommunityStats } from "./trace-analyzer.js";
 import { compact } from "./utils.js";

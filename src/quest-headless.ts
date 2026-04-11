@@ -1,20 +1,46 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertInternalMode, internalModeEnabled } from "./internal-mode.js";
 import { runQuestHeadless, type QuestHeadlessRunInput } from "./headless-core.js";
-import type { ModelChoice, QuestBenchmarkName, QuestBenchmarkRunMode } from "./types.js";
+import type { ModelChoice, QuestBenchmarkName, QuestBenchmarkProvenance, QuestBenchmarkRunMode, QuestState } from "./types.js";
 
 export interface ParsedArgs {
 	command: "help" | "run";
 	json?: boolean;
 	input?: QuestHeadlessRunInput;
+	internalInput?: {
+		profileId?: string;
+		benchmark?: Omit<QuestBenchmarkProvenance, "recordedAt" | "model">;
+	};
 }
 
-function usage(): string {
+interface QuestHeadlessCliResult {
+	status: QuestState["status"] | "timeout";
+	summary: string;
+	questId: string;
+	profileId: string;
+	traceBundleIds: string[];
+	validatorFindings: string[];
+	executionFindings: string[];
+	timeoutReason?: string;
+	failureCategory?: string;
+	artifactPaths: Record<string, string>;
+	benchmark?: QuestBenchmarkProvenance;
+}
+
+function currentProgramName(): string {
+	const current = process.argv[1];
+	if (!current) return "quest-headless";
+	return basename(current).replace(/\.(mjs|cjs|js|ts)$/i, "") || "quest-headless";
+}
+
+export function usage(programName = currentProgramName()): string {
+	const internal = internalModeEnabled();
 	return `Usage:
-  quest-headless run --instruction "Fix the failing task" [options]
-  quest-headless run --instruction-file ./task.txt [options]
+  ${programName} run --instruction "Fix the failing task" [options]
+  ${programName} run --instruction-file ./task.txt [options]
 
 What it does:
   Run a headless Quest and write result artifacts under .pi/quests/<quest-id>/.
@@ -22,25 +48,26 @@ What it does:
 Options:
   --cwd <path>                     Working directory (default: current directory)
   --model <provider/model>         Model to use (default: zai/glm-5.1)
-  --thinking <level>               Thinking level (default: high, or low for sample/smoke benchmarks)
-  --profile <id>                   Trials profile id
+  --thinking <level>               Thinking level (default: high)
   --timeout-ms <ms>                Soft timeout budget in milliseconds
   --dry-run                        Stop after proposal generation
   --no-auto-accept                 Keep the quest at proposal_ready
-  --benchmark <local|terminal-bench|slopcodebench>
-  --dataset <name>                 Benchmark dataset identifier
-  --task-id <id>                   Benchmark task identifier
-  --checkpoint-id <id>             Benchmark checkpoint identifier
-  --run-mode <local|sample|full|smoke|custom>
   --json                           Print machine-readable JSON to stdout
+${internal ? `  --profile <id>                   Internal profile id
+  --benchmark <local|terminal-bench|slopcodebench>
+  --dataset <name>                 Internal benchmark dataset identifier
+  --task-id <id>                   Internal benchmark task identifier
+  --checkpoint-id <id>             Internal benchmark checkpoint identifier
+  --run-mode <local|sample|full|smoke|custom>` : ""}
 
 Examples:
-  quest-headless run --instruction-file ./task.txt --json
-  quest-headless run --instruction "Solve the task" --benchmark terminal-bench --dataset terminal-bench-sample@2.0 --task-id task-001 --run-mode smoke
+  ${programName} run --instruction-file ./task.txt --json
+  ${programName} run --instruction "Implement the repo task" --cwd "$(pwd)"
+${internal ? `  ${programName} run --instruction "Solve the task" --benchmark terminal-bench --dataset terminal-bench-sample@2.0 --task-id task-001 --run-mode smoke` : ""}
 
 Notes:
-  Human mode prints a compact status summary plus the key artifact path.
-  JSON mode preserves the machine-readable Harbor/script contract.`;
+  Human mode prints a compact summary, the key artifact path, and the next command.
+  JSON mode preserves the machine-readable contract.`;
 }
 
 export function parseModelChoice(modelSpec: string | undefined, thinkingLevel: string | undefined): ModelChoice {
@@ -134,6 +161,9 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 
 	if (!instruction && instructionFile) instruction = await readFile(resolve(instructionFile), "utf-8");
 	if (!instruction?.trim()) throw new Error(`Missing instruction.\n\n${usage()}`);
+	if ((profileId || benchmarkName || dataset || taskId || checkpointId) && !internalModeEnabled()) {
+		assertInternalMode("Quest benchmark and profile surfaces");
+	}
 	if ((benchmarkName || dataset || taskId || checkpointId) && (!benchmarkName || !dataset || !taskId)) {
 		throw new Error("Benchmark runs require --benchmark, --dataset, and --task-id together.");
 	}
@@ -148,25 +178,30 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 				modelSpec,
 				thinkingLevel ?? (benchmarkName ? (runMode === "full" ? "medium" : "low") : undefined),
 			),
-			profileId,
 			timeoutMs,
 			dryRun,
 			autoAccept,
-			benchmark: benchmarkName
+		},
+		internalInput:
+			profileId || benchmarkName
 				? {
-						benchmark: benchmarkName,
-						dataset: dataset!,
-						taskId: taskId!,
-						checkpointId,
-						runMode,
-						adapterVersion: "quest-bench-v1",
+						profileId,
+						benchmark: benchmarkName
+							? {
+									benchmark: benchmarkName,
+									dataset: dataset!,
+									taskId: taskId!,
+									checkpointId,
+									runMode,
+									adapterVersion: "quest-bench-v1",
+								}
+							: undefined,
 					}
 				: undefined,
-		},
 	};
 }
 
-function humanNextSteps(result: Awaited<ReturnType<typeof runQuestHeadless>>): string[] {
+function humanNextSteps(result: QuestHeadlessCliResult): string[] {
 	if (result.status === "blocked" || result.status === "timeout") {
 		const steps = [`bat ${result.artifactPaths.result}`];
 		if (result.artifactPaths.validationState) steps.push(`bat ${result.artifactPaths.validationState}`);
@@ -178,11 +213,11 @@ function humanNextSteps(result: Awaited<ReturnType<typeof runQuestHeadless>>): s
 	return [];
 }
 
-function printHumanSummary(result: Awaited<ReturnType<typeof runQuestHeadless>>): void {
+function printHumanSummary(result: QuestHeadlessCliResult): void {
 	console.log(`Quest ${result.questId}`);
 	console.log(`Status: ${result.status}`);
 	console.log(`Summary: ${result.summary}`);
-	console.log(`Profile: ${result.profileId}`);
+	if (internalModeEnabled()) console.log(`Profile: ${result.profileId}`);
 	console.log(`Result artifact: ${result.artifactPaths.result}`);
 	if (result.status === "blocked" || result.status === "timeout") {
 		console.log(`Failure: ${result.timeoutReason ?? result.executionFindings[0] ?? result.validatorFindings[0] ?? result.summary}`);
@@ -204,6 +239,20 @@ function printHumanSummary(result: Awaited<ReturnType<typeof runQuestHeadless>>)
 	}
 }
 
+async function runCliQuest(parsed: ParsedArgs): Promise<QuestHeadlessCliResult> {
+	if (!parsed.input) throw new Error("Missing quest input.");
+	if (!parsed.internalInput) {
+		return runQuestHeadless(parsed.input);
+	}
+	try {
+		const { runInternalQuestHeadless } = await import("./internal-headless.js");
+		return runInternalQuestHeadless({ ...parsed.input, ...parsed.internalInput });
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`Internal Quest headless surfaces require the repo checkout. ${message}`);
+	}
+}
+
 async function main() {
 	try {
 		const parsed = await parseArgs(process.argv.slice(2));
@@ -212,13 +261,13 @@ async function main() {
 			process.exitCode = 0;
 			return;
 		}
-		const result = await runQuestHeadless(parsed.input!);
+		const result = await runCliQuest(parsed);
 		if (parsed.json) {
 			console.log(JSON.stringify({ status: "ok", data: result, warnings: result.validatorFindings }, null, 2));
 		} else {
 			printHumanSummary(result);
 		}
-		process.exitCode = parsed.input?.benchmark ? 0 : result.status === "blocked" || result.status === "timeout" ? 1 : 0;
+		process.exitCode = parsed.internalInput?.benchmark ? 0 : result.status === "blocked" || result.status === "timeout" ? 1 : 0;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(message);

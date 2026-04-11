@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	defaultQuestProfile,
-} from "./trials-core.js";
+} from "./profile-core.js";
 import { parseQuestPlanText, planningInstructions, revisionInstructions, synthesizeValidationAssertions } from "./plan-core.js";
 import { markQuestAborted, prepareQuestForResume } from "./runtime-core.js";
 import { loadActiveQuest, loadLearnedWorkflows, projectIdFor, saveLearnedWorkflows } from "./state-core.js";

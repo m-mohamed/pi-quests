@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-	applyQuestProfilePatch,
 	defaultQuestProfile,
-	parseQuestExperimentCandidate,
 	traceBundleFromWorkerRun,
-} from "../src/trials-core.js";
+} from "../src/profile-core.js";
 
 const DEFAULT_MODEL = {
 	provider: "openai-codex",
@@ -84,13 +82,14 @@ function sampleQuest(cwd = "/tmp/pi-quests-trials") {
 	};
 }
 
-test("defaultQuestProfile keeps the high-confidence Trials defaults", () => {
+test("defaultQuestProfile stays Quest-native and benchmark-neutral", () => {
 	const profile = defaultQuestProfile("project-123");
 	assert.equal(profile.modelPolicy.preferSameModelFamily, true);
 	assert.equal(profile.contextPolicy.spillLongOutputsToReports, true);
-	assert.match(profile.promptSurfaces.planningPolicy, /limited or unsupported/i);
+	assert.match(profile.promptSurfaces.planningPolicy, /clarifying questions/i);
 	assert.match(profile.promptSurfaces.workerPolicy, /Confirm prerequisites/i);
-	assert.match(profile.promptSurfaces.proposerPolicy, /behavioral tag cohorts/i);
+	assert.doesNotMatch(profile.promptSurfaces.workerPolicy, /benchmark/i);
+	assert.doesNotMatch(profile.promptSurfaces.proposerPolicy, /search-set mean score|behavioral tag cohorts|hold-out/i);
 	assert.equal(profile.harnessPolicy.computationalGuides.enabled, true);
 	assert.equal(profile.harnessPolicy.inferentialGuides.enabled, true);
 	assert.equal(profile.harnessPolicy.sensors.inferential.enabled, true);
@@ -135,32 +134,4 @@ test("traceBundleFromWorkerRun derives failure tags from worker traces", () => {
 	assert.ok(trace.tags.includes("context_overflow"));
 	assert.ok(trace.tags.includes("worker_failure"));
 	assert.ok(trace.derivedIssues.some((issue) => /Prerequisites were missing/i.test(issue)));
-});
-
-test("frontier proposer candidates parse and apply to profile-owned surfaces only", () => {
-	const profile = defaultQuestProfile("project-123");
-	const candidate = parseQuestExperimentCandidate(`{
-  "summary": "Tighten worker policy",
-  "rationale": "Improve generalization on benchmark search tasks.",
-  "generalizationNote": "Targets repeated failures instead of a single trace.",
-  "targetedTags": ["weak_validation"],
-  "targetedCaseIds": [],
-  "promptSurfaceIds": ["feature-worker"],
-  "patch": {
-    "promptSurfaces": {
-      "workerPolicy": "Confirm prerequisites and state validation limits explicitly."
-    },
-    "contextPolicy": {
-      "spillLongOutputsToReports": true
-    }
-  }
-}`);
-	assert.ok(candidate);
-	assert.deepEqual(candidate.targetedTags, ["weak_validation"]);
-	assert.deepEqual(candidate.promptSurfaceIds, ["feature-worker"]);
-
-	const patched = applyQuestProfilePatch(profile, candidate.patch);
-	assert.match(patched.promptSurfaces.workerPolicy, /validation limits explicitly/i);
-	assert.equal(patched.contextPolicy.spillLongOutputsToReports, true);
-	assert.equal(patched.toolAllowlist.worker.includes("edit"), true);
 });

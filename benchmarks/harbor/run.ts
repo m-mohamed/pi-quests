@@ -15,6 +15,7 @@ const BUNDLED_NODE_VERSION = "20.18.3";
 const BUNDLED_NODE_RUNTIME_DIR = "/opt/quest-node-runtimes";
 const LINUX_NODE_ARCHES = ["x64", "arm64"] as const;
 const HARBOR_NODE_ARCHES_ENV = "PI_QUESTS_HARBOR_NODE_ARCHES";
+const QUESTS_INTERNAL_ENV = "PI_QUESTS_INTERNAL";
 
 type LinuxNodeArch = (typeof LINUX_NODE_ARCHES)[number];
 
@@ -78,6 +79,7 @@ export function buildHarborCommand(options: HarborRunOptions): { command: string
 	}
 	args.push("--ae", `QUEST_HARBOR_DATASET=${options.dataset}`);
 	args.push("--ae", `QUEST_HARBOR_RUN_MODE=${options.runMode}`);
+	args.push("--ae", `${QUESTS_INTERNAL_ENV}=1`);
 	if (options.profileId?.trim()) args.push("--ae", `QUEST_HARBOR_PROFILE_ID=${options.profileId}`);
 	for (const name of requiredEnvVarsForModel(model)) {
 		const value = process.env[name];
@@ -90,6 +92,7 @@ export function buildHarborCommand(options: HarborRunOptions): { command: string
 			PYTHONPATH: [cwd, process.env.PYTHONPATH].filter(Boolean).join(":"),
 			QUEST_HARBOR_DATASET: options.dataset,
 			QUEST_HARBOR_RUN_MODE: options.runMode,
+			[QUESTS_INTERNAL_ENV]: "1",
 		},
 	};
 }
@@ -254,17 +257,10 @@ export async function materializeQuestBundle(
 					noEmit: false,
 					outDir: distPath,
 					rootDir: resolve(rootDir, "src"),
-					baseUrl: rootDir,
 					types: [],
 					allowImportingTsExtensions: false,
-					paths: {
-						"@mariozechner/pi-ai": ["./types/pi-ai.d.ts"],
-						"@mariozechner/pi-coding-agent": ["./types/pi-coding-agent.d.ts"],
-						"@mariozechner/pi-tui": ["./types/pi-tui.d.ts"],
-						"@sinclair/typebox": ["./types/external-shims.d.ts"],
-					},
 				},
-				include: [resolve(rootDir, "src", "**", "*.ts"), resolve(rootDir, "types", "**", "*.d.ts")],
+				include: [resolve(rootDir, "src", "**", "*.ts")],
 				exclude: [
 					resolve(rootDir, "src", "evals-core.ts"),
 					resolve(rootDir, "scripts", "**"),

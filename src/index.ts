@@ -3,21 +3,39 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { Model } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Key, Text, matchesKey } from "@mariozechner/pi-tui";
-import { applyQuestProfilePatch, defaultQuestProfile, traceBundleFromPlanningSession, traceBundleFromWorkerRun } from "./trials-core.js";
-import { collectFrontierTrialStatus, prepareTrialBenchmark, analyzeTrialCommunity, runTrialBaseline, runTrialOptimization, summarizeTrialStatus } from "./frontier-trials.js";
+import {
+	DynamicBorder,
+	getMarkdownTheme,
+	getSelectListTheme,
+	isBashToolResult,
+	isFindToolResult,
+	isGrepToolResult,
+	isLsToolResult,
+	isReadToolResult,
+	isToolCallEventType,
+	type KeybindingsManager,
+} from "@mariozechner/pi-coding-agent";
+import type { ContextUsage, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Box, Container, Key, Markdown, SelectList, Spacer, Text } from "@mariozechner/pi-tui";
+import {
+	buildQuestShellEnvironment,
+	discoverQuestSkillPaths,
+	formatContextUsageLabel,
+	prefixQuestShellCommand,
+	protectedQuestArtifactReason,
+	questToolResultGuidance,
+} from "./extension-core.js";
+import { internalModeEnabled } from "./internal-mode.js";
+import { defaultQuestProfile, traceBundleFromPlanningSession, traceBundleFromWorkerRun } from "./profile-core.js";
 import { defaultHumanQaChecklist, mergeRemainingPlan, parseQuestPlanText, planningInstructions, synthesizeValidationAssertions } from "./plan-core.js";
 import { describeActiveRun, markQuestAborted, prepareQuestForResume, terminateQuestProcess } from "./runtime-core.js";
 import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
 import { truncate } from "./utils.js";
 import {
+	buildQuestControlItems,
+	createQuestModeWidgetComponent,
 	buildQuestWidgetModel,
-	buildTrialsWidgetModel,
-	renderQuestActionLines,
-	renderQuestWidgetLines,
-	renderTrialsActionLines,
-	renderTrialsWidgetLines,
+	createQuestWidgetComponent,
 } from "./ui-core.js";
 import {
 	appendQuestEvent,
@@ -63,13 +81,182 @@ import type {
 const CUSTOM_MESSAGE_TYPE = "pi-quests";
 const STATUS_KEY = "pi-quests";
 const WIDGET_KEY = "pi-quests";
-const WIDGET_ACTIONS_KEY = "pi-quests-actions";
 const QUEST_MODE_ENTRY = "quest-mode";
-const QUEST_DASHBOARD_ENTRY = "quest-control";
 const ROLE_NAMES: QuestRole[] = ["orchestrator", "worker", "validator"];
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
-const DASHBOARD_TABS = ["summary", "features", "runs", "detail"] as const;
-type DashboardTab = (typeof DASHBOARD_TABS)[number];
+type FrontierTrialsModule = typeof import("./frontier-trials.js");
+type FrontierTrialStatus = Awaited<ReturnType<FrontierTrialsModule["collectFrontierTrialStatus"]>>;
+type InternalUiModule = typeof import("./internal-ui.js");
+
+interface ControlPanelItem {
+	value: string;
+	label: string;
+	description?: string;
+	detailMarkdown: string;
+}
+
+interface ControlPanelAction<Action extends string> {
+	key: string;
+	label: string;
+	result: Action;
+}
+
+interface ControlPanelOutcome<Action extends string> {
+	action: Action | "close";
+	selectedValue: string | null;
+}
+
+function formatResolvedKeys(keys: readonly string[]): string {
+	const deduped = [...new Set(keys.filter(Boolean))];
+	return deduped.join("/");
+}
+
+function renderKeyHint(theme: ExtensionContext["ui"]["theme"], keys: readonly string[], label: string): string {
+	const resolved = formatResolvedKeys(keys);
+	return `${theme.fg("dim", resolved)}${theme.fg("muted", ` ${label}`)}`;
+}
+
+function renderControlPanelFooter<Action extends string>(
+	theme: ExtensionContext["ui"]["theme"],
+	keybindings: KeybindingsManager,
+	actions: ControlPanelAction<Action>[],
+): string {
+	const hints = [
+		renderKeyHint(theme, [...keybindings.getKeys("tui.select.up"), ...keybindings.getKeys("tui.select.down")], "move"),
+		renderKeyHint(theme, keybindings.getKeys("tui.select.confirm"), "select"),
+		renderKeyHint(theme, keybindings.getKeys("tui.select.cancel"), "close"),
+		...actions.map((action) => renderKeyHint(theme, [action.key], action.label)),
+	];
+	return hints.join(theme.fg("dim", "  ·  "));
+}
+
+let frontierTrialsModulePromise: Promise<FrontierTrialsModule> | null = null;
+let internalUiModulePromise: Promise<InternalUiModule> | null = null;
+
+async function loadFrontierTrials(): Promise<FrontierTrialsModule> {
+	frontierTrialsModulePromise ??= import("./frontier-trials.js");
+	return frontierTrialsModulePromise;
+}
+
+async function loadInternalUi(): Promise<InternalUiModule> {
+	internalUiModulePromise ??= import("./internal-ui.js");
+	return internalUiModulePromise;
+}
+
+async function loadRuntimeProfile(
+	cwd: string,
+	options?: { ensure?: boolean; profileId?: string; target?: QuestTrialState["target"] },
+): Promise<{ trialState: QuestTrialState | null; profile: QuestProfile }> {
+	if (!internalModeEnabled()) {
+		return {
+			trialState: null,
+			profile: defaultQuestProfile(projectIdFor(cwd), options?.target ?? "repo"),
+		};
+	}
+	const trialState = await loadQuestTrialState(cwd, options?.ensure ? { ensure: true } : undefined);
+	const profile =
+		(await loadQuestProfile(cwd, options?.profileId ?? trialState.activeProfileId, {
+			ensure: options?.ensure,
+			target: options?.target ?? trialState.target,
+		})) ?? defaultQuestProfile(trialState.projectId, options?.target ?? trialState.target);
+	return { trialState, profile };
+}
+
+async function openControlPanel<Action extends string>(
+	ctx: ExtensionContext,
+	options: {
+		title: string;
+		subtitle?: string;
+		items: ControlPanelItem[];
+		selectedValue?: string | null;
+		actions: ControlPanelAction<Action>[];
+	},
+): Promise<ControlPanelOutcome<Action> | null> {
+	if (!ctx.ui.custom) return null;
+	const fallbackItem: ControlPanelItem = {
+		value: "empty",
+		label: "Nothing to show",
+		description: "no quest data",
+		detailMarkdown: "# Nothing to show\n\nNo Quest data is available yet.",
+	};
+	const items = options.items.length > 0 ? options.items : [fallbackItem];
+	const selectTheme = getSelectListTheme();
+	const markdownTheme = getMarkdownTheme();
+	return ctx.ui.custom<ControlPanelOutcome<Action>>((tui, theme, keybindings, done) => {
+		const normalizedIndex = Math.max(
+			0,
+			items.findIndex((item) => item.value === options.selectedValue),
+		);
+		const footer = renderControlPanelFooter(theme, keybindings, options.actions);
+		const selectList = new SelectList(items, Math.min(Math.max(items.length, 4), 10), selectTheme, {
+			minPrimaryColumnWidth: 24,
+			maxPrimaryColumnWidth: 56,
+		});
+		const detail = new Markdown(items[normalizedIndex]?.detailMarkdown ?? fallbackItem.detailMarkdown, 0, 0, markdownTheme, {
+			color: (text: string) => theme.fg("text", text),
+		});
+		const detailBox = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+		detailBox.addChild(detail);
+
+		let selectedValue = items[normalizedIndex]?.value ?? items[0]?.value ?? null;
+		const applySelection = (value: string | null) => {
+			const selected = items.find((item) => item.value === value) ?? items[0] ?? fallbackItem;
+			selectedValue = selected.value;
+			detail.setText(selected.detailMarkdown);
+			detail.invalidate();
+			detailBox.invalidate();
+		};
+
+		selectList.onSelectionChange = (item) => {
+			applySelection(item.value);
+			tui.requestRender();
+		};
+		selectList.onSelect = (item) => {
+			applySelection(item.value);
+			tui.requestRender();
+		};
+		selectList.setSelectedIndex(normalizedIndex);
+		applySelection(items[normalizedIndex]?.value ?? null);
+
+		const container = new Container();
+		container.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
+		container.addChild(new Text(theme.bold(theme.fg("accent", options.title)), 1, 0));
+		if (options.subtitle) container.addChild(new Text(theme.fg("muted", options.subtitle), 1, 0));
+		container.addChild(new Spacer(1));
+		container.addChild(selectList);
+		container.addChild(new Spacer(1));
+		container.addChild(new Text(theme.bold("Detail"), 1, 0));
+		container.addChild(detailBox);
+		container.addChild(new Spacer(1));
+		container.addChild(new Text(theme.fg("dim", footer), 1, 0));
+		container.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
+
+		return {
+			render(width: number) {
+				return container.render(width);
+			},
+			invalidate() {
+				container.invalidate();
+			},
+			handleInput(data: string) {
+				if (keybindings.matches(data, "tui.select.cancel")) {
+					done({ action: "close", selectedValue });
+					return;
+				}
+				for (const action of options.actions) {
+					if (data === action.key) {
+						done({ action: action.result, selectedValue });
+						return;
+					}
+				}
+				selectList.handleInput(data);
+				const selected = selectList.getSelectedItem();
+				if (selected) applySelection(selected.value);
+				tui.requestRender();
+			},
+		};
+	});
+}
 
 const questPromptSurfacesPatchSchema = Type.Object({
 	planningPolicy: Type.Optional(Type.String()),
@@ -365,11 +552,11 @@ export default function questExtension(pi: ExtensionAPI) {
 	let currentTrialState: QuestTrialState | null = null;
 	let liveRun: LiveRunSnapshot | null = null;
 	let trialLiveRun: LiveRunSnapshot | null = null;
+	let lastContextUsage: ContextUsage | null = null;
 	let planningEvents: WorkerEventRecord[] = [];
 	let planningStartedAt = 0;
 	let questModeEnabled = false;
 	let planningTurnActive = false;
-	let dashboardTab: DashboardTab = "summary";
 	let activeTrialPid: number | undefined;
 	let pendingQuestControlOpen = false;
 
@@ -377,37 +564,46 @@ export default function questExtension(pi: ExtensionAPI) {
 		pi.appendEntry(QUEST_MODE_ENTRY, { enabled: questModeEnabled });
 	}
 
-	function persistDashboardTab() {
-		pi.appendEntry(QUEST_DASHBOARD_ENTRY, { tab: dashboardTab });
+	function applyTransientUiState(ctx: ExtensionContext, quest: QuestState | null) {
+		if (!ctx.hasUI) return;
+		if (quest && liveRun) {
+			const working = `Quest ${liveRun.role} · ${liveRun.phase}${liveRun.latestToolName ? ` · ${liveRun.latestToolName}` : ""}`;
+			ctx.ui.setWorkingMessage(working);
+			ctx.ui.setHiddenThinkingLabel(`quest:${liveRun.role}`);
+			return;
+		}
+		if (!quest && currentTrialState?.status === "running" && trialLiveRun) {
+			const working = `Trials ${trialLiveRun.phase}${trialLiveRun.latestToolName ? ` · ${trialLiveRun.latestToolName}` : ""}`;
+			ctx.ui.setWorkingMessage(working);
+			ctx.ui.setHiddenThinkingLabel("quest:trials");
+			return;
+		}
+		ctx.ui.setWorkingMessage();
+		ctx.ui.setHiddenThinkingLabel();
 	}
 
 	async function applyQuestUi(ctx: ExtensionContext, quest: QuestState | null) {
 		if (!ctx.hasUI) return;
+		const contextLabel = formatContextUsageLabel(lastContextUsage);
+		applyTransientUiState(ctx, quest);
 		if (!quest) {
 			if (questModeEnabled) {
-				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", "quest:mode"));
-				ctx.ui.setWidget(WIDGET_KEY, [
-					"QUEST // ready",
-					"Status quest mode on  |  Active none",
-					"Focus plain input now creates a quest in this repo",
-				]);
-				ctx.ui.setWidget(WIDGET_ACTIONS_KEY, ["Actions /quest new <goal>  |  /quests  |  /quest trials"]);
-			} else if (currentTrialState?.status === "running") {
+				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `quest:mode${contextLabel ? ` · ${contextLabel}` : ""}`));
+				ctx.ui.setWidget(WIDGET_KEY, createQuestModeWidgetComponent(contextLabel));
+			} else if (internalModeEnabled() && currentTrialState?.status === "running") {
 				const trialState = currentTrialState;
-				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `trials:${trialState.status}`));
-				ctx.ui.setWidget(WIDGET_KEY, renderTrialsWidgetLines(buildTrialsWidgetModel(trialState, trialState.activeProfileId, trialLiveRun)));
-				ctx.ui.setWidget(WIDGET_ACTIONS_KEY, renderTrialsActionLines());
+				const internalUi = await loadInternalUi();
+				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `trials:${trialState.status}${contextLabel ? ` · ${contextLabel}` : ""}`));
+				ctx.ui.setWidget(WIDGET_KEY, internalUi.createTrialsWidgetComponent(internalUi.buildTrialsWidgetModel(trialState, trialState.activeProfileId, trialLiveRun, contextLabel)));
 			} else {
 				ctx.ui.setStatus(STATUS_KEY, undefined);
 				ctx.ui.setWidget(WIDGET_KEY, undefined);
-				ctx.ui.setWidget(WIDGET_ACTIONS_KEY, undefined);
 			}
 			return;
 		}
 		const liveSummary = liveRun ? ` · ${liveRun.role}:${liveRun.phase}` : "";
-		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `quest:${quest.status}${liveSummary}`));
-		ctx.ui.setWidget(WIDGET_KEY, renderQuestWidgetLines(buildQuestWidgetModel(quest, liveRun, questModeEnabled)));
-		ctx.ui.setWidget(WIDGET_ACTIONS_KEY, renderQuestActionLines(quest.status));
+		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `quest:${quest.status}${liveSummary}${contextLabel ? ` · ${contextLabel}` : ""}`));
+		ctx.ui.setWidget(WIDGET_KEY, createQuestWidgetComponent(buildQuestWidgetModel(quest, liveRun, questModeEnabled, contextLabel)));
 	}
 
 	async function refreshCurrentQuest(cwd: string) {
@@ -432,8 +628,9 @@ export default function questExtension(pi: ExtensionAPI) {
 	async function loadQuestForContext(ctx: ExtensionContext) {
 		currentQuest = await loadActiveQuest(ctx.cwd);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
-		currentTrialState = await loadQuestTrialState(ctx.cwd);
-		currentProfile = await loadQuestProfile(ctx.cwd, currentTrialState.activeProfileId, { target: currentTrialState.target });
+		const runtimeProfile = await loadRuntimeProfile(ctx.cwd);
+		currentTrialState = runtimeProfile.trialState;
+		currentProfile = runtimeProfile.profile;
 		if (!currentQuest || currentQuest.status !== "planning") {
 			liveRun = null;
 			planningEvents = [];
@@ -451,8 +648,9 @@ export default function questExtension(pi: ExtensionAPI) {
 	async function ensureCurrentQuest(ctx: ExtensionContext): Promise<QuestState | null> {
 		currentQuest = await loadActiveQuest(ctx.cwd);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
-		currentTrialState = await loadQuestTrialState(ctx.cwd);
-		currentProfile = await loadQuestProfile(ctx.cwd, currentTrialState.activeProfileId, { target: currentTrialState.target });
+		const runtimeProfile = await loadRuntimeProfile(ctx.cwd);
+		currentTrialState = runtimeProfile.trialState;
+		currentProfile = runtimeProfile.profile;
 		if (!currentQuest) {
 			await emitNote(pi, ctx, "No active quest in this repo. Use `/quest new <goal>` first.", "warning");
 			return null;
@@ -464,9 +662,10 @@ export default function questExtension(pi: ExtensionAPI) {
 		const modelChoice = createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
 		currentQuest = await createQuest(ctx.cwd, goal, modelChoice);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
-		currentTrialState = await loadQuestTrialState(ctx.cwd, { ensure: true });
-		currentProfile = await loadQuestProfile(ctx.cwd, currentTrialState.activeProfileId, { ensure: true, target: currentTrialState.target });
-		await saveQuestProfile(ctx.cwd, currentProfile);
+		const runtimeProfile = await loadRuntimeProfile(ctx.cwd, { ensure: internalModeEnabled() });
+		currentTrialState = runtimeProfile.trialState;
+		currentProfile = runtimeProfile.profile;
+		if (internalModeEnabled()) await saveQuestProfile(ctx.cwd, currentProfile);
 		await pruneQuestStorage(ctx.cwd);
 		await setQuestMode(ctx, true);
 		await emitNote(pi, ctx, `Quest created: ${goal}`);
@@ -524,146 +723,30 @@ export default function questExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		let selectedFeature = 0;
-		let selectedRun = 0;
-
-		await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-			let closed = false;
-			const interval = setInterval(() => {
-				void (async () => {
-					currentQuest = await loadActiveQuest(ctx.cwd);
-					currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
-					if (!currentQuest) return;
-					tui.requestRender();
-				})();
-			}, 1000);
-
-			const cleanup = () => {
-				if (closed) return;
-				closed = true;
-				clearInterval(interval);
-				persistDashboardTab();
-				done(undefined);
-			};
-
-			const component = {
-				render(width: number) {
-					const questForRender = currentQuest ?? quest;
-					const milestone = currentMilestone(questForRender);
-					const milestoneFeatures = milestone ? currentMilestoneFeatures(questForRender, milestone.id) : [];
-					const runs = questForRender.recentRuns.slice(0, 8);
-					const assertions = assertionCounts(questForRender);
-					const activeFeature = milestoneFeatures[selectedFeature] ?? milestoneFeatures[0];
-					const activeRun = runs[selectedRun] ?? runs[0];
-					const detailLines =
-						dashboardTab === "features" && activeFeature
-							? [
-									`Feature: ${activeFeature.title}`,
-									`Status: ${activeFeature.status}`,
-									`Description: ${activeFeature.description}`,
-									`Fulfills: ${activeFeature.fulfills.join(", ") || "none"}`,
-									`Handoff: ${activeFeature.handoff || "none"}`,
-								]
-							: activeRun
-								? [
-										`Run: ${activeRun.role}`,
-										`Summary: ${activeRun.summary}`,
-										`Phase: ${activeRun.phase}`,
-										`Tool: ${activeRun.latestToolName || "none"}`,
-										`Issues: ${activeRun.issues?.join("; ") || "none"}`,
-									]
-								: ["No detail selected."];
-					const lines = [
-						theme.bold(theme.fg("accent", `Quest Control · ${questForRender.plan?.title ?? questForRender.title}`)),
-						theme.fg("muted", `tab:${dashboardTab} · q close · tab switch · j/k move · r run/resume · p pause · a abort`),
-						"",
-						theme.bold("Summary"),
-						`status: ${questForRender.status}`,
-						`milestone: ${milestone ? `${milestone.title} [${milestone.status}]` : "none"}`,
-						`models: o=${modelLabel(currentOrDefaultModel(questForRender, "orchestrator"))} | w=${modelLabel(currentOrDefaultModel(questForRender, "worker"))} | v=${modelLabel(currentOrDefaultModel(questForRender, "validator"))}`,
-						`validation: ${assertions.passed}/${assertions.total} passed, ${assertions.failed} failed, ${assertions.limited} limited, ${readinessWarningCount(questForRender)} readiness warnings`,
-						"",
-						theme.bold("Features"),
-						...(milestoneFeatures.length > 0
-							? milestoneFeatures.map((feature, index) =>
-									`${dashboardTab === "features" && index === selectedFeature ? ">" : " "} [${feature.status}] ${feature.title}`,
-								)
-							: ["  none"]),
-						"",
-						theme.bold("Workers / Validators"),
-						...(runs.length > 0
-							? runs.map((run, index) =>
-									`${dashboardTab === "runs" && index === selectedRun ? ">" : " "} [${run.role}] ${truncate(run.summary, Math.max(20, width - 18))}`,
-								)
-							: ["  none"]),
-						"",
-						theme.bold("Detail"),
-						...detailLines,
-					];
-					return new Text(lines.join("\n"), 0, 0).render(width);
-				},
-				invalidate() {},
-				handleInput(data: string) {
-					if (matchesKey(data, Key.escape) || data === "q") {
-						cleanup();
-						return true;
-					}
-					if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
-						const nextIndex = (DASHBOARD_TABS.indexOf(dashboardTab) + 1) % DASHBOARD_TABS.length;
-						dashboardTab = DASHBOARD_TABS[nextIndex];
-						tui.requestRender();
-						return true;
-					}
-					if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
-						const nextIndex = (DASHBOARD_TABS.indexOf(dashboardTab) - 1 + DASHBOARD_TABS.length) % DASHBOARD_TABS.length;
-						dashboardTab = DASHBOARD_TABS[nextIndex];
-						tui.requestRender();
-						return true;
-					}
-					const questForInput = currentQuest ?? quest;
-					const milestone = currentMilestone(questForInput);
-					const milestoneFeatures = milestone ? currentMilestoneFeatures(questForInput, milestone.id) : [];
-					const runs = questForInput.recentRuns.slice(0, 8);
-					if ((data === "j" || matchesKey(data, Key.down)) && dashboardTab === "features") {
-						selectedFeature = Math.min(milestoneFeatures.length - 1, selectedFeature + 1);
-						tui.requestRender();
-						return true;
-					}
-					if ((data === "k" || matchesKey(data, Key.up)) && dashboardTab === "features") {
-						selectedFeature = Math.max(0, selectedFeature - 1);
-						tui.requestRender();
-						return true;
-					}
-					if (data === "j" && dashboardTab === "runs") {
-						selectedRun = Math.min(runs.length - 1, selectedRun + 1);
-						tui.requestRender();
-						return true;
-					}
-					if (data === "k" && dashboardTab === "runs") {
-						selectedRun = Math.max(0, selectedRun - 1);
-						tui.requestRender();
-						return true;
-					}
-					if (data === "r") {
-						void handleQuestCommand(
-							questForInput.status === "proposal_ready" ? "accept" : questForInput.status === "paused" || questForInput.status === "blocked" ? "resume" : "",
-							ctx,
-						).then(() => tui.requestRender());
-						return true;
-					}
-					if (data === "p") {
-						void handleQuestCommand("pause", ctx).then(() => tui.requestRender());
-						return true;
-					}
-					if (data === "a" || data === "i") {
-						void handleQuestCommand("abort", ctx).then(() => tui.requestRender());
-						return true;
-					}
-					return false;
-				},
-			};
-			return component;
-		});
+		let selectedValue: string | null = null;
+		while (true) {
+			currentQuest = (await loadActiveQuest(ctx.cwd)) ?? quest;
+			currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
+			const questForView = currentQuest;
+			const actions: ControlPanelAction<"accept" | "resume" | "pause" | "abort" | "refresh">[] = [
+				{ key: "g", label: "refresh", result: "refresh" },
+			];
+			if (questForView.status === "proposal_ready") actions.unshift({ key: "r", label: "accept", result: "accept" });
+			if (questForView.status === "paused" || questForView.status === "blocked") actions.unshift({ key: "r", label: "resume", result: "resume" });
+			if (questForView.status === "running") actions.unshift({ key: "p", label: "pause", result: "pause" });
+			if (questForView.status !== "completed" && questForView.status !== "aborted") actions.push({ key: "a", label: "abort", result: "abort" });
+			const outcome: ControlPanelOutcome<"accept" | "resume" | "pause" | "abort" | "refresh"> | null = await openControlPanel(ctx, {
+				title: `Quest Control · ${questForView.plan?.title ?? questForView.title}`,
+				subtitle: `${questForView.status} · ${questForView.goal}`,
+				items: buildQuestControlItems(questForView, liveRun),
+				selectedValue,
+				actions,
+			});
+			if (!outcome || outcome.action === "close") return;
+			selectedValue = outcome.selectedValue;
+			if (outcome.action === "refresh") continue;
+			await handleQuestCommand(outcome.action, ctx);
+		}
 	}
 
 	async function showQuestList(ctx: ExtensionContext) {
@@ -694,10 +777,10 @@ export default function questExtension(pi: ExtensionAPI) {
 		await emitNote(pi, ctx, `Active quest set to "${selectedQuest.title}".`);
 	}
 
-	function summarizeTrials(status: Awaited<ReturnType<typeof collectFrontierTrialStatus>>): string {
+	function summarizeTrials(status: FrontierTrialStatus, summary: string): string {
 		return `# Trials
 
-${summarizeTrialStatus(status)}
+${summary}
 
 Active trial run:
 ${
@@ -708,60 +791,59 @@ ${
 	}
 
 	async function openQuestTrialsControl(ctx: ExtensionContext) {
-		const status = await collectFrontierTrialStatus(ctx.cwd);
+		if (!internalModeEnabled()) {
+			await emitNote(pi, ctx, "Quest Trials is maintainer-only and not part of the public package surface.", "warning");
+			return;
+		}
+		const trials = await loadFrontierTrials();
+		const status = await trials.collectFrontierTrialStatus(ctx.cwd);
+		const summary = trials.summarizeTrialStatus(status);
 		currentTrialState = status.state;
 		currentProfile = status.profile;
 		if (!ctx.hasUI || !ctx.ui.custom) {
-			await emitNote(pi, ctx, summarizeTrials(status));
+			await emitNote(pi, ctx, summarizeTrials(status, summary));
 			return;
 		}
 
-		await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-			let closed = false;
-			const cleanup = () => {
-				if (closed) return;
-				closed = true;
-				done(undefined);
-			};
-
-			const component = {
-				render(width: number) {
-					const lines = summarizeTrials(status)
-						.split("\n")
-						.map((line, index) => (index === 0 ? theme.bold(theme.fg("accent", line.replace(/^# /, ""))) : line));
-					lines.splice(1, 0, theme.fg("muted", "q close · b baseline · r run · s stop · p profile"));
-					return new Text(lines.join("\n"), 0, 0).render(width);
-				},
-				invalidate() {},
-				handleInput(data: string) {
-					if (matchesKey(data, Key.escape) || data === "q") {
-						cleanup();
-						return true;
-					}
-					if (data === "r") {
-						void handleQuestTrialsCommand("run", ctx).then(() => tui.requestRender());
-						return true;
-					}
-					if (data === "b") {
-						void handleQuestTrialsCommand("baseline", ctx).then(() => tui.requestRender());
-						return true;
-					}
-					if (data === "s") {
-						void handleQuestTrialsCommand("stop", ctx).then(() => tui.requestRender());
-						return true;
-					}
-					if (data === "p") {
-						void handleQuestTrialsCommand("profile", ctx).then(() => tui.requestRender());
-						return true;
-					}
-					return false;
-				},
-			};
-			return component;
-		});
+		let selectedValue: string | null = null;
+		while (true) {
+			const nextStatus = await trials.collectFrontierTrialStatus(ctx.cwd);
+			currentTrialState = nextStatus.state;
+			currentProfile = nextStatus.profile;
+			const internalUi = await loadInternalUi();
+			const actions: ControlPanelAction<"baseline" | "run" | "stop" | "profile" | "refresh">[] =
+				nextStatus.state.status === "running"
+					? [
+							{ key: "s", label: "stop", result: "stop" },
+							{ key: "p", label: "profile", result: "profile" },
+							{ key: "g", label: "refresh", result: "refresh" },
+						]
+					: [
+							{ key: "b", label: "baseline", result: "baseline" },
+							{ key: "r", label: "run", result: "run" },
+							{ key: "p", label: "profile", result: "profile" },
+							{ key: "g", label: "refresh", result: "refresh" },
+						];
+			const outcome: ControlPanelOutcome<"baseline" | "run" | "stop" | "profile" | "refresh"> | null = await openControlPanel(ctx, {
+				title: "Quest Trials",
+				subtitle: `${nextStatus.state.status} · ${nextStatus.profile.id}`,
+				items: internalUi.buildTrialsControlItems(nextStatus.state, nextStatus.profile.id, trialLiveRun),
+				selectedValue,
+				actions,
+			});
+			if (!outcome || outcome.action === "close") return;
+			selectedValue = outcome.selectedValue;
+			if (outcome.action === "refresh") continue;
+			await handleQuestTrialsCommand(outcome.action, ctx);
+		}
 	}
 
 	async function handleQuestTrialsCommand(args: string, ctx: ExtensionContext) {
+		if (!internalModeEnabled()) {
+			await emitNote(pi, ctx, "Quest Trials is maintainer-only and not part of the public package surface.", "warning");
+			return;
+		}
+		const trials = await loadFrontierTrials();
 		const trimmed = args.trim();
 		const readFlag = (flag: string): string | undefined => {
 			const parts = trimmed.split(/\s+/);
@@ -769,12 +851,12 @@ ${
 			return index >= 0 ? parts[index + 1] : undefined;
 		};
 		const hasFlag = (flag: string): boolean => trimmed.split(/\s+/).includes(flag);
-		const status = await collectFrontierTrialStatus(ctx.cwd);
+		const status = await trials.collectFrontierTrialStatus(ctx.cwd);
 		currentTrialState = status.state;
 		currentProfile = status.profile;
 
 		if (!trimmed) {
-			await emitNote(pi, ctx, summarizeTrialStatus(status));
+			await emitNote(pi, ctx, trials.summarizeTrialStatus(status));
 			return;
 		}
 
@@ -800,7 +882,7 @@ ${
 						? currentOrDefaultModel(currentQuest, "orchestrator")
 						: createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
 				const iterations = Number(readFlag("--iterations") ?? "1");
-				const result = await runTrialOptimization(
+				const result = await trials.runTrialOptimization(
 					ctx.cwd,
 					modelChoice,
 					{
@@ -841,7 +923,7 @@ ${
 			}
 
 			case "prepare-benchmark": {
-				const prepared = await prepareTrialBenchmark(ctx.cwd, { benchmark, dataset, repo, force: hasFlag("--force") });
+				const prepared = await trials.prepareTrialBenchmark(ctx.cwd, { benchmark, dataset, repo, force: hasFlag("--force") });
 				currentTrialState = prepared.state;
 				await emitNote(
 					pi,
@@ -852,7 +934,7 @@ ${
 			}
 
 			case "analyze-community": {
-				const stats = await analyzeTrialCommunity(ctx.cwd, hasFlag("--force"));
+				const stats = await trials.analyzeTrialCommunity(ctx.cwd, hasFlag("--force"));
 				await emitNote(
 					pi,
 					ctx,
@@ -870,7 +952,7 @@ ${
 					currentQuest && currentQuest.status !== "completed" && currentQuest.status !== "aborted"
 						? currentOrDefaultModel(currentQuest, "orchestrator")
 						: createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
-				const result = await runTrialBaseline(
+				const result = await trials.runTrialBaseline(
 					ctx.cwd,
 					modelChoice,
 					{
@@ -897,7 +979,7 @@ ${
 			}
 
 			case "status": {
-				await emitNote(pi, ctx, summarizeTrialStatus(await collectFrontierTrialStatus(ctx.cwd)));
+				await emitNote(pi, ctx, trials.summarizeTrialStatus(await trials.collectFrontierTrialStatus(ctx.cwd)));
 				return;
 			}
 
@@ -1276,6 +1358,10 @@ ${
 
 		switch (subcommand) {
 			case "trials": {
+				if (!internalModeEnabled()) {
+					await emitNote(pi, ctx, "Quest Trials is maintainer-only and not part of the public package surface.", "warning");
+					return;
+				}
 				await handleQuestTrialsCommand(remainder, ctx);
 				return;
 			}
@@ -1291,7 +1377,7 @@ ${
 				}
 				currentQuest = await createPlanningQuest(ctx, remainder);
 				planningTurnActive = true;
-				const prompt = `Let's plan a quest for this repository.\n\nGoal: ${remainder}\n\nAsk clarifying questions if needed. Use the quest tools to write the proposal when you are ready.`;
+				const prompt = `Let's plan a quest for this repository.\n\nGoal: ${remainder}\n\nDefine the validation contract before the feature list. If the goal is still ambiguous, ask clarifying questions until the requirements are unambiguous. Use the quest tools to write the proposal when you are ready.`;
 				if (ctx.isIdle()) {
 					pi.sendUserMessage(prompt);
 				} else {
@@ -1431,7 +1517,7 @@ ${
 				await emitNote(
 					pi,
 					ctx,
-					"Unknown /quest subcommand. Use /quest, /quest new <goal>, /quest enter, /quest exit, /quest accept, /quest pause, /quest resume, /quest abort, /quest trials, or /quest model <role> <provider/model[:thinking]>.",
+					"Unknown /quest subcommand. Use /quest, /quest new <goal>, /quest enter, /quest exit, /quest accept, /quest pause, /quest resume, /quest abort, or /quest model <role> <provider/model[:thinking]>.",
 					"warning",
 				);
 			}
@@ -1443,7 +1529,17 @@ ${
 		return loadActiveQuest(ctx.cwd);
 	}
 
-	pi.registerMessageRenderer(CUSTOM_MESSAGE_TYPE, (message, _context, theme) => new Text(theme.fg("accent", "[quest] ") + String(message.content), 0, 0));
+	pi.registerMessageRenderer(CUSTOM_MESSAGE_TYPE, (message, _context, theme) => {
+		const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+		box.addChild(new Text(theme.bold(theme.fg("accent", "[quest]")), 0, 0));
+		box.addChild(new Spacer(1));
+		box.addChild(
+			new Markdown(String(message.content), 0, 0, getMarkdownTheme(), {
+				color: (text: string) => theme.fg("customMessageText", text),
+			}),
+		);
+		return box;
+	});
 
 	pi.registerTool({
 		name: "quest_set_proposal",
@@ -1472,7 +1568,7 @@ ${
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const quest = await resolveQuestForTool(ctx, params.questId);
-			if (!quest) return { content: [{ type: "text", text: "No active quest found." }] };
+			if (!quest) return { content: [{ type: "text", text: "No active quest found." }], details: undefined };
 			quest.title = params.title;
 			quest.proposalMarkdown = params.proposalMarkdown;
 			quest.plan = {
@@ -1529,7 +1625,7 @@ ${
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const quest = await resolveQuestForTool(ctx, params.questId);
-			if (!quest || !quest.plan) return { content: [{ type: "text", text: "No active quest proposal found." }] };
+			if (!quest || !quest.plan) return { content: [{ type: "text", text: "No active quest proposal found." }], details: undefined };
 			const nextFeatures = params.features.map((feature: any, index: number) => ({
 				id: feature.id,
 				order: feature.order ?? index + 1,
@@ -1610,7 +1706,7 @@ ${
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const quest = await resolveQuestForTool(ctx, params.questId);
-			if (!quest) return { content: [{ type: "text", text: "No active quest found." }] };
+			if (!quest) return { content: [{ type: "text", text: "No active quest found." }], details: undefined };
 			if (params.readiness) {
 				quest.validationReadiness = {
 					summary: params.readiness.summary,
@@ -1677,7 +1773,7 @@ ${
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const quest = await resolveQuestForTool(ctx, params.questId);
-			if (!quest || !quest.plan) return { content: [{ type: "text", text: "No active quest proposal found." }] };
+			if (!quest || !quest.plan) return { content: [{ type: "text", text: "No active quest proposal found." }], details: undefined };
 			quest.plan.services = params.services.map((service: any) => ({
 				name: service.name,
 				purpose: service.purpose,
@@ -1710,7 +1806,7 @@ ${
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const quest = await resolveQuestForTool(ctx, params.questId);
-			if (!quest) return { content: [{ type: "text", text: "No active quest found." }] };
+			if (!quest) return { content: [{ type: "text", text: "No active quest found." }], details: undefined };
 			const paths = getQuestPaths(quest.cwd, quest.id);
 			const dir = params.shared ? paths.sharedSkillsDir : paths.skillsDir;
 			await mkdir(dir, { recursive: true });
@@ -1746,10 +1842,18 @@ ${
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const quest = await resolveQuestForTool(ctx, params.questId);
-			if (!quest) return { content: [{ type: "text", text: "No active quest found." }] };
+			if (!quest) return { content: [{ type: "text", text: "No active quest found." }], details: undefined };
 			if (params.status) {
 				if (params.status === "proposal_ready" && !proposalReady(quest)) {
-					return { content: [{ type: "text", text: "Quest cannot move to proposal_ready until proposal, features, validation, and readiness artifacts are present." }] };
+					return {
+						content: [
+							{
+								type: "text",
+								text: "Quest cannot move to proposal_ready until proposal, features, validation, and readiness artifacts are present.",
+							},
+						],
+						details: undefined,
+					};
 				}
 				quest.status = params.status;
 			}
@@ -1765,83 +1869,86 @@ ${
 		},
 	});
 
-	pi.registerTool({
-		name: "quest_trials_set_profile",
-		label: "quest_trials_set_profile",
-		description: "Persist the active Trials profile and its editable surfaces.",
-		promptSnippet: "Persist a Trials profile surface update",
-		parameters: Type.Object({
-			profileId: Type.Optional(Type.String()),
-			target: Type.Optional(Type.Union([Type.Literal("repo"), Type.Literal("quest-core")])),
-			title: Type.Optional(Type.String()),
-			adoptedChange: Type.Optional(Type.String()),
-			promptSurfaces: Type.Optional(
-				Type.Object({
-					planningPolicy: Type.Optional(Type.String()),
-					workerPolicy: Type.Optional(Type.String()),
-					validatorCodeReviewPolicy: Type.Optional(Type.String()),
-					validatorUserSurfacePolicy: Type.Optional(Type.String()),
-					readinessPolicy: Type.Optional(Type.String()),
-					revisionPolicy: Type.Optional(Type.String()),
-				}),
-			),
-			modelPolicy: Type.Optional(
-				Type.Object({
-					preferSameModelFamily: Type.Optional(Type.Boolean()),
-					preferValidatorDivergence: Type.Optional(Type.Boolean()),
-				}),
-			),
-			verificationBudget: Type.Optional(
-				Type.Object({
-					workerAttempts: Type.Optional(Type.Number()),
-					validatorAttempts: Type.Optional(Type.Number()),
-					correctiveFeatureBudget: Type.Optional(Type.Number()),
-				}),
-			),
-			contextPolicy: Type.Optional(
-				Type.Object({
-					spillThresholdChars: Type.Optional(Type.Number()),
-					spillLongOutputsToReports: Type.Optional(Type.Boolean()),
-					maxInlineEvidenceLines: Type.Optional(Type.Number()),
-				}),
-			),
-			workflowHintPolicy: Type.Optional(
-				Type.Object({
-					maxSharedHints: Type.Optional(Type.Number()),
-					promotePrerequisiteHints: Type.Optional(Type.Boolean()),
-					promoteFailureHints: Type.Optional(Type.Boolean()),
-				}),
-			),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const trialState = await loadQuestTrialState(ctx.cwd, { ensure: true });
-			const profile = await loadQuestProfile(ctx.cwd, params.profileId ?? trialState.activeProfileId, {
-				ensure: true,
-				target: params.target ?? trialState.target,
-			});
-			const next = applyQuestProfilePatch(profile, {
-				promptSurfaces: params.promptSurfaces,
-				modelPolicy: params.modelPolicy,
-				verificationBudget: params.verificationBudget,
-				contextPolicy: params.contextPolicy,
-				workflowHintPolicy: params.workflowHintPolicy,
-				adoptedChange: params.adoptedChange,
-			});
-			if (params.title) next.title = params.title;
-			if (params.target) next.target = params.target;
-			await saveQuestProfile(ctx.cwd, next);
-			currentProfile = next;
-			return {
-				content: [{ type: "text", text: `Updated Trials profile ${next.id}.` }],
-				details: { profileId: next.id, target: next.target },
-			};
-		},
-	});
+	if (internalModeEnabled()) {
+		pi.registerTool({
+			name: "quest_trials_set_profile",
+			label: "quest_trials_set_profile",
+			description: "Persist the active Trials profile and its editable surfaces.",
+			promptSnippet: "Persist a Trials profile surface update",
+			parameters: Type.Object({
+				profileId: Type.Optional(Type.String()),
+				target: Type.Optional(Type.Union([Type.Literal("repo"), Type.Literal("quest-core")])),
+				title: Type.Optional(Type.String()),
+				adoptedChange: Type.Optional(Type.String()),
+				promptSurfaces: Type.Optional(
+					Type.Object({
+						planningPolicy: Type.Optional(Type.String()),
+						workerPolicy: Type.Optional(Type.String()),
+						validatorCodeReviewPolicy: Type.Optional(Type.String()),
+						validatorUserSurfacePolicy: Type.Optional(Type.String()),
+						readinessPolicy: Type.Optional(Type.String()),
+						revisionPolicy: Type.Optional(Type.String()),
+					}),
+				),
+				modelPolicy: Type.Optional(
+					Type.Object({
+						preferSameModelFamily: Type.Optional(Type.Boolean()),
+						preferValidatorDivergence: Type.Optional(Type.Boolean()),
+					}),
+				),
+				verificationBudget: Type.Optional(
+					Type.Object({
+						workerAttempts: Type.Optional(Type.Number()),
+						validatorAttempts: Type.Optional(Type.Number()),
+						correctiveFeatureBudget: Type.Optional(Type.Number()),
+					}),
+				),
+				contextPolicy: Type.Optional(
+					Type.Object({
+						spillThresholdChars: Type.Optional(Type.Number()),
+						spillLongOutputsToReports: Type.Optional(Type.Boolean()),
+						maxInlineEvidenceLines: Type.Optional(Type.Number()),
+					}),
+				),
+				workflowHintPolicy: Type.Optional(
+					Type.Object({
+						maxSharedHints: Type.Optional(Type.Number()),
+						promotePrerequisiteHints: Type.Optional(Type.Boolean()),
+						promoteFailureHints: Type.Optional(Type.Boolean()),
+					}),
+				),
+			}),
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				const trialState = await loadQuestTrialState(ctx.cwd, { ensure: true });
+				const profile = await loadQuestProfile(ctx.cwd, params.profileId ?? trialState.activeProfileId, {
+					ensure: true,
+					target: params.target ?? trialState.target,
+				});
+				const { applyQuestProfilePatch } = await import("./internal-profile-core.js");
+				const next = applyQuestProfilePatch(profile, {
+					promptSurfaces: params.promptSurfaces,
+					modelPolicy: params.modelPolicy,
+					verificationBudget: params.verificationBudget,
+					contextPolicy: params.contextPolicy,
+					workflowHintPolicy: params.workflowHintPolicy,
+					adoptedChange: params.adoptedChange,
+				});
+				if (params.title) next.title = params.title;
+				if (params.target) next.target = params.target;
+				await saveQuestProfile(ctx.cwd, next);
+				currentProfile = next;
+				return {
+					content: [{ type: "text", text: `Updated Trials profile ${next.id}.` }],
+					details: { profileId: next.id, target: next.target },
+				};
+			},
+		});
+	}
 
 	pi.registerCommand("quest", {
 		description: "Open Quest Control or operate on the active quest",
 		getArgumentCompletions: (prefix) => {
-			const options = ["new", "enter", "exit", "accept", "pause", "resume", "abort", "model", "trials"];
+			const options = ["new", "enter", "exit", "accept", "pause", "resume", "abort", "model"];
 			return options.filter((item) => item.startsWith(prefix)).map((item) => ({ value: item, label: item }));
 		},
 		handler: handleQuestCommand,
@@ -1854,18 +1961,78 @@ ${
 		},
 	});
 
+	pi.registerShortcut(Key.ctrlAlt("q"), {
+		description: "Open Quest Control",
+		handler: async (ctx) => {
+			const quest = await ensureCurrentQuest(ctx);
+			if (!quest) return;
+			await openQuestControl(ctx, quest);
+		},
+	});
+
+	pi.registerShortcut(Key.ctrlAlt("l"), {
+		description: "List project quests",
+		handler: async (ctx) => {
+			await showQuestList(ctx);
+		},
+	});
+
+	if (internalModeEnabled()) {
+		pi.registerShortcut(Key.ctrlAlt("t"), {
+			description: "Open Quest Trials",
+			handler: async (ctx) => {
+				await openQuestTrialsControl(ctx);
+			},
+		});
+	}
+
+	pi.on("resources_discover", async (_event, ctx) => {
+		const activeQuest = await loadActiveQuest(ctx.cwd);
+		return {
+			skillPaths: discoverQuestSkillPaths(ctx.cwd, activeQuest?.id),
+		};
+	});
+
+	pi.on("before_provider_request", async (_event, ctx) => {
+		lastContextUsage = ctx.getContextUsage() ?? null;
+		await applyQuestUi(ctx, currentQuest);
+		return undefined;
+	});
+
+	pi.on("tool_result", async (event, _ctx) => {
+		const guidance = isBashToolResult(event) || isReadToolResult(event) || isGrepToolResult(event) || isFindToolResult(event) || isLsToolResult(event)
+			? questToolResultGuidance({ toolName: event.toolName, details: event.details, input: event.input })
+			: null;
+		if (!guidance) return undefined;
+		const alreadyPresent = event.content.some((part) => part.type === "text" && part.text.includes(guidance));
+		if (alreadyPresent) return undefined;
+		return {
+			content: [...event.content, { type: "text", text: guidance }],
+		};
+	});
+
+	pi.on("tool_call", async (event, ctx) => {
+		if (isToolCallEventType("bash", event)) {
+			const quest = currentQuest ?? (await loadActiveQuest(ctx.cwd));
+			const trialState = currentTrialState ?? (internalModeEnabled() ? await loadQuestTrialState(ctx.cwd, { ensure: true }) : null);
+			const env = buildQuestShellEnvironment(ctx.cwd, quest, trialState);
+			if (Object.keys(env).length > 0) {
+				event.input.command = prefixQuestShellCommand(event.input.command, env);
+			}
+		}
+		if ((isToolCallEventType("write", event) || isToolCallEventType("edit", event)) && typeof event.input.path === "string") {
+			const reason = protectedQuestArtifactReason(ctx.cwd, event.input.path);
+			if (reason) return { block: true, reason };
+		}
+		return undefined;
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		const entries = ctx.sessionManager.getEntries();
 		const questModeEntry = entries
 			.filter((entry: { type: string; customType?: string }) => entry.type === "custom" && entry.customType === QUEST_MODE_ENTRY)
 			.pop() as { data?: { enabled?: boolean } } | undefined;
-		const questDashboardEntry = entries
-			.filter((entry: { type: string; customType?: string }) => entry.type === "custom" && entry.customType === QUEST_DASHBOARD_ENTRY)
-			.pop() as { data?: { tab?: DashboardTab } } | undefined;
 		questModeEnabled = questModeEntry?.data?.enabled === true;
-		dashboardTab = DASHBOARD_TABS.includes(questDashboardEntry?.data?.tab ?? "summary")
-			? (questDashboardEntry?.data?.tab as DashboardTab)
-			: "summary";
 		planningTurnActive = false;
 		await pruneQuestStorage(ctx.cwd);
 		await loadQuestForContext(ctx);
@@ -1886,7 +2053,7 @@ ${
 			planningTurnActive = true;
 			return {
 				action: "transform" as const,
-				text: `Let's plan a quest for this repository.\n\nGoal: ${trimmed}\n\nAsk clarifying questions if needed. Use the quest tools to persist the proposal when you are ready.`,
+				text: `Let's plan a quest for this repository.\n\nGoal: ${trimmed}\n\nIf the goal is still ambiguous, ask clarifying questions until the requirements are unambiguous. Use the quest tools to persist the proposal when you are ready.`,
 			};
 		}
 

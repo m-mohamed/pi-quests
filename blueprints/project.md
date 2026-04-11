@@ -30,7 +30,7 @@ tweaks.
 - Community traces downloaded: 723 sessions from HuggingFace.
 - Multiple models tested: minimax-m2.5, glm-5, kimi-k2.5 all produce real output.
 - All models return 0.0 reward on chess task (agent quality gap, not plumbing).
-- Current baseline documented in `docs/baseline-results.md`.
+- Current baseline documented in `docs/internal/baseline-results.md`.
 
 ## Working Agreement
 

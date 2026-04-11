@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { promptSurfaceText } from "./trials-core.js";
+import { promptSurfaceText } from "./profile-core.js";
 import type {
 	LearnedWorkflow,
 	ParsedQuestPlan,
@@ -193,16 +193,19 @@ ${loadedSessionContextGuidance()}
 
 Use the structured quest tools instead of editing quest control files manually:
 - quest_set_proposal
-- quest_set_features
 - quest_set_validation
+- quest_set_features
 - quest_set_services
 - quest_write_skill
 - quest_update_state
 
 Planning requirements:
+- If the goal is still ambiguous, ask clarifying questions until the requirements are unambiguous before finalizing the proposal.
+- Treat the quest as a validation-first runtime: define the validation contract before the feature list.
 - Build the smallest viable implementation first.
 - Keep execution serial by default.
 - Break work into milestones with explicit validation boundaries.
+- Keep the orchestrator high-level; do not bake worker-level implementation details into the contract.
 - Include risks, environment assumptions, services, and a human QA checklist.
 - Every feature must map to validation assertion ids through "fulfills".
 - Reuse the dry-run readiness results; do not claim unsupported validation surfaces are fully automated.
@@ -210,8 +213,8 @@ Planning requirements:
 
 When the proposal is ready:
 1. Call quest_set_proposal with the title, summary, milestones, risks, environment, and human QA checklist.
-2. Call quest_set_features with the ordered features and their fulfills/preconditions/handoff.
-3. Call quest_set_validation with the finalized assertions and any readiness updates.
+2. Call quest_set_validation with the finalized assertions and any readiness updates. The contract comes before feature decomposition.
+3. Call quest_set_features with the ordered features and their fulfills/preconditions/handoff.
 4. Call quest_set_services with the service definitions and services YAML.
 5. Optionally call quest_write_skill for any reusable generated skill.
 6. Call quest_update_state with status="proposal_ready" and a concise summary.
@@ -252,6 +255,7 @@ export function revisionInstructions(quest: QuestState, requests: QuestPlanRevis
 Rules:
 - Preserve completed milestones and completed features.
 - Only change unfinished work and unfinished validation.
+- Turn validator findings into the smallest targeted fix features that close specific assertions.
 - Keep the quest serial by default.
 - Do not edit repository files.
 - Return the full updated quest plan as JSON.

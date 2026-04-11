@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { defaultQuestProfile } from "../src/trials-core.js";
+import { defaultQuestProfile } from "../src/profile-core.js";
 import { buildFeaturePrompt, buildPlannerSystemPrompt, buildValidatorPrompt, buildWorkerSystemPrompt } from "../src/workers.js";
 
 function sampleQuest() {
@@ -84,9 +84,15 @@ test("worker and validator prompts explicitly honor AGENTS and loaded skills", (
 
 	assert.match(featurePrompt, /AGENTS\.md/);
 	assert.match(featurePrompt, /matching skills|loaded skill/);
+	assert.match(featurePrompt, /narrowest failing proof first|smallest failing test first|narrowest failing test/);
+	assert.match(featurePrompt, /validator, not you, decides final correctness/);
 	assert.match(validatorPrompt, /AGENTS\.md/);
+	assert.match(validatorPrompt, /targeted fix features/);
 	assert.match(workerSystemPrompt, /loaded AGENTS\.md instructions/);
+	assert.match(workerSystemPrompt, /Do not self-approve the feature/);
+	assert.match(workerSystemPrompt, /narrowest failing test before broader implementation/);
 	assert.match(plannerSystemPrompt, /loaded AGENTS\.md instructions/);
+	assert.match(plannerSystemPrompt, /validation contract before the feature list/);
 });
 
 test("benchmark worker prompts keep verifier and system-tool surfaces immutable", () => {
@@ -112,11 +118,13 @@ test("benchmark worker prompts keep verifier and system-tool surfaces immutable"
 	assert.match(featurePrompt, /Treat verifier scripts, reward files, PATH-critical tools/);
 	assert.match(featurePrompt, /Do not ask for human help, approval, or follow-up on benchmark tasks/);
 	assert.match(featurePrompt, /re-open the exact output paths and verify/);
+	assert.match(featurePrompt, /external verifier decides/);
 	assert.match(featurePrompt, /finalSubmissionReady/);
 	assert.match(featurePrompt, /selfCheck/);
 	assert.match(workerSystemPrompt, /score sensor, not a mutable target/);
 	assert.match(workerSystemPrompt, /Never modify verifier scripts, reward files, PATH-critical tools/);
 	assert.match(workerSystemPrompt, /Do not request human help or leave provisional output/);
+	assert.match(workerSystemPrompt, /Do not treat your own confidence as the final pass signal/);
 	assert.match(workerSystemPrompt, /re-open the exact outputs and confirm a single final submission is ready/);
 	assert.match(workerSystemPrompt, /After one failed or slow setup path, pivot/);
 });

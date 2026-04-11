@@ -44,6 +44,8 @@ test("planningInstructions advertises structured quest tools", () => {
 	assert.match(prompt, /quest_update_state/);
 	assert.match(prompt, /AGENTS\.md/);
 	assert.match(prompt, /loaded skill/);
+	assert.match(prompt, /validation contract before the feature list/);
+	assert.ok(prompt.indexOf("quest_set_validation") < prompt.indexOf("quest_set_features"));
 });
 
 test("parseQuestPlanText accepts the quest fallback JSON shape", () => {

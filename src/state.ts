@@ -11,6 +11,7 @@ import type {
 import {
 	appendQuestEvent as appendQuestEventCore,
 	createQuest as createQuestCore,
+	getQuestTelemetryPaths,
 	getQuestTrialPaths,
 	getQuestPaths,
 	loadActiveQuest as loadActiveQuestCore,
@@ -37,7 +38,7 @@ import {
 	writeWorkerRun as writeWorkerRunCore,
 } from "./state-core.js";
 
-export { getQuestPaths, getQuestTrialPaths };
+export { getQuestPaths, getQuestTelemetryPaths, getQuestTrialPaths };
 
 export async function setActiveQuestId(cwd: string, questId: string | null): Promise<void> {
 	return setActiveQuestIdCore(cwd, questId);

@@ -1,12 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type {
 	QuestBenchmarkProvenance,
-	ModelChoice,
-	QuestExperimentCandidate,
 	QuestFailureTag,
+	ModelChoice,
 	QuestTrialTarget,
 	QuestProfile,
-	QuestProfilePatch,
 	QuestPromptSurfaceId,
 	QuestRole,
 	QuestTraceBundle,
@@ -24,6 +22,81 @@ function modelFamily(choice: ModelChoice): string {
 	return `${choice.provider}/${choice.model.split(/[-/.]/)[0] ?? choice.model}`;
 }
 
+function basePromptSurfaces() {
+	return {
+		version: PROFILE_VERSION,
+		planningPolicy:
+			"- Ask clarifying questions when the goal is ambiguous.\n- Define the validation contract before decomposing features.\n- Keep the orchestrator high-level and out of worker implementation detail.\n- Keep the first plan small and serial.\n- Use Quest tools to write Quest state instead of editing control artifacts manually.\n- Preserve the final human QA handoff.",
+		workerPolicy:
+			"- Confirm prerequisites before deep implementation.\n- Stay scoped to one feature and one success claim at a time.\n- When the repo has a fitting test harness or validation command, add or update the narrowest failing proof first.\n- Prefer the shortest proof path that satisfies the assigned feature.\n- Re-open edited outputs or generated artifacts before declaring completion.\n- If evidence contradicts the current path, re-plan inside the same turn instead of shipping provisional output.\n- After one failed setup path, pivot instead of repeating the same install or build sequence.\n- Spill long evidence into Quest artifacts instead of bloating inline summaries.\n- Do not self-approve; implement, run the smallest relevant proof, and hand off to validation.",
+		validatorCodeReviewPolicy:
+			"- Stay read-only and call out weak validation honestly.\n- Prefer root-cause findings over repetitive corrective work.\n- Phrase findings so the orchestrator can spawn targeted fix features.\n- Treat missing prerequisites as first-class issues.",
+		validatorUserSurfacePolicy:
+			"- Stay read-only and describe what remains limited.\n- Preserve the explicit human QA gate for final polish.\n- Phrase findings so the orchestrator can spawn targeted fix features.\n- Prefer concise operator-facing findings over verbose transcripts.",
+		readinessPolicy:
+			"- Mark unsupported surfaces as unsupported.\n- Capture prerequisites, services, and commands that affect validation confidence.\n- Note when browser or user-surface checks still require manual coverage.\n- Prefer a cheap real probe over a static guess when the repo already offers one.",
+		revisionPolicy:
+			"- Preserve completed work.\n- Keep the remaining plan serial by default.\n- Revise only unfinished milestones, unfinished features, and unfinished validation.\n- Translate validator findings into the smallest targeted fix features that close specific assertions.",
+		proposerPolicy:
+			"- This surface is maintainer-only.\n- Propose one coherent QuestProfilePatch at a time.\n- Keep changes on profile-owned surfaces only.\n- Output valid JSON only and do not mutate files.",
+	};
+}
+
+function baseHarnessPolicy() {
+	return {
+		computationalGuides: {
+			enabled: true,
+			linterConfigs: ["Use the repo-native check or lint/typecheck entrypoint before promotion."],
+			preCommitHooks: [
+				"Preserve canonical Quest artifacts; do not add side-channel state.",
+				"Archive regressions and trace evidence instead of hiding them behind summaries.",
+			],
+			structuralTests: [
+				"Run the cheapest repo-native proof path after changing validation or automation surfaces.",
+				"Prefer focused smoke checks before expensive end-to-end runs.",
+			],
+			archConstraints: [
+				"Keep optimization changes constrained to profile-owned surfaces.",
+				"Keep Quest artifacts repo-local and inspectable.",
+				"Keep runtime behavior Pi-native instead of building parallel wrappers when Pi already exposes the primitive.",
+			],
+		},
+		inferentialGuides: {
+			enabled: true,
+			agentsMdPath: "AGENTS.md",
+			skillsDir: ".codex/skills",
+			codeReviewAgents: ["validator-code-review"],
+		},
+		sensors: {
+			computational: {
+				enabled: true,
+				linters: ["repo-native check or lint command"],
+				typeCheckers: ["repo-native typecheck command"],
+				testRunners: ["repo-native test suite", "focused smoke or validation command for the changed surface"],
+				driftDetectors: ["Quest artifact drift", "workflow guidance drift", "trace health drift"],
+			},
+			inferential: {
+				enabled: true,
+				codeReviewAgents: ["validator-code-review"],
+				qualityJudges: ["targeted validator pass", "operator review for risky or low-signal edits"],
+				runtimeMonitors: ["quest-headless JSON artifact validation", "trace and failure-tag drift review"],
+			},
+		},
+		fitnessFunctions: {
+			enabled: true,
+			performanceRequirements: [{ metric: "quest_completion", threshold: 0.0, unit: "maximize" }],
+			observabilityRequirements: [
+				{ standard: "quest-headless-output", required: true },
+				{ standard: "quest-artifact-state", required: true },
+			],
+			architectureConstraints: [
+				"Quest traces remain Pi-native JSONL-derived artifacts.",
+				"Quest state remains repo-local under .pi/quests/.",
+			],
+		},
+	};
+}
+
 export function defaultQuestProfile(projectId: string, target: QuestTrialTarget = "repo"): QuestProfile {
 	return {
 		id: `${target}-${projectId}`,
@@ -31,23 +104,7 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 		target,
 		title: target === "quest-core" ? "Quest Core Profile" : "Repo Quest Profile",
 		updatedAt: Date.now(),
-		promptSurfaces: {
-			version: PROFILE_VERSION,
-			planningPolicy:
-				"- Be explicit when validation is limited or unsupported.\n- Keep the first plan small and serial.\n- Preserve the final human QA handoff.\n- Prefer structured quest tools over ad-hoc file edits.\n- Prefer tagged eval cohorts and cheap real probes over anecdotal debugging when shaping benchmark work.",
-			workerPolicy:
-				"- Confirm prerequisites before deep implementation.\n- Prefer the shortest proof path that satisfies the assigned feature.\n- For benchmark work, classify unseen tasks quickly by modality: media/binary, Git recovery, build/install, local service, data/science, archive/recovery, or precise text transform.\n- Re-open named benchmark outputs before finishing and confirm one final submission is actually ready.\n- If evidence contradicts the current path, re-plan inside the same turn instead of shipping provisional output.\n- After one failed or slow setup path, pivot instead of doubling down on installs or source builds.\n- Spill very long evidence into trial reports instead of bloating inline summaries.\n- After benchmark-facing changes, run the cheapest real Harbor smoke that exercises the edited surface before expensive sample runs.",
-			validatorCodeReviewPolicy:
-				"- Stay read-only and call out weak validation honestly.\n- Prefer root-cause findings over adding repetitive corrective work.\n- Treat missing prerequisites as first-class issues.",
-			validatorUserSurfacePolicy:
-				"- Stay read-only and describe what remains limited.\n- Preserve the explicit human QA gate for final polish.\n- Prefer concise operator-facing findings over verbose transcripts.",
-			readinessPolicy:
-				"- Mark unsupported surfaces as unsupported.\n- Capture prerequisites, services, and commands that affect validation confidence.\n- Note when browser or user-surface checks still require manual coverage.\n- Prefer real cheap probes over static guesses when a benchmark-facing path changed.",
-			revisionPolicy:
-				"- Preserve completed work.\n- Keep the remaining plan serial by default.\n- Revise only unfinished milestones, unfinished features, and unfinished validation.",
-			proposerPolicy:
-				"- Read candidate profiles, summaries, and benchmark artifacts from .pi/quests/trials/candidates/.\n- Read community trace statistics from .pi/quests/trials/community-stats.json.\n- Treat tagged benchmark splits and mined community traces as the training data for harness engineering.\n- Optimize for search-set mean score first, then lower cost, then lower duration.\n- Use hold-out results only as a regression gate and generalization check, not as an overfitting target.\n- Use benchmark failure-category mixes to target concrete break modes, not just pass-rate deltas.\n- Prefer changes that improve weak behavioral tag cohorts, not one-off task ids.\n- Propose one coherent harness/profile change per candidate unless two surface edits are inseparable.\n- Protect already-passing cohorts; use new regressions as next-iteration input instead of accepting silent backslides.\n- Propose a QuestProfilePatch only on profile-owned surfaces.\n- Output valid JSON only: summary, rationale, generalizationNote, targetedTags, targetedCaseIds, promptSurfaceIds, patch.\n- Do not execute code and do not mutate files.",
-		},
+		promptSurfaces: basePromptSurfaces(),
 		toolAllowlist: {
 			orchestrator: ["read", "bash"],
 			worker: ["read", "bash", "edit", "write"],
@@ -104,74 +161,7 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 			overflowPenalty: 0.25,
 			abortPenalty: 0.15,
 		},
-		harnessPolicy: {
-			computationalGuides: {
-				enabled: true,
-				linterConfigs: ["Use the repo-native check or lint/typecheck entrypoint before promotion."],
-				preCommitHooks: [
-					"Preserve canonical benchmark and quest artifacts; do not add side-channel state.",
-					"Archive regressions and benchmark traces instead of hiding them behind summaries.",
-				],
-				structuralTests: [
-					"Run the benchmark-facing preflight or smoke path after changing benchmark adapters or helpers.",
-					"Use the cheapest real Harbor smoke that covers the edited surface before a sample run.",
-				],
-				archConstraints: [
-					"Keep frontier Trials as the only optimization runtime.",
-					"Keep proposer edits constrained to profile-owned surfaces.",
-					"Keep benchmark splits tagged and source-fingerprinted so drift is explicit.",
-				],
-			},
-			inferentialGuides: {
-				enabled: true,
-				agentsMdPath: "AGENTS.md",
-				skillsDir: ".codex/skills",
-				codeReviewAgents: ["validator-code-review"],
-			},
-			sensors: {
-				computational: {
-					enabled: true,
-					linters: ["repo-native check or lint command"],
-					typeCheckers: ["repo-native typecheck command"],
-					testRunners: ["repo-native test suite", "benchmark preflight or smoke for benchmark-facing changes"],
-					driftDetectors: [
-						"benchmark split sourceFingerprint changes",
-						"benchmark tag distribution drift",
-						"community corpus stats drift",
-					],
-				},
-				inferential: {
-					enabled: true,
-					codeReviewAgents: ["validator-code-review"],
-					qualityJudges: [
-						"hold-out regression gate",
-						"always-pass regression subset",
-						"operator review for costly, overfit, or low-signal edits",
-					],
-					runtimeMonitors: [
-						"quest-headless JSON artifact validation",
-						"benchmark smoke probe",
-						"candidate trace and failure-tag drift review",
-					],
-				},
-			},
-			fitnessFunctions: {
-				enabled: true,
-				performanceRequirements: [
-					{ metric: "meanScore", threshold: 0.0, unit: "maximize" },
-					{ metric: "totalCost", threshold: 0.0, unit: "minimize" },
-					{ metric: "totalDurationMs", threshold: 0.0, unit: "minimize" },
-				],
-				observabilityRequirements: [
-					{ standard: "quest-headless-output", required: true },
-					{ standard: "candidate-archive-artifacts", required: true },
-				],
-				architectureConstraints: [
-					"Community traces remain Pi-native JSONL.",
-					"Benchmark adapters share the canonical candidate archive and frontier gate.",
-				],
-			},
-		},
+		harnessPolicy: baseHarnessPolicy(),
 		adoptedChanges: [],
 	};
 }
@@ -451,65 +441,4 @@ export function traceBundleFromPlanningSession(
 		source: "planning_session",
 		benchmark,
 	};
-}
-
-export function applyQuestProfilePatch(profile: QuestProfile, patch: QuestProfilePatch): QuestProfile {
-	const next = normalizeQuestProfile(
-		{
-			...profile,
-			promptSurfaces: {
-				...profile.promptSurfaces,
-				...patch.promptSurfaces,
-			},
-			toolAllowlist: {
-				...profile.toolAllowlist,
-				...patch.toolAllowlist,
-				orchestrator: patch.toolAllowlist?.orchestrator ?? profile.toolAllowlist.orchestrator,
-				worker: patch.toolAllowlist?.worker ?? profile.toolAllowlist.worker,
-				validator: patch.toolAllowlist?.validator ?? profile.toolAllowlist.validator,
-				trial: patch.toolAllowlist?.trial ?? profile.toolAllowlist.trial,
-				proposer: patch.toolAllowlist?.proposer ?? profile.toolAllowlist.proposer,
-			},
-			modelPolicy: { ...profile.modelPolicy, ...patch.modelPolicy },
-			verificationBudget: { ...profile.verificationBudget, ...patch.verificationBudget },
-			contextPolicy: { ...profile.contextPolicy, ...patch.contextPolicy },
-			workflowHintPolicy: { ...profile.workflowHintPolicy, ...patch.workflowHintPolicy },
-			traceGrading: { ...profile.traceGrading, ...patch.traceGrading },
-			adoptedChanges: patch.adoptedChange ? [...profile.adoptedChanges, patch.adoptedChange] : profile.adoptedChanges,
-			updatedAt: Date.now(),
-		},
-		profile.projectId,
-		profile.target,
-	);
-	return next;
-}
-
-export function parseQuestExperimentCandidate(text: string): QuestExperimentCandidate | null {
-	const fenced = text.match(/```json\s*([\s\S]*?)```/i);
-	const candidateText = fenced ? fenced[1] : text;
-	try {
-		const parsed = JSON.parse(candidateText) as {
-			summary?: string;
-			rationale?: string;
-			generalizationNote?: string;
-			targetedTags?: QuestFailureTag[];
-			targetedCaseIds?: string[];
-			promptSurfaceIds?: QuestPromptSurfaceId[];
-			patch?: QuestProfilePatch;
-		};
-		if (!parsed.summary || !parsed.rationale || !parsed.generalizationNote || !parsed.patch) return null;
-		return {
-			id: randomUUID(),
-			source: "agent",
-			summary: parsed.summary,
-			rationale: parsed.rationale,
-			generalizationNote: parsed.generalizationNote,
-			targetedTags: parsed.targetedTags ?? [],
-			targetedCaseIds: parsed.targetedCaseIds ?? [],
-			patch: parsed.patch,
-			promptSurfaceIds: parsed.promptSurfaceIds ?? [],
-		};
-	} catch {
-		return null;
-	}
 }

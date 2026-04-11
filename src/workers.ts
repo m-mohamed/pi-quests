@@ -4,8 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
-import { nativeBenchmarkHelperArgs, runBenchmarkHelper } from "./benchmark-helpers.js";
-import { parseQuestExperimentCandidate, promptSurfaceText, toolAllowlistForRole } from "./trials-core.js";
+import { promptSurfaceText, toolAllowlistForRole } from "./profile-core.js";
 import { parseQuestPlanText } from "./plan-core.js";
 import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
 import type {
@@ -150,6 +149,15 @@ const DEFAULT_USAGE: UsageStats = {
 };
 
 type ValidatorPass = "code_review" | "user_surface";
+
+async function loadBenchmarkHelpers(): Promise<typeof import("./benchmark-helpers.js")> {
+	return import("./benchmark-helpers.js");
+}
+
+async function parseInternalQuestExperimentCandidate(text: string): Promise<QuestExperimentCandidate | null> {
+	const internalProfiles = await import("./internal-profile-core.js");
+	return internalProfiles.parseQuestExperimentCandidate(text);
+}
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const explicit = process.env.PI_QUESTS_PI_BIN;
@@ -469,6 +477,7 @@ Execution policy:
 - Ignore .pi/, quest bookkeeping, candidate archives, and unrelated repo cleanup.
 - Inspect named task paths before broad exploration. For Terminal-Bench, start with /app inputs and required /app outputs.
 - If a native helper command is provided below, run it first. If it fails, do not retry it.
+- When the task is repo-local code work with an existing test harness, add or update the narrowest failing test before broader implementation.
 - Produce the exact required artifact, re-open it for one final format check, then stop.
 - Keep narration minimal and spend tokens on execution.
 
@@ -480,6 +489,7 @@ Benchmark heuristics:
 - Avoid heavyweight installs, package-manager churn, and source builds unless the task explicitly requires them; after one failed or slow setup path, pivot.
 - Before you finish, re-open the exact output paths and verify their bytes, rows, or fields match the task contract.
 - If your own check fails or new evidence contradicts the current approach, re-plan inside the same turn before the final JSON.
+- Your job is implementation only. Do not treat your own confidence as the final judge; the external verifier decides.
 - Do not ask for human help, approval, or follow-up on benchmark tasks; either finish cleanly or return blocked.
 - Treat verifier scripts, reward files, PATH-critical tools, package-manager shims, and system binaries as immutable unless the task explicitly requires changes there.
 
@@ -558,6 +568,8 @@ ${loadedSessionContextGuidance()}
 ${feature.handoff ? `Expected handoff:\n${feature.handoff}\n` : ""}${feature.workerPrompt ? `Feature-specific instructions:\n${feature.workerPrompt}\n` : ""}
 
 Execute only this feature. Keep the quest serial and scoped. Do not introduce unrelated changes.
+Start from the narrowest missing proof for this feature. When the repo has a matching test harness or check command, prefer adding or updating the smallest failing test first.
+Your job is to implement and hand off this feature. The validator, not you, decides final correctness.
 
 At the end, output:
 ## Feature Result
@@ -582,9 +594,11 @@ export function buildWorkerSystemPrompt(profile: QuestProfile, benchmark = false
 Rules:
 - Focus only on the assigned feature.
 - Respect loaded AGENTS.md instructions and reuse relevant loaded skills when they apply.
+- Treat the quest as a strict separation-of-concerns loop: implement the assigned feature, then hand it off.
 - Make the smallest correct change that satisfies the feature.
 - Do not start new quests or inspect quest internals.
 - Do not rewrite unrelated parts of the codebase.
+- When the repo already has a test harness or validation command for the feature, prefer adding or updating the narrowest failing test before broader implementation.
 - ${benchmark ? "In benchmark mode, treat the external verifier as a score sensor, not a mutable target." : "Use the repo's native validation signals when they are available."}
 - ${benchmark ? "Never modify verifier scripts, reward files, PATH-critical tools, package-manager shims, or system binaries unless the task explicitly requires it." : "Keep validation surfaces and developer tooling stable unless the task explicitly targets them."}
 - ${benchmark ? "When the task names a path, inspect or write that exact path first." : "Inspect the smallest relevant scope before making changes."}
@@ -592,6 +606,7 @@ Rules:
 - ${benchmark ? "Run a provided native helper once before custom analysis." : "Use native repo helpers before building custom tooling."}
 - ${benchmark ? "Remove transient scratch artifacts from task-owned outputs before finishing." : "Clean up transient local artifacts when they are no longer needed."}
 - ${benchmark ? "Do not request human help or leave provisional output during benchmark execution." : "Raise explicit blockers instead of hand-waving unresolved work."}
+- ${benchmark ? "Do not treat your own confidence as the final pass signal; the verifier decides." : "Do not self-approve the feature; the validator decides whether it is done."}
 - ${benchmark ? "Before the final JSON, re-open the exact outputs and confirm a single final submission is ready." : "Before finishing, summarize what still needs human QA."}
 - ${benchmark ? "If evidence contradicts the current path, re-plan inside the same turn instead of shipping a provisional answer." : "Prefer the smallest correction path when evidence changes."}
 - ${benchmark ? "After one failed or slow setup path, pivot instead of doubling down on installs or source builds." : "Prefer low-friction setup paths before heavyweight environment changes."}
@@ -647,6 +662,7 @@ ${loadedSessionContextGuidance()}
 ${milestone.validationPrompt ? `Extra validation guidance:\n${milestone.validationPrompt}\n` : ""}
 
 You are read-only. Verify the milestone. Do not edit code.
+Surface issues only. Phrase them so the orchestrator can create targeted fix features instead of broad rewrites.
 
 At the end, output:
 \`\`\`json
@@ -666,6 +682,7 @@ Rules:
 - Verify the assigned milestone using read-only tools and commands.
 - Respect loaded AGENTS.md instructions and any relevant loaded skills while staying read-only.
 - Do not edit or write files.
+- Do not propose code patches or implement fixes. Surface issues the orchestrator can convert into targeted fix features.
 - Be explicit about issues, blockers, or limited coverage.
 - Budget: at most ${profile.verificationBudget.validatorAttempts} validator attempt(s) before handing control back.
 - End with the required JSON block.`;
@@ -677,6 +694,7 @@ export function buildPlanRevisionSystemPrompt(profile: QuestProfile): string {
 Rules:
 - Preserve completed work.
 - Only change unfinished milestones, unfinished features, and validation for unfinished work.
+- Turn validator findings into the smallest corrective features that close the affected assertions.
 - Keep the quest serial by default.
 - Respect loaded AGENTS.md instructions and reuse relevant loaded skills when they apply.
 - Do not edit repository files.
@@ -781,6 +799,7 @@ Return a compact quest plan as JSON with:
 Requirements:
 - Keep execution serial by default.
 - Prefer 1-4 features.
+- Treat every "fulfills" entry as part of the validation contract and define that contract before finalizing features.
 - Every feature must have explicit fulfills entries.
 - Keep the final human QA handoff explicit.
 - Be honest about limited or unsupported validation.
@@ -826,6 +845,7 @@ export function buildPlannerSystemPrompt(profile: QuestProfile): string {
 
 Rules:
 - Plan the smallest serial execution path that can solve the task.
+- Define the validation contract before the feature list and keep the contract independent from implementation bias.
 - Keep human QA explicit at the end.
 - Be honest about limited or unsupported validation.
 - Respect loaded AGENTS.md instructions and use relevant loaded skills when they already fit the job.
@@ -1117,11 +1137,12 @@ export async function executeFeatureWorker(
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<WorkerRunRecord> {
 	const startedAt = Date.now();
-	const helperArgs = nativeBenchmarkHelperArgs(benchmark);
+	const benchmarkHelpers = benchmark ? await loadBenchmarkHelpers() : null;
+	const helperArgs = benchmark ? benchmarkHelpers?.nativeBenchmarkHelperArgs(benchmark) ?? null : null;
 	let nativeHelperFailure: string | undefined;
 	if (helperArgs) {
 		try {
-			await runBenchmarkHelper(helperArgs);
+			await benchmarkHelpers!.runBenchmarkHelper(helperArgs);
 			return {
 				id: randomUUID(),
 				role: "worker",
@@ -1380,7 +1401,7 @@ Return:
 		onProcessStart,
 	});
 	const text = getFinalAssistantText(result.messages);
-	const candidate = parseQuestExperimentCandidate(text);
+	const candidate = await parseInternalQuestExperimentCandidate(text);
 	return {
 		run: workerRunFromResult(
 			modelChoice,

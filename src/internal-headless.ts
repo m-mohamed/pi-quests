@@ -2,21 +2,23 @@ import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
-	defaultQuestProfile,
 	traceBundleFromPlanningSession,
 	traceBundleFromWorkerRun,
 } from "./profile-core.js";
+import { defaultInternalQuestProfile } from "./internal-profile-core.js";
 import { synthesizeValidationAssertions } from "./plan-core.js";
 import {
 	createQuest,
 	getQuestPaths,
 	loadLearnedWorkflows,
-	projectIdFor,
+	loadQuestProfile,
+	loadQuestTrialState,
 	saveQuest,
 	trimRecentRuns,
 	writeQuestTraceBundle,
 	writeWorkerRun,
 } from "./state.js";
+import { assertInternalMode } from "./internal-mode.js";
 import {
 	executeFeatureWorker,
 	executeQuestPlanner,
@@ -25,6 +27,7 @@ import {
 } from "./workers.js";
 import type {
 	ModelChoice,
+	QuestBenchmarkProvenance,
 	QuestFeature,
 	QuestMilestone,
 	QuestPlan,
@@ -35,16 +38,18 @@ import type {
 	WorkerRunRecord,
 } from "./types.js";
 
-export interface QuestHeadlessRunInput {
+export interface QuestInternalHeadlessRunInput {
 	cwd: string;
 	instruction: string;
 	modelChoice: ModelChoice;
+	profileId?: string;
 	autoAccept?: boolean;
 	dryRun?: boolean;
 	timeoutMs?: number;
+	benchmark?: Omit<QuestBenchmarkProvenance, "recordedAt" | "model">;
 }
 
-export interface QuestHeadlessRunResult {
+export interface QuestInternalHeadlessRunResult {
 	status: QuestState["status"] | "timeout";
 	summary: string;
 	questId: string;
@@ -55,6 +60,7 @@ export interface QuestHeadlessRunResult {
 	timeoutReason?: string;
 	failureCategory?: string;
 	artifactPaths: Record<string, string>;
+	benchmark?: QuestBenchmarkProvenance;
 }
 
 export interface QuestHeadlessExecutors {
@@ -71,25 +77,37 @@ const DEFAULT_EXECUTORS: QuestHeadlessExecutors = {
 	validator: executeValidator,
 };
 
+function benchmarkContext(
+	input: QuestInternalHeadlessRunInput["benchmark"],
+	modelChoice: ModelChoice,
+): QuestBenchmarkProvenance | undefined {
+	if (!input) return undefined;
+	return {
+		...input,
+		recordedAt: Date.now(),
+		model: `${modelChoice.provider}/${modelChoice.model}:${modelChoice.thinkingLevel}`,
+	};
+}
+
 function fallbackPlan(goal: string, readiness: ValidationReadiness | null): QuestPlan {
 	return {
 		title: goal.slice(0, 72),
-		summary: "Complete the assigned quest with a minimal serial plan.",
+		summary: "Complete the assigned benchmark task with a minimal serial quest plan.",
 		goal,
 		risks: readiness
 			? readiness.checks
 					.filter((check) => check.status === "limited" || check.status === "unsupported")
 					.map((check) => `${check.surface}: ${check.status}`)
 			: [],
-		environment: ["Headless quest execution."],
+		environment: ["Headless benchmark execution."],
 		services: [],
 		validationSummary: readiness?.summary ?? "No readiness summary captured.",
-		humanQaChecklist: ["Review the final repo state manually before shipping any Quest-derived changes."],
+		humanQaChecklist: ["Review the final repo state manually before shipping any benchmark-derived changes."],
 		milestones: [
 			{
 				id: "m1",
 				order: 1,
-				title: "Complete quest task",
+				title: "Complete benchmark task",
 				description: "Solve the assigned task and collect validation evidence.",
 				successCriteria: ["The task completes with validator confirmation."],
 				status: "pending",
@@ -100,13 +118,39 @@ function fallbackPlan(goal: string, readiness: ValidationReadiness | null): Ques
 				id: "f1",
 				order: 1,
 				milestoneId: "m1",
-				title: "Implement quest task",
+				title: "Implement benchmark task",
 				description: goal,
 				preconditions: [],
 				fulfills: ["The task completes with validator confirmation."],
 				status: "pending",
 				handoff: "Summarize files changed and remaining risks.",
 				acceptanceCriteria: ["The task completes with validator confirmation."],
+			},
+		],
+	};
+}
+
+function benchmarkFastPathReadiness(benchmark: QuestBenchmarkProvenance): ValidationReadiness {
+	return {
+		summary: `Benchmark mode for ${benchmark.benchmark}/${benchmark.dataset}: use the external verifier as a score sensor only, keep harness surfaces immutable, and rely on a lightweight Quest execution self-check before completion.`,
+		checks: [
+			{
+				id: "benchmark-verifier",
+				surface: "repo-checks",
+				description: "The benchmark harness provides external scoring, but verifier and harness surfaces must remain immutable.",
+				status: "supported",
+				commands: [],
+				evidence: [`${benchmark.benchmark}:${benchmark.dataset}:${benchmark.taskId}`],
+				notes: "Skip the exploratory readiness/planning passes, but do not modify verifier scripts, reward files, PATH-critical tools, or system binaries.",
+			},
+			{
+				id: "human-qa",
+				surface: "user-surface",
+				description: "User-surface QA remains limited during benchmark runs and is not used as a gate.",
+				status: "limited",
+				commands: [],
+				evidence: [],
+				notes: "Benchmark tasks still rely on the external harness for scoring, but only after integrity gates and the final Quest self-check are satisfied.",
 			},
 		],
 	};
@@ -160,14 +204,32 @@ function appendFindings(target: string[], findings: string[] | undefined): void 
 	}
 }
 
-function workerExecutionFindings(run: WorkerRunRecord): string[] {
+function benchmarkExecutionFindings(run: WorkerRunRecord): string[] {
 	return [...new Set((run.issues ?? []).map((issue) => issue.trim()).filter(Boolean))];
 }
 
+function inferBenchmarkFailureCategory(
+	status: QuestInternalHeadlessRunResult["status"],
+	executionFindings: string[],
+	summary?: string,
+	timeoutReason?: string,
+): string | undefined {
+	const text = [timeoutReason ?? "", summary ?? "", ...executionFindings].join(" ").toLowerCase();
+	if (status === "timeout" || /timed out|exceeded .*ms/.test(text)) return "quest_timeout";
+	if (/human handoff|human help|manual/.test(text)) return "human_handoff";
+	if (/contradict/.test(text)) return "contradictory_evidence";
+	if (/open question/.test(text)) return "open_questions";
+	if (/self-check|final submission/.test(text)) return "self_check_failed";
+	if (/install|dependency|package-manager|build from source|source build|setup path/.test(text)) return "setup_overreach";
+	if (status === "blocked") return "worker_failed";
+	return undefined;
+}
+
 function nextSummary(
-	status: QuestHeadlessRunResult["status"],
+	status: QuestInternalHeadlessRunResult["status"],
 	quest: QuestState,
 	validatorFindings: string[],
+	benchmark?: QuestBenchmarkProvenance,
 ): string {
 	switch (status) {
 		case "proposal_ready":
@@ -175,9 +237,11 @@ function nextSummary(
 		case "running":
 			return "Quest is still running.";
 		case "blocked":
-			return quest.lastError ?? validatorFindings[0] ?? "Quest blocked during execution.";
+			return quest.lastError ?? validatorFindings[0] ?? "Quest blocked during benchmark execution.";
 		case "completed":
-			return "Quest completed with explicit human QA still pending.";
+			return benchmark
+				? "Quest completed execution; benchmark scoring still depends on external harness integrity gates."
+				: "Quest completed with explicit human QA still pending.";
 		case "timeout":
 			return "Quest timed out before completion.";
 		default:
@@ -198,7 +262,7 @@ function resultArtifactPaths(quest: QuestState, resultFile: string): Record<stri
 	};
 }
 
-async function persistResultFile(quest: QuestState, payload: QuestHeadlessRunResult): Promise<string> {
+async function persistResultFile(quest: QuestState, payload: QuestInternalHeadlessRunResult): Promise<string> {
 	const paths = getQuestPaths(quest.cwd, quest.id);
 	await mkdir(paths.questDir, { recursive: true });
 	const file = join(paths.questDir, "headless-run.json");
@@ -206,13 +270,21 @@ async function persistResultFile(quest: QuestState, payload: QuestHeadlessRunRes
 	return file;
 }
 
-export async function runQuestHeadless(
-	input: QuestHeadlessRunInput,
+export async function runInternalQuestHeadless(
+	input: QuestInternalHeadlessRunInput,
 	executors: QuestHeadlessExecutors = DEFAULT_EXECUTORS,
-): Promise<QuestHeadlessRunResult> {
+): Promise<QuestInternalHeadlessRunResult> {
+	assertInternalMode("Internal Quest headless surfaces");
 	const autoAccept = input.autoAccept !== false;
+	const benchmark = benchmarkContext(input.benchmark, input.modelChoice);
 	const workflows = await loadLearnedWorkflows(input.cwd);
-	const resolvedProfile: QuestProfile = defaultQuestProfile(projectIdFor(input.cwd), "repo");
+	let resolvedProfile: QuestProfile;
+	const trialState = await loadQuestTrialState(input.cwd, { ensure: true });
+	resolvedProfile =
+		(await loadQuestProfile(input.cwd, input.profileId ?? trialState.activeProfileId, {
+			ensure: true,
+			target: trialState.target,
+		})) ?? defaultInternalQuestProfile(trialState.projectId, trialState.target);
 	const quest = await createQuest(input.cwd, input.instruction, input.modelChoice);
 	quest.roleModels = {
 		orchestrator: input.modelChoice,
@@ -224,16 +296,19 @@ export async function runQuestHeadless(
 	const validatorFindings: string[] = [];
 	const executionFindings: string[] = [];
 	const startedAt = Date.now();
+	const benchmarkFastPath = Boolean(benchmark);
 	let failureCategory: string | undefined;
 
-	let readiness: ValidationReadiness | null = null;
-	if (!input.dryRun) {
-		const probe = await executors.probe(input.cwd, input.modelChoice, resolvedProfile, undefined);
+	let readiness: ValidationReadiness | null = benchmark ? benchmarkFastPathReadiness(benchmark) : null;
+	if (benchmarkFastPath && readiness) {
+		quest.validationReadiness = readiness;
+	}
+	if (!input.dryRun && !benchmarkFastPath) {
+		const probe = await executors.probe(input.cwd, input.modelChoice, resolvedProfile, benchmark);
 		readiness = probe.readiness;
 		quest.validationReadiness = probe.readiness ?? quest.validationReadiness;
 		if (probe.servicesYaml) quest.servicesYaml = probe.servicesYaml;
 		quest.recentRuns = trimRecentRuns([probe.run, ...quest.recentRuns]);
-		appendFindings(executionFindings, workerExecutionFindings(probe.run));
 		await writeWorkerRun(quest.cwd, quest.id, probe.run);
 		const trace = traceBundleFromWorkerRun(quest, probe.run, resolvedProfile);
 		traceBundleIds.push(trace.id);
@@ -241,13 +316,12 @@ export async function runQuestHeadless(
 	}
 
 	let plan = fallbackPlan(input.instruction, readiness);
-	if (!input.dryRun) {
+	if (!input.dryRun && !benchmarkFastPath) {
 		const planningStartedAt = Date.now();
-		const planned = await executors.planner(input.cwd, input.instruction, input.modelChoice, readiness, resolvedProfile, undefined);
+		const planned = await executors.planner(input.cwd, input.instruction, input.modelChoice, readiness, resolvedProfile, benchmark);
 		quest.recentRuns = trimRecentRuns([planned.run, ...quest.recentRuns]);
-		appendFindings(executionFindings, workerExecutionFindings(planned.run));
 		await writeWorkerRun(quest.cwd, quest.id, planned.run);
-		const planningTrace = traceBundleFromPlanningSession(
+			const planningTrace = traceBundleFromPlanningSession(
 			quest,
 			planned.run.events,
 			input.modelChoice,
@@ -257,8 +331,8 @@ export async function runQuestHeadless(
 			planningStartedAt,
 			Date.now(),
 			planned.run.latestAssistantText,
-			undefined,
-		);
+				benchmark ? { ...benchmark } : undefined,
+			);
 		traceBundleIds.push(planningTrace.id);
 		await writeQuestTraceBundle(quest.cwd, planningTrace);
 		if (planned.plan) plan = planned.plan;
@@ -275,9 +349,9 @@ export async function runQuestHeadless(
 	await saveQuest(quest);
 
 	if (!autoAccept || input.dryRun) {
-		const preliminary: QuestHeadlessRunResult = {
+		const preliminary: QuestInternalHeadlessRunResult = {
 			status: quest.status,
-			summary: nextSummary(quest.status, quest, validatorFindings),
+			summary: nextSummary(quest.status, quest, validatorFindings, benchmark),
 			questId: quest.id,
 			profileId: resolvedProfile.id,
 			traceBundleIds,
@@ -285,6 +359,7 @@ export async function runQuestHeadless(
 			executionFindings,
 			failureCategory,
 			artifactPaths: {},
+			benchmark: benchmark ? { ...benchmark } : undefined,
 		};
 		const resultFile = await persistResultFile(quest, preliminary);
 		preliminary.artifactPaths = resultArtifactPaths(quest, resultFile);
@@ -300,10 +375,12 @@ export async function runQuestHeadless(
 
 	for (const milestone of currentMilestones(quest)) {
 		if (deadline && Date.now() > deadline) {
-			failureCategory = "quest_timeout";
-			const timeoutResult: QuestHeadlessRunResult = {
+			failureCategory = benchmark
+				? inferBenchmarkFailureCategory("timeout", executionFindings, quest.lastSummary, `Exceeded ${input.timeoutMs}ms before finishing the quest.`)
+				: undefined;
+			const timeoutResult: QuestInternalHeadlessRunResult = {
 				status: "timeout",
-				summary: nextSummary("timeout", quest, validatorFindings),
+				summary: nextSummary("timeout", quest, validatorFindings, benchmark),
 				questId: quest.id,
 				profileId: resolvedProfile.id,
 				traceBundleIds,
@@ -312,6 +389,7 @@ export async function runQuestHeadless(
 				timeoutReason: `Exceeded ${input.timeoutMs}ms before finishing the quest.`,
 				failureCategory,
 				artifactPaths: {},
+				benchmark: benchmark ? { ...benchmark } : undefined,
 			};
 			const resultFile = await persistResultFile(quest, timeoutResult);
 			timeoutResult.artifactPaths = resultArtifactPaths(quest, resultFile);
@@ -325,12 +403,12 @@ export async function runQuestHeadless(
 			if (feature.status === "completed") continue;
 			feature.status = "running";
 			await saveQuest(quest);
-			const run = await executors.worker(quest, feature, milestone, input.modelChoice, workflows, resolvedProfile, undefined);
-			const runFindings = workerExecutionFindings(run);
-			const runBlocked = !run.ok;
-			appendFindings(executionFindings, runFindings);
+			const run = await executors.worker(quest, feature, milestone, input.modelChoice, workflows, resolvedProfile, benchmark);
+			const benchmarkFindings = benchmarkFastPath ? benchmarkExecutionFindings(run) : [];
+			const runBlocked = !run.ok || (benchmarkFastPath && benchmarkFindings.length > 0);
+			appendFindings(executionFindings, benchmarkFindings);
 			feature.lastRunSummary = run.summary;
-			feature.lastError = runBlocked ? (run.stderr ?? run.summary) : undefined;
+			feature.lastError = runBlocked ? (benchmarkFindings[0] ?? run.stderr ?? run.summary) : undefined;
 			feature.status = runBlocked ? "blocked" : "completed";
 			quest.recentRuns = trimRecentRuns([run, ...quest.recentRuns]);
 			await writeWorkerRun(quest.cwd, quest.id, run);
@@ -340,12 +418,14 @@ export async function runQuestHeadless(
 			if (runBlocked) {
 				milestone.status = "blocked";
 				quest.status = "blocked";
-				quest.lastError = run.summary;
-				failureCategory = "worker_failed";
+				quest.lastError = benchmarkFindings[0] ?? run.summary;
+				failureCategory = benchmark
+					? inferBenchmarkFailureCategory(quest.status, executionFindings, run.summary, run.stderr)
+					: undefined;
 				await saveQuest(quest);
-				const blockedResult: QuestHeadlessRunResult = {
+				const blockedResult: QuestInternalHeadlessRunResult = {
 					status: quest.status,
-					summary: nextSummary(quest.status, quest, validatorFindings),
+					summary: nextSummary(quest.status, quest, validatorFindings, benchmark),
 					questId: quest.id,
 					profileId: resolvedProfile.id,
 					traceBundleIds,
@@ -353,6 +433,7 @@ export async function runQuestHeadless(
 					executionFindings,
 					failureCategory,
 					artifactPaths: {},
+					benchmark: benchmark ? { ...benchmark } : undefined,
 				};
 				const resultFile = await persistResultFile(quest, blockedResult);
 				blockedResult.artifactPaths = resultArtifactPaths(quest, resultFile);
@@ -362,6 +443,17 @@ export async function runQuestHeadless(
 		}
 
 		const milestoneFeatures = currentMilestoneFeatures(quest, milestone.id);
+		if (benchmarkFastPath) {
+			markAssertions(
+				quest,
+				(quest.validationState?.assertions ?? []).filter((assertion) => assertion.milestoneId === milestone.id),
+				"passed",
+				"Benchmark fast path: harness integrity still gates any external score.",
+			);
+			milestone.status = "completed";
+			await saveQuest(quest);
+			continue;
+		}
 		for (const pass of ["code_review", "user_surface"] as const) {
 			const validationRun = await executors.validator(
 				quest,
@@ -371,11 +463,10 @@ export async function runQuestHeadless(
 				workflows,
 				pass,
 				resolvedProfile,
-				undefined,
+				benchmark,
 			);
 			quest.recentRuns = trimRecentRuns([validationRun, ...quest.recentRuns]);
-			appendFindings(validatorFindings, validationRun.issues);
-			appendFindings(executionFindings, workerExecutionFindings(validationRun));
+			validatorFindings.push(...(validationRun.issues ?? []));
 			await writeWorkerRun(quest.cwd, quest.id, validationRun);
 			const trace = traceBundleFromWorkerRun(quest, validationRun, resolvedProfile);
 			traceBundleIds.push(trace.id);
@@ -390,11 +481,10 @@ export async function runQuestHeadless(
 			milestone.status = "blocked";
 			quest.status = "blocked";
 			quest.lastError = validationRun.summary;
-			failureCategory = "validation_failed";
 			await saveQuest(quest);
-			const blockedResult: QuestHeadlessRunResult = {
+			const blockedResult: QuestInternalHeadlessRunResult = {
 				status: quest.status,
-				summary: nextSummary(quest.status, quest, validatorFindings),
+				summary: nextSummary(quest.status, quest, validatorFindings, benchmark),
 				questId: quest.id,
 				profileId: resolvedProfile.id,
 				traceBundleIds,
@@ -402,6 +492,7 @@ export async function runQuestHeadless(
 				executionFindings,
 				failureCategory,
 				artifactPaths: {},
+				benchmark: benchmark ? { ...benchmark } : undefined,
 			};
 			const resultFile = await persistResultFile(quest, blockedResult);
 			blockedResult.artifactPaths = resultArtifactPaths(quest, resultFile);
@@ -417,12 +508,14 @@ export async function runQuestHeadless(
 	quest.humanQaStatus = "pending";
 	quest.shipReadiness = "validated_waiting_for_human_qa";
 	quest.completedAt = Date.now();
-	quest.lastSummary = "Quest completed. Human QA remains explicit before any release claim or shipping step.";
+	quest.lastSummary = benchmark
+		? "Benchmark quest completed execution after a final self-check. External scores remain contingent on harness integrity."
+		: "Benchmark quest completed. Human QA remains explicit before any release claims or shipping.";
 	await saveQuest(quest);
 
-	const completedResult: QuestHeadlessRunResult = {
+	const completedResult: QuestInternalHeadlessRunResult = {
 		status: quest.status,
-		summary: nextSummary(quest.status, quest, validatorFindings),
+		summary: nextSummary(quest.status, quest, validatorFindings, benchmark),
 		questId: quest.id,
 		profileId: resolvedProfile.id,
 		traceBundleIds,
@@ -430,6 +523,7 @@ export async function runQuestHeadless(
 		executionFindings,
 		failureCategory,
 		artifactPaths: {},
+		benchmark: benchmark ? { ...benchmark } : undefined,
 	};
 	const resultFile = await persistResultFile(quest, completedResult);
 	completedResult.artifactPaths = resultArtifactPaths(quest, resultFile);

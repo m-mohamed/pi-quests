@@ -16,7 +16,7 @@ This pass stayed focused on `pi-quests` benchmark execution quality and Terminal
 - `benchmarks/harbor/preflight.ts`
   - Added additive `summary` and `nextSteps` output.
   - Surfaced Harbor integrity results and clearer smoke diagnostics.
-- `src/frontier-trials.ts`, `src/headless-core.ts`, `src/trials-core.ts`, `src/workers.ts`, `src/quest-headless.ts`
+- `src/frontier-trials.ts`, `src/internal-headless.ts`, `src/profile-core.ts`, `src/workers.ts`, `src/quest-headless.ts`
   - Re-centered benchmark optimization on Quest-owned prompt/runtime behavior instead of Harbor-first engineering.
   - Added stronger benchmark completion discipline, failure categories, and clearer benchmark-facing summaries.
 - `benchmarks/harbor/run.ts`
@@ -96,6 +96,6 @@ If `qemu-alpine-ssh` smoke turns green on the rerun:
 - `/Users/mohamedmohamed/research/pi-quests/src/benchmark-helpers.ts`
 - `/Users/mohamedmohamed/research/pi-quests/benchmarks/harbor/preflight.ts`
 - `/Users/mohamedmohamed/research/pi-quests/src/workers.ts`
-- `/Users/mohamedmohamed/research/pi-quests/src/headless-core.ts`
+- `/Users/mohamedmohamed/research/pi-quests/src/internal-headless.ts`
 - `/Users/mohamedmohamed/research/pi-quests/src/frontier-trials.ts`
 - `/Users/mohamedmohamed/research/pi-quests/src/harbor-integrity.ts`

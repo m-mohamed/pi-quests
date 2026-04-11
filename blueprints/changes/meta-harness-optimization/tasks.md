@@ -110,7 +110,7 @@ The core frontier infrastructure is now implemented in the Quest extension:
 ### 1. First official Harbor baseline
 
 - [ ] Run `/quest trials baseline` against the real sample split and archive candidate `000` with real Harbor artifacts
-- [ ] Record the resulting benchmark metrics in `docs/baseline-results.md`
+- [ ] Record the resulting benchmark metrics in `docs/internal/baseline-results.md`
 
 ### 2. First real optimization iteration
 

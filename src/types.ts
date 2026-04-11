@@ -883,5 +883,9 @@ export interface QuestTrialPaths {
 	communityStatsFile: string;
 	communityTracesDir: string;
 	profilesDir: string;
+}
+
+export interface QuestTelemetryPaths {
+	rootDir: string;
 	tracesDir: string;
 }

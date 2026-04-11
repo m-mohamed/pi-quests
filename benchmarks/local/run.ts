@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultBenchmarkModel, materializeWorkspaceCopy } from "../shared.js";
-import { runQuestHeadless } from "../../src/headless-core.js";
+import { runInternalQuestHeadless } from "../../src/internal-headless.js";
 import type { ModelChoice } from "../../src/types.js";
 
 interface LocalDatasetTask {
@@ -47,7 +47,7 @@ async function main() {
 	for (const task of dataset.tasks) {
 		const workspace = await materializeWorkspaceCopy(resolve(datasetDir, task.cwd), `quest-local-${task.id}-`);
 		try {
-			const result = await runQuestHeadless({
+			const result = await runInternalQuestHeadless({
 				cwd: workspace.workdir,
 				instruction: task.instruction,
 				modelChoice,

@@ -2,10 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { defaultQuestProfile, normalizeQuestProfile } from "./trials-core.js";
+import { defaultQuestProfile, normalizeQuestProfile } from "./profile-core.js";
 import type {
 	LearnedWorkflow,
 	ModelChoice,
+	QuestTelemetryPaths,
 	QuestTrialPaths,
 	QuestTrialState,
 	QuestConfig,
@@ -34,6 +35,8 @@ const RUNS_DIR = "runs";
 const SKILLS_DIR = "skills";
 const SHARED_SKILLS_DIR = "shared-skills";
 const SHARED_WORKFLOWS_FILE = "index.json";
+const TELEMETRY_DIR = "telemetry";
+const TELEMETRY_TRACES_DIR = "traces";
 const TRIALS_DIR = "trials";
 const TRIALS_STATE_FILE = "state.json";
 const TRIALS_CURRENT_DIR = "current";
@@ -45,10 +48,17 @@ const TRIALS_FRONTIER_FILE = "frontier.json";
 const TRIALS_COMMUNITY_STATS_FILE = "community-stats.json";
 const TRIALS_COMMUNITY_TRACES_DIR = "community-traces";
 const TRIALS_PROFILES_DIR = "profiles";
-const TRIALS_TRACES_DIR = "traces";
 const LEGACY_TRIAL_DIRS = ["datasets", "experiments", "baselines", "reports"] as const;
 const PRUNE_LOG_AGE_MS = 1000 * 60 * 60 * 24 * 14;
 const TERMINAL_STATUSES = new Set<QuestStatus>(["completed", "aborted"]);
+
+async function loadInternalProfileCore(): Promise<null | typeof import("./internal-profile-core.js")> {
+	try {
+		return await import("./internal-profile-core.js");
+	} catch {
+		return null;
+	}
+}
 
 export function projectIdFor(cwd: string): string {
 	const hash = createHash("sha1").update(cwd).digest("hex").slice(0, 10);
@@ -155,7 +165,14 @@ export function getQuestTrialPaths(cwd: string): QuestTrialPaths {
 		communityStatsFile: join(rootDir, TRIALS_COMMUNITY_STATS_FILE),
 		communityTracesDir: join(rootDir, TRIALS_COMMUNITY_TRACES_DIR),
 		profilesDir: join(rootDir, TRIALS_PROFILES_DIR),
-		tracesDir: join(rootDir, TRIALS_TRACES_DIR),
+	};
+}
+
+export function getQuestTelemetryPaths(cwd: string): QuestTelemetryPaths {
+	const rootDir = join(cwd, QUESTS_ROOT_DIR, TELEMETRY_DIR);
+	return {
+		rootDir,
+		tracesDir: join(rootDir, TELEMETRY_TRACES_DIR),
 	};
 }
 
@@ -259,10 +276,16 @@ async function ensureTrialRoot(cwd: string): Promise<QuestTrialPaths> {
 	await mkdir(paths.candidatesDir, { recursive: true });
 	await mkdir(paths.communityTracesDir, { recursive: true });
 	await mkdir(paths.profilesDir, { recursive: true });
-	await mkdir(paths.tracesDir, { recursive: true });
 	for (const legacyDir of LEGACY_TRIAL_DIRS) {
 		await rm(join(paths.rootDir, legacyDir), { recursive: true, force: true });
 	}
+	return paths;
+}
+
+async function ensureTelemetryRoot(cwd: string): Promise<QuestTelemetryPaths> {
+	const paths = getQuestTelemetryPaths(cwd);
+	await mkdir(paths.rootDir, { recursive: true });
+	await mkdir(paths.tracesDir, { recursive: true });
 	return paths;
 }
 
@@ -549,7 +572,7 @@ function profileFile(paths: QuestTrialPaths, profileId: string): string {
 	return join(paths.profilesDir, `${profileId}.json`);
 }
 
-function traceFile(paths: QuestTrialPaths, traceId: string, endedAt: number): string {
+function traceFile(paths: QuestTelemetryPaths, traceId: string, endedAt: number): string {
 	return join(paths.tracesDir, `${endedAt}-${traceId}.json`);
 }
 
@@ -617,7 +640,10 @@ export async function loadQuestProfile(
 	const state = await loadQuestTrialState(cwd, { ensure: options.ensure });
 	const resolvedProfileId = profileId ?? state.activeProfileId;
 	const resolvedTarget = options.target ?? state.target;
-	const defaults = defaultQuestProfile(projectIdFor(cwd), resolvedTarget);
+	const internalProfiles = await loadInternalProfileCore();
+	const defaults = internalProfiles
+		? internalProfiles.defaultInternalQuestProfile(projectIdFor(cwd), resolvedTarget)
+		: defaultQuestProfile(projectIdFor(cwd), resolvedTarget);
 	defaults.id = resolvedProfileId;
 	const paths = getQuestTrialPaths(cwd);
 	const file = resolvedProfileId === state.activeProfileId ? paths.currentProfileFile : profileFile(paths, resolvedProfileId);
@@ -633,7 +659,9 @@ export async function loadQuestProfile(
 	}
 	try {
 		const raw = await readFile(file, "utf-8");
-		return normalizeQuestProfile(JSON.parse(raw) as Partial<QuestProfile>, projectIdFor(cwd), resolvedTarget);
+		return internalProfiles
+			? internalProfiles.normalizeInternalQuestProfile(JSON.parse(raw) as Partial<QuestProfile>, projectIdFor(cwd), resolvedTarget)
+			: normalizeQuestProfile(JSON.parse(raw) as Partial<QuestProfile>, projectIdFor(cwd), resolvedTarget);
 	} catch {
 		return defaults;
 	}
@@ -641,7 +669,10 @@ export async function loadQuestProfile(
 
 export async function saveQuestProfile(cwd: string, profile: QuestProfile): Promise<void> {
 	const paths = await ensureTrialRoot(cwd);
-	const normalized = normalizeQuestProfile(profile, projectIdFor(cwd), profile.target);
+	const internalProfiles = await loadInternalProfileCore();
+	const normalized = internalProfiles
+		? internalProfiles.normalizeInternalQuestProfile(profile, projectIdFor(cwd), profile.target)
+		: normalizeQuestProfile(profile, projectIdFor(cwd), profile.target);
 	normalized.updatedAt = Date.now();
 	await writeFile(profileFile(paths, normalized.id), `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
 	await writeFile(paths.currentProfileFile, `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
@@ -654,13 +685,18 @@ export async function saveQuestProfile(cwd: string, profile: QuestProfile): Prom
 export async function listQuestProfiles(cwd: string): Promise<QuestProfile[]> {
 	const paths = getQuestTrialPaths(cwd);
 	if (!existsSync(paths.profilesDir)) return [];
+	const internalProfiles = await loadInternalProfileCore();
 	const entries = await readdir(paths.profilesDir);
 	const profiles: QuestProfile[] = [];
 	for (const entry of entries) {
 		if (!entry.endsWith(".json")) continue;
 		try {
 			const raw = await readFile(join(paths.profilesDir, entry), "utf-8");
-			profiles.push(normalizeQuestProfile(JSON.parse(raw) as Partial<QuestProfile>, projectIdFor(cwd)));
+			profiles.push(
+				internalProfiles
+					? internalProfiles.normalizeInternalQuestProfile(JSON.parse(raw) as Partial<QuestProfile>, projectIdFor(cwd))
+					: normalizeQuestProfile(JSON.parse(raw) as Partial<QuestProfile>, projectIdFor(cwd)),
+			);
 		} catch {
 			continue;
 		}
@@ -669,14 +705,14 @@ export async function listQuestProfiles(cwd: string): Promise<QuestProfile[]> {
 }
 
 export async function writeQuestTraceBundle(cwd: string, trace: QuestTraceBundle): Promise<string> {
-	const paths = await ensureTrialRoot(cwd);
+	const paths = await ensureTelemetryRoot(cwd);
 	const file = traceFile(paths, trace.id, trace.endedAt);
 	await writeFile(file, `${JSON.stringify(trace, null, 2)}\n`, "utf-8");
 	return file;
 }
 
 export async function listQuestTraceBundles(cwd: string, limit = 48): Promise<QuestTraceBundle[]> {
-	const paths = getQuestTrialPaths(cwd);
+	const paths = getQuestTelemetryPaths(cwd);
 	if (!existsSync(paths.tracesDir)) return [];
 	const entries = await readdir(paths.tracesDir);
 	const traces: QuestTraceBundle[] = [];

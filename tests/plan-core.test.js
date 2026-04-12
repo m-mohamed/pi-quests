@@ -15,7 +15,6 @@ test("planningInstructions advertises structured quest tools", () => {
 				orchestratorModel: { provider: "openai-codex", model: "gpt-5.4", thinkingLevel: "high" },
 				workerModel: { provider: "openai-codex", model: "gpt-5.4-mini", thinkingLevel: "high" },
 				validatorModel: { provider: "openai-codex", model: "gpt-5.4-mini", thinkingLevel: "high" },
-				validationConcurrency: 2,
 				cwd: "/tmp/repo",
 				createdAt: Date.now(),
 			},

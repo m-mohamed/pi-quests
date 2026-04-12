@@ -406,55 +406,52 @@ This provides qualitative evidence that filesystem access enables the proposer t
 
 ### 4.2 Harness Engineering in Quest
 
-Quest implements Martin Fowler's harness categories:
+Quest no longer carries a separate `harnessPolicy` object. The current runtime keeps the harness explicit through prompt surfaces, validation readiness, tool allowlists, and trace grading.
 
 #### A. Maintainability Harness
 ```typescript
-// QuestProfile.harnessPolicy.computationalGuides
+// QuestProfile.promptSurfaces + validationReadiness
 {
-  linterConfigs: [],        // ESLint, Prettier configs
-  preCommitHooks: [],       // Git hooks
-  structuralTests: [],       // ArchUnit-style tests
-  archConstraints: [],      // Module boundary rules
+  workerPolicy: "...add or update the narrowest failing proof first...",
+  readinessPolicy: "...prefer a cheap real probe over a static guess...",
+  validationChecks: [
+    { surface: "repo-checks", commands: ["npm run check"], status: "supported" }
+  ]
 }
 
-// QuestProfile.harnessPolicy.sensors.computational
+// QuestTraceBundle + validator runs
 {
-  linters: [],              // Running linters
-  typeCheckers: [],         // TypeScript, Java type checks
-  testRunners: [],          // Test execution
-  driftDetectors: [],      // Architecture drift detection
+  toolTimeline: [],         // Tool execution history
+  issues: [],               // Validator findings
+  derivedIssues: []         // Trace-derived execution problems
 }
 ```
 
 #### B. Architecture Fitness Harness
 ```typescript
-// QuestProfile.harnessPolicy.fitnessFunctions
+// Validation assertions + verificationBudget
 {
-  performanceRequirements: [
-    { metric: "latency", threshold: 100, unit: "ms" }
-  ],
-  observabilityRequirements: [
-    { standard: "opentelemetry", required: true }
-  ],
-  architectureConstraints: []
+  assertions: [],           // Milestone claims to verify
+  workerAttempts: 1,        // How many implementation passes workers get
+  validatorAttempts: 1,     // How many validator passes run per milestone
+  correctiveFeatureBudget: 2
 }
 ```
 
 #### C. Inferential Guides & Sensors
 ```typescript
-// QuestProfile.harnessPolicy.inferentialGuides
+// QuestProfile.promptSurfaces
 {
-  agentsMdPath: "",         // AGENTS.md location
-  skillsDir: "",            // Skills directory
-  codeReviewAgents: []      // LLM-based reviewers
+  planningPolicy: "...define the validation contract before decomposing features...",
+  validatorCodeReviewPolicy: "...stay read-only and call out weak validation honestly...",
+  proposerPolicy: "...propose one coherent QuestProfilePatch at a time..."
 }
 
-// QuestProfile.harnessPolicy.sensors.inferential
+// QuestTraceBundle
 {
-  codeReviewAgents: [],     // AI code reviewers
-  qualityJudges: [],        // LLM-as-judge
-  runtimeMonitors: []       // Runtime observation
+  tags: [],                 // Failure tags from trace analysis
+  validatorFindings: [],    // Read-only validator output
+  diagnostics: []           // Maintainer-only benchmark diagnostics
 }
 ```
 
@@ -501,7 +498,7 @@ type QuestFailureTag =
 // - modelPolicy changes
 // - verificationBudget adjustments
 // - contextPolicy tweaks
-// - workflowHintPolicy updates
+// - traceGrading updates
 ```
 
 #### Experiment Framework

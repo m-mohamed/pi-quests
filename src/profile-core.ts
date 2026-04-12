@@ -42,61 +42,6 @@ function basePromptSurfaces() {
 	};
 }
 
-function baseHarnessPolicy() {
-	return {
-		computationalGuides: {
-			enabled: true,
-			linterConfigs: ["Use the repo-native check or lint/typecheck entrypoint before promotion."],
-			preCommitHooks: [
-				"Preserve canonical Quest artifacts; do not add side-channel state.",
-				"Archive regressions and trace evidence instead of hiding them behind summaries.",
-			],
-			structuralTests: [
-				"Run the cheapest repo-native proof path after changing validation or automation surfaces.",
-				"Prefer focused smoke checks before expensive end-to-end runs.",
-			],
-			archConstraints: [
-				"Keep optimization changes constrained to profile-owned surfaces.",
-				"Keep Quest artifacts repo-local and inspectable.",
-				"Keep runtime behavior Pi-native instead of building parallel wrappers when Pi already exposes the primitive.",
-			],
-		},
-		inferentialGuides: {
-			enabled: true,
-			agentsMdPath: "AGENTS.md",
-			skillsDir: ".codex/skills",
-			codeReviewAgents: ["validator-code-review"],
-		},
-		sensors: {
-			computational: {
-				enabled: true,
-				linters: ["repo-native check or lint command"],
-				typeCheckers: ["repo-native typecheck command"],
-				testRunners: ["repo-native test suite", "focused smoke or validation command for the changed surface"],
-				driftDetectors: ["Quest artifact drift", "workflow guidance drift", "trace health drift"],
-			},
-			inferential: {
-				enabled: true,
-				codeReviewAgents: ["validator-code-review"],
-				qualityJudges: ["targeted validator pass", "operator review for risky or low-signal edits"],
-				runtimeMonitors: ["quest-headless JSON artifact validation", "trace and failure-tag drift review"],
-			},
-		},
-		fitnessFunctions: {
-			enabled: true,
-			performanceRequirements: [{ metric: "quest_completion", threshold: 0.0, unit: "maximize" }],
-			observabilityRequirements: [
-				{ standard: "quest-headless-output", required: true },
-				{ standard: "quest-artifact-state", required: true },
-			],
-			architectureConstraints: [
-				"Quest traces remain Pi-native JSONL-derived artifacts.",
-				"Quest state remains repo-local under .pi/quests/.",
-			],
-		},
-	};
-}
-
 export function defaultQuestProfile(projectId: string, target: QuestTrialTarget = "repo"): QuestProfile {
 	return {
 		id: `${target}-${projectId}`,
@@ -109,33 +54,11 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 			orchestrator: ["read", "bash"],
 			worker: ["read", "bash", "edit", "write"],
 			validator: ["read", "bash"],
-			trial: ["read", "bash"],
 			proposer: ["read", "bash", "grep"],
 		},
 		modelPolicy: {
 			preferSameModelFamily: true,
 			preferValidatorDivergence: false,
-		},
-		ensemblePolicy: {
-			enabled: true,
-			families: [
-				{
-					provider: "zai",
-					model: "glm-5.1",
-					thinkingLevel: "high",
-					role: "worker",
-					costPer1KInput: 0,
-					costPer1KOutput: 0,
-					latencyMs: 4000,
-					strengths: ["zai coding plan", "good at code execution"],
-					weaknesses: ["single provider dependency"],
-				},
-			],
-			defaultWorker: "zai/glm-5.1",
-			defaultValidator: "zai/glm-5.1",
-			escalationThreshold: 2,
-			autoEscalateOnFailure: false,
-			routingRules: [],
 		},
 		verificationBudget: {
 			workerAttempts: 1,
@@ -147,11 +70,6 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 			spillLongOutputsToReports: true,
 			maxInlineEvidenceLines: 6,
 		},
-		workflowHintPolicy: {
-			maxSharedHints: 24,
-			promotePrerequisiteHints: true,
-			promoteFailureHints: true,
-		},
 		traceGrading: {
 			toolHeavyCount: 6,
 			longRunMs: 1000 * 60 * 8,
@@ -161,7 +79,6 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 			overflowPenalty: 0.25,
 			abortPenalty: 0.15,
 		},
-		harnessPolicy: baseHarnessPolicy(),
 		adoptedChanges: [],
 	};
 }
@@ -189,13 +106,11 @@ export function normalizeQuestProfile(
 			orchestrator: profile.toolAllowlist?.orchestrator ?? base.toolAllowlist.orchestrator,
 			worker: profile.toolAllowlist?.worker ?? base.toolAllowlist.worker,
 			validator: profile.toolAllowlist?.validator ?? base.toolAllowlist.validator,
-			trial: profile.toolAllowlist?.trial ?? base.toolAllowlist.trial,
 			proposer: profile.toolAllowlist?.proposer ?? base.toolAllowlist.proposer,
 		},
 		modelPolicy: { ...base.modelPolicy, ...profile.modelPolicy },
 		verificationBudget: { ...base.verificationBudget, ...profile.verificationBudget },
 		contextPolicy: { ...base.contextPolicy, ...profile.contextPolicy },
-		workflowHintPolicy: { ...base.workflowHintPolicy, ...profile.workflowHintPolicy },
 		traceGrading: { ...base.traceGrading, ...profile.traceGrading },
 		adoptedChanges: profile.adoptedChanges ?? base.adoptedChanges,
 		updatedAt: profile.updatedAt ?? base.updatedAt,
@@ -203,7 +118,17 @@ export function normalizeQuestProfile(
 }
 
 export function toolAllowlistForRole(profile: QuestProfile, role: QuestRole): string[] {
-	return profile.toolAllowlist[role];
+	switch (role) {
+		case "orchestrator":
+			return profile.toolAllowlist.orchestrator;
+		case "worker":
+			return profile.toolAllowlist.worker;
+		case "validator":
+			return profile.toolAllowlist.validator;
+		case "proposer":
+		case "trial":
+			return profile.toolAllowlist.proposer;
+	}
 }
 
 export function promptSurfaceText(profile: QuestProfile, surfaceId: QuestPromptSurfaceId): string {

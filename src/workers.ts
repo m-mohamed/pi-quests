@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
+import {
+	runAgentTask,
+	type RunAgentTaskOptions,
+	type RunAgentTaskResult,
+	type UsageStats,
+} from "./agent-task-runner.js";
 import { promptSurfaceText, toolAllowlistForRole } from "./profile-core.js";
 import { parseQuestPlanText } from "./plan-core.js";
-import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
 import type {
 	QuestBenchmarkProvenance,
 	QuestExperimentCandidate,
@@ -18,54 +19,12 @@ import type {
 	QuestPlan,
 	QuestPlanRevisionRequest,
 	QuestProfile,
-	QuestRole,
 	QuestState,
 	ValidationAssertion,
 	ValidationReadiness,
 	ValidationSurfaceStatus,
-	WorkerEventRecord,
 	WorkerRunRecord,
 } from "./types.js";
-
-interface UsageStats {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	cost: number;
-	contextTokens: number;
-	turns: number;
-}
-
-interface RunPiTaskOptions {
-	cwd: string;
-	modelChoice: ModelChoice;
-	tools: string[];
-	role: QuestRole;
-	featureId?: string;
-	milestoneId?: string;
-	systemPrompt?: string;
-	prompt: string;
-	benchmark?: QuestBenchmarkProvenance;
-	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>;
-	onProcessStart?: (pid: number) => void | Promise<void>;
-}
-
-interface RunPiTaskResult {
-	exitCode: number;
-	messages: Message[];
-	stderr: string;
-	stopReason?: string;
-	errorMessage?: string;
-	usage: UsageStats;
-	events: WorkerEventRecord[];
-	phase: string;
-	latestToolName?: string;
-	latestToolSummary?: string;
-	latestAssistantText?: string;
-	signal?: string;
-	aborted: boolean;
-}
 
 interface FeatureWorkerPayload {
 	status?: string;
@@ -138,6 +97,9 @@ interface TrialProposerContext {
 	};
 }
 
+type RunPiTaskOptions = RunAgentTaskOptions;
+type RunPiTaskResult = RunAgentTaskResult;
+
 const DEFAULT_USAGE: UsageStats = {
 	input: 0,
 	output: 0,
@@ -157,15 +119,6 @@ async function loadBenchmarkHelpers(): Promise<typeof import("./benchmark-helper
 async function parseInternalQuestExperimentCandidate(text: string): Promise<QuestExperimentCandidate | null> {
 	const internalProfiles = await import("./internal-profile-core.js");
 	return internalProfiles.parseQuestExperimentCandidate(text);
-}
-
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-	const explicit = process.env.PI_QUESTS_PI_BIN;
-	if (explicit) return { command: explicit, args };
-	const currentScript = process.argv[1];
-	const currentBase = currentScript ? path.basename(currentScript).toLowerCase() : "";
-	if (currentScript && currentBase.startsWith("pi")) return { command: process.execPath, args: [currentScript, ...args] };
-	return { command: "pi", args };
 }
 
 function getFinalAssistantText(messages: Message[]): string {
@@ -224,20 +177,6 @@ function benchmarkExecutionIssues(parsed: FeatureWorkerPayload | null): string[]
 		issues.push(`Worker reported unresolved open question: ${question}`);
 	}
 	return [...new Set(issues)];
-}
-
-async function withTempPrompt(contents: string | undefined): Promise<{ file?: string; cleanup: () => Promise<void> }> {
-	if (!contents?.trim()) return { cleanup: async () => {} };
-
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-quests-"));
-	const file = path.join(dir, "system.md");
-	await fs.writeFile(file, contents, "utf-8");
-	return {
-		file,
-		cleanup: async () => {
-			await fs.rm(dir, { recursive: true, force: true });
-		},
-	};
 }
 
 function learnedWorkflowSection(workflows: LearnedWorkflow[]): string {
@@ -855,122 +794,7 @@ ${promptSurfaceText(profile, "planning")}`;
 }
 
 async function runPiTask(options: RunPiTaskOptions): Promise<RunPiTaskResult> {
-	const temp = await withTempPrompt(options.systemPrompt);
-	const args = ["--mode", "json", "--no-session", "--model", `${options.modelChoice.provider}/${options.modelChoice.model}`];
-	args.push("--thinking", options.modelChoice.thinkingLevel);
-	if (options.tools.length > 0) args.push("--tools", options.tools.join(","));
-	if (temp.file) args.push("--append-system-prompt", temp.file);
-	args.push("-p", options.prompt);
-
-	const result: RunPiTaskResult = {
-		exitCode: 1,
-		messages: [],
-		stderr: "",
-		usage: { ...DEFAULT_USAGE },
-		events: [],
-		phase: "starting",
-		aborted: false,
-	};
-
-	let liveSnapshot = createLiveRunSnapshot(options.role, {
-		featureId: options.featureId,
-		milestoneId: options.milestoneId,
-	});
-	if (options.onSnapshot) await options.onSnapshot(liveSnapshot);
-
-	try {
-		const invocation = getPiInvocation(args);
-		await new Promise<void>((resolve) => {
-			const proc = spawn(invocation.command, invocation.args, {
-				cwd: options.cwd,
-				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
-				detached: process.platform !== "win32",
-			});
-			if (typeof proc.pid === "number" && options.onProcessStart) {
-				void Promise.resolve(options.onProcessStart(proc.pid));
-			}
-
-			let buffer = "";
-
-			const processLine = (line: string) => {
-				if (!line.trim()) return;
-				let event: any;
-				try {
-					event = JSON.parse(line);
-				} catch {
-					return;
-				}
-
-				const nextTelemetry = applyAgentEventToSnapshot(liveSnapshot, event, 80, result.events);
-				liveSnapshot = nextTelemetry.snapshot;
-				result.events = nextTelemetry.events;
-				result.phase = liveSnapshot.phase;
-				result.latestToolName = liveSnapshot.latestToolName;
-				result.latestToolSummary = liveSnapshot.latestToolSummary;
-				result.latestAssistantText = liveSnapshot.latestMessage;
-				if (options.onSnapshot && ["message_update", "tool_execution_start", "tool_execution_update", "tool_execution_end", "turn_end", "agent_end"].includes(event.type)) {
-					void Promise.resolve(options.onSnapshot(liveSnapshot));
-				}
-
-				if (event.type === "message_end" && event.message) {
-					const msg = event.message as Message;
-					result.messages.push(msg);
-					if (msg.role === "assistant") {
-						result.usage.turns += 1;
-						const usage = msg.usage;
-						if (usage) {
-							result.usage.input += usage.input || 0;
-							result.usage.output += usage.output || 0;
-							result.usage.cacheRead += usage.cacheRead || 0;
-							result.usage.cacheWrite += usage.cacheWrite || 0;
-							result.usage.cost += usage.cost?.total || 0;
-							result.usage.contextTokens = usage.totalTokens || result.usage.contextTokens;
-						}
-						result.stopReason = msg.stopReason;
-						result.errorMessage = msg.errorMessage;
-					}
-				}
-
-				if (event.type === "tool_result_end" && event.message) {
-					result.messages.push(event.message as Message);
-				}
-
-				if (event.type === "agent_end" && Array.isArray(event.messages) && result.messages.length === 0) {
-					result.messages = event.messages as Message[];
-				}
-			};
-
-			proc.stdout.on("data", (data) => {
-				buffer += data.toString();
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-				for (const line of lines) processLine(line);
-			});
-
-			proc.stderr.on("data", (data) => {
-				result.stderr += data.toString();
-			});
-
-			proc.on("close", (code, signal) => {
-				if (buffer.trim()) processLine(buffer);
-				result.exitCode = code ?? 0;
-				result.signal = signal ?? undefined;
-				result.aborted = signal === "SIGTERM" || signal === "SIGKILL";
-				resolve();
-			});
-
-			proc.on("error", (err) => {
-				result.stderr += `${err}`;
-				result.exitCode = 1;
-				resolve();
-			});
-		});
-
-		return result;
-	} finally {
-		await temp.cleanup();
-	}
+	return runAgentTask(options);
 }
 
 function workerRunFromResult(

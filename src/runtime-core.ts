@@ -1,4 +1,5 @@
 import type { QuestActiveRun, QuestFeature, QuestInterruption, QuestMilestone, QuestState } from "./types.js";
+import { abortRegisteredAgentRun, hasRegisteredAgentRun } from "./agent-process-registry.js";
 
 function findMilestone(quest: QuestState, milestoneId?: string): QuestMilestone | undefined {
 	if (!milestoneId) return undefined;
@@ -122,6 +123,7 @@ export function markQuestAborted(quest: QuestState, interruptedAt = Date.now()):
 }
 
 export function processExists(pid: number): boolean {
+	if (hasRegisteredAgentRun(pid)) return true;
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -135,6 +137,9 @@ function sleep(ms: number): Promise<void> {
 }
 
 export async function terminateQuestProcess(pid: number): Promise<{ terminated: boolean; signal: "SIGTERM" | "SIGKILL" | null }> {
+	if (await abortRegisteredAgentRun(pid)) {
+		return { terminated: true, signal: "SIGTERM" };
+	}
 	if (!processExists(pid)) return { terminated: false, signal: null };
 
 	const targetPid = process.platform === "win32" ? pid : -pid;

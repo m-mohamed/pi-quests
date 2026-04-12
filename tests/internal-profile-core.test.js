@@ -11,7 +11,7 @@ test("defaultInternalQuestProfile keeps optimizer-specific benchmark defaults", 
 	assert.match(profile.promptSurfaces.planningPolicy, /eval cohorts/i);
 	assert.match(profile.promptSurfaces.workerPolicy, /benchmark/i);
 	assert.match(profile.promptSurfaces.proposerPolicy, /search-set mean score/i);
-	assert.match(profile.harnessPolicy.computationalGuides.structuralTests.join(" "), /Harbor smoke/i);
+	assert.equal(profile.toolAllowlist.proposer.includes("grep"), true);
 });
 
 test("internal proposer candidates parse and patch internal profile-owned surfaces", () => {

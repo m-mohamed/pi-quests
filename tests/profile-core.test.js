@@ -19,14 +19,13 @@ function sampleQuest(cwd = "/tmp/pi-quests-trials") {
 		title: "Trials",
 		goal: "Improve Quest with evals and traces.",
 		status: "proposal_ready",
-		config: {
-			orchestratorModel: DEFAULT_MODEL,
-			workerModel: DEFAULT_MODEL,
-			validatorModel: DEFAULT_MODEL,
-			validationConcurrency: 2,
-			cwd,
-			createdAt: Date.now(),
-		},
+        config: {
+            orchestratorModel: DEFAULT_MODEL,
+            workerModel: DEFAULT_MODEL,
+            validatorModel: DEFAULT_MODEL,
+            cwd,
+            createdAt: Date.now(),
+        },
 		defaultModel: DEFAULT_MODEL,
 		roleModels: {
 			orchestrator: DEFAULT_MODEL,
@@ -83,17 +82,15 @@ function sampleQuest(cwd = "/tmp/pi-quests-trials") {
 }
 
 test("defaultQuestProfile stays Quest-native and benchmark-neutral", () => {
-	const profile = defaultQuestProfile("project-123");
-	assert.equal(profile.modelPolicy.preferSameModelFamily, true);
-	assert.equal(profile.contextPolicy.spillLongOutputsToReports, true);
-	assert.match(profile.promptSurfaces.planningPolicy, /clarifying questions/i);
-	assert.match(profile.promptSurfaces.workerPolicy, /Confirm prerequisites/i);
-	assert.doesNotMatch(profile.promptSurfaces.workerPolicy, /benchmark/i);
-	assert.doesNotMatch(profile.promptSurfaces.proposerPolicy, /search-set mean score|behavioral tag cohorts|hold-out/i);
-	assert.equal(profile.harnessPolicy.computationalGuides.enabled, true);
-	assert.equal(profile.harnessPolicy.inferentialGuides.enabled, true);
-	assert.equal(profile.harnessPolicy.sensors.inferential.enabled, true);
-	assert.equal(profile.harnessPolicy.fitnessFunctions.enabled, true);
+    const profile = defaultQuestProfile("project-123");
+    assert.equal(profile.modelPolicy.preferSameModelFamily, true);
+    assert.equal(profile.contextPolicy.spillLongOutputsToReports, true);
+    assert.match(profile.promptSurfaces.planningPolicy, /clarifying questions/i);
+    assert.match(profile.promptSurfaces.workerPolicy, /Confirm prerequisites/i);
+    assert.doesNotMatch(profile.promptSurfaces.workerPolicy, /benchmark/i);
+    assert.doesNotMatch(profile.promptSurfaces.proposerPolicy, /search-set mean score|behavioral tag cohorts|hold-out/i);
+    assert.equal(profile.verificationBudget.workerAttempts, 1);
+    assert.equal(profile.toolAllowlist.proposer.includes("grep"), true);
 });
 
 test("traceBundleFromWorkerRun derives failure tags from worker traces", () => {

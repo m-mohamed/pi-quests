@@ -178,7 +178,6 @@ function sampleQuest(cwd = "/tmp/arrow"): QuestState {
 			orchestratorModel: DEFAULT_MODEL,
 			workerModel: DEFAULT_MODEL,
 			validatorModel: DEFAULT_MODEL,
-			validationConcurrency: 2,
 			cwd,
 			createdAt: Date.now(),
 		},

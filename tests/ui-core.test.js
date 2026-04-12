@@ -23,7 +23,6 @@ function sampleQuest() {
 			orchestratorModel: { provider: "openai-codex", model: "gpt-5.4", thinkingLevel: "high" },
 			workerModel: { provider: "openai-codex", model: "gpt-5.4-mini", thinkingLevel: "high" },
 			validatorModel: { provider: "openai-codex", model: "gpt-5.4-mini", thinkingLevel: "high" },
-			validationConcurrency: 2,
 			cwd: "/tmp/pi-quests-ui",
 			createdAt: Date.now(),
 		},

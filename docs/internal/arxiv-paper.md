@@ -660,11 +660,6 @@ Quest is open-source and available as a Pi extension package. We invite the comm
     "spillLongOutputsToReports": true,
     "maxInlineEvidenceLines": 6
   },
-  "workflowHintPolicy": {
-    "maxSharedHints": 24,
-    "promotePrerequisiteHints": true,
-    "promoteFailureHints": true
-  },
   "modelPolicy": {
     "preferSameModelFamily": true,
     "preferValidatorDivergence": false

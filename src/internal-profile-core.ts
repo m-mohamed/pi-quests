@@ -23,74 +23,10 @@ function mergePromptSurfaces(profile: QuestProfile): QuestProfile["promptSurface
 	};
 }
 
-function mergeHarnessPolicy(profile: QuestProfile): QuestProfile["harnessPolicy"] {
-	return {
-		...profile.harnessPolicy,
-		computationalGuides: {
-			...profile.harnessPolicy.computationalGuides,
-			preCommitHooks: [
-				"Preserve canonical benchmark and quest artifacts; do not add side-channel state.",
-				"Archive regressions and benchmark traces instead of hiding them behind summaries.",
-			],
-			structuralTests: [
-				"Run the benchmark-facing preflight or smoke path after changing benchmark adapters or helpers.",
-				"Use the cheapest real Harbor smoke that covers the edited surface before a sample run.",
-			],
-			archConstraints: [
-				"Keep frontier Trials as the only optimization runtime.",
-				"Keep proposer edits constrained to profile-owned surfaces.",
-				"Keep benchmark splits tagged and source-fingerprinted so drift is explicit.",
-			],
-		},
-		sensors: {
-			...profile.harnessPolicy.sensors,
-			computational: {
-				...profile.harnessPolicy.sensors.computational,
-				testRunners: ["repo-native test suite", "benchmark preflight or smoke for benchmark-facing changes"],
-				driftDetectors: [
-					"benchmark split sourceFingerprint changes",
-					"benchmark tag distribution drift",
-					"community corpus stats drift",
-				],
-			},
-			inferential: {
-				...profile.harnessPolicy.sensors.inferential,
-				qualityJudges: [
-					"hold-out regression gate",
-					"always-pass regression subset",
-					"operator review for costly, overfit, or low-signal edits",
-				],
-				runtimeMonitors: [
-					"quest-headless JSON artifact validation",
-					"benchmark smoke probe",
-					"candidate trace and failure-tag drift review",
-				],
-			},
-		},
-		fitnessFunctions: {
-			...profile.harnessPolicy.fitnessFunctions,
-			performanceRequirements: [
-				{ metric: "meanScore", threshold: 0.0, unit: "maximize" },
-				{ metric: "totalCost", threshold: 0.0, unit: "minimize" },
-				{ metric: "totalDurationMs", threshold: 0.0, unit: "minimize" },
-			],
-			observabilityRequirements: [
-				{ standard: "quest-headless-output", required: true },
-				{ standard: "candidate-archive-artifacts", required: true },
-			],
-			architectureConstraints: [
-				"Community traces remain Pi-native JSONL.",
-				"Benchmark adapters share the canonical candidate archive and frontier gate.",
-			],
-		},
-	};
-}
-
 function withInternalDefaults(profile: QuestProfile): QuestProfile {
 	return {
 		...profile,
 		promptSurfaces: mergePromptSurfaces(profile),
-		harnessPolicy: mergeHarnessPolicy(profile),
 	};
 }
 
@@ -120,44 +56,12 @@ export function applyQuestProfilePatch(profile: QuestProfile, patch: QuestProfil
 				orchestrator: patch.toolAllowlist?.orchestrator ?? profile.toolAllowlist.orchestrator,
 				worker: patch.toolAllowlist?.worker ?? profile.toolAllowlist.worker,
 				validator: patch.toolAllowlist?.validator ?? profile.toolAllowlist.validator,
-				trial: patch.toolAllowlist?.trial ?? profile.toolAllowlist.trial,
 				proposer: patch.toolAllowlist?.proposer ?? profile.toolAllowlist.proposer,
 			},
 			modelPolicy: { ...profile.modelPolicy, ...patch.modelPolicy },
 			verificationBudget: { ...profile.verificationBudget, ...patch.verificationBudget },
 			contextPolicy: { ...profile.contextPolicy, ...patch.contextPolicy },
-			workflowHintPolicy: { ...profile.workflowHintPolicy, ...patch.workflowHintPolicy },
 			traceGrading: { ...profile.traceGrading, ...patch.traceGrading },
-			harnessPolicy: patch.harnessPolicy
-				? {
-						...profile.harnessPolicy,
-						...patch.harnessPolicy,
-						computationalGuides: {
-							...profile.harnessPolicy.computationalGuides,
-							...patch.harnessPolicy.computationalGuides,
-						},
-						inferentialGuides: {
-							...profile.harnessPolicy.inferentialGuides,
-							...patch.harnessPolicy.inferentialGuides,
-						},
-						sensors: {
-							...profile.harnessPolicy.sensors,
-							...patch.harnessPolicy.sensors,
-							computational: {
-								...profile.harnessPolicy.sensors.computational,
-								...patch.harnessPolicy.sensors?.computational,
-							},
-							inferential: {
-								...profile.harnessPolicy.sensors.inferential,
-								...patch.harnessPolicy.sensors?.inferential,
-							},
-						},
-						fitnessFunctions: {
-							...profile.harnessPolicy.fitnessFunctions,
-							...patch.harnessPolicy.fitnessFunctions,
-						},
-					}
-				: profile.harnessPolicy,
 			adoptedChanges: patch.adoptedChange ? [...profile.adoptedChanges, patch.adoptedChange] : profile.adoptedChanges,
 			updatedAt: Date.now(),
 		},

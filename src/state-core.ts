@@ -113,7 +113,6 @@ function buildConfig(cwd: string, createdAt: number, model: ModelChoice): QuestC
 		orchestratorModel: { ...model },
 		workerModel: { ...model },
 		validatorModel: { ...model },
-		validationConcurrency: 2,
 		cwd,
 		createdAt,
 	};

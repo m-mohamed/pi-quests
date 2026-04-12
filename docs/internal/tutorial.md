@@ -170,8 +170,10 @@ interface QuestProfile {
   id: string;
   promptSurfaces: QuestPromptSurfaces;  // Different prompts for different roles
   toolAllowlist: QuestRoleToolPolicy;   // What tools each role can use
-  ensemblePolicy: QuestModelEnsemblePolicy;  // Which models to use when
-  harnessPolicy: QuestHarnessPolicy;    // Quality control settings
+  modelPolicy: QuestModelPolicy;        // Model-family preferences that affect execution
+  verificationBudget: QuestVerificationBudget; // Worker/validator retry budget
+  contextPolicy: QuestContextPolicy;    // Evidence compaction rules
+  traceGrading: QuestTraceGrading;      // Failure-tag thresholds for Trials
 }
 ```
 

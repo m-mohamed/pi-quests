@@ -261,38 +261,12 @@ export interface QuestRoleToolPolicy {
 	orchestrator: string[];
 	worker: string[];
 	validator: string[];
-	trial: string[];
 	proposer: string[];
 }
 
 export interface QuestModelPolicy {
 	preferSameModelFamily: boolean;
 	preferValidatorDivergence: boolean;
-}
-
-export interface QuestModelFamilyConfig {
-	provider: string;
-	model: string;
-	thinkingLevel: ThinkingLevel;
-	role: "worker" | "validator" | "judge" | "escalation";
-	costPer1KInput: number;
-	costPer1KOutput: number;
-	latencyMs: number;
-	strengths: string[];
-	weaknesses: string[];
-}
-
-export interface QuestModelEnsemblePolicy {
-	enabled: boolean;
-	families: QuestModelFamilyConfig[];
-	defaultWorker: string;
-	defaultValidator: string;
-	escalationThreshold: number;
-	autoEscalateOnFailure: boolean;
-	routingRules: Array<{
-		condition: string;
-		targetModel: string;
-	}>;
 }
 
 export interface QuestVerificationBudget {
@@ -307,12 +281,6 @@ export interface QuestContextPolicy {
 	maxInlineEvidenceLines: number;
 }
 
-export interface QuestWorkflowHintPolicy {
-	maxSharedHints: number;
-	promotePrerequisiteHints: boolean;
-	promoteFailureHints: boolean;
-}
-
 export interface QuestTraceGradingThresholds {
 	toolHeavyCount: number;
 	longRunMs: number;
@@ -321,58 +289,6 @@ export interface QuestTraceGradingThresholds {
 	blockedPenalty: number;
 	overflowPenalty: number;
 	abortPenalty: number;
-}
-
-export interface QuestHarnessComputationalGuides {
-	enabled: boolean;
-	linterConfigs: string[];
-	preCommitHooks: string[];
-	structuralTests: string[];
-	archConstraints: string[];
-}
-
-export interface QuestHarnessInferentialGuides {
-	enabled: boolean;
-	agentsMdPath: string;
-	skillsDir: string;
-	codeReviewAgents: string[];
-}
-
-export interface QuestHarnessSensors {
-	computational: {
-		enabled: boolean;
-		linters: string[];
-		typeCheckers: string[];
-		testRunners: string[];
-		driftDetectors: string[];
-	};
-	inferential: {
-		enabled: boolean;
-		codeReviewAgents: string[];
-		qualityJudges: string[];
-		runtimeMonitors: string[];
-	};
-}
-
-export interface QuestHarnessFitnessFunctions {
-	enabled: boolean;
-	performanceRequirements: Array<{
-		metric: string;
-		threshold: number;
-		unit: string;
-	}>;
-	observabilityRequirements: Array<{
-		standard: string;
-		required: boolean;
-	}>;
-	architectureConstraints: string[];
-}
-
-export interface QuestHarnessPolicy {
-	computationalGuides: QuestHarnessComputationalGuides;
-	inferentialGuides: QuestHarnessInferentialGuides;
-	sensors: QuestHarnessSensors;
-	fitnessFunctions: QuestHarnessFitnessFunctions;
 }
 
 export interface QuestProfile {
@@ -384,12 +300,9 @@ export interface QuestProfile {
 	promptSurfaces: QuestPromptSurfaces;
 	toolAllowlist: QuestRoleToolPolicy;
 	modelPolicy: QuestModelPolicy;
-	ensemblePolicy: QuestModelEnsemblePolicy;
 	verificationBudget: QuestVerificationBudget;
 	contextPolicy: QuestContextPolicy;
-	workflowHintPolicy: QuestWorkflowHintPolicy;
 	traceGrading: QuestTraceGradingThresholds;
-	harnessPolicy: QuestHarnessPolicy;
 	adoptedChanges: string[];
 }
 
@@ -403,7 +316,6 @@ export interface QuestConfig {
 	orchestratorModel: ModelChoice;
 	workerModel: ModelChoice;
 	validatorModel: ModelChoice;
-	validationConcurrency: number;
 	cwd: string;
 	createdAt: number;
 }
@@ -769,12 +681,9 @@ export interface QuestProfilePatch {
 	promptSurfaces?: Partial<QuestPromptSurfaces>;
 	toolAllowlist?: Partial<QuestRoleToolPolicy>;
 	modelPolicy?: Partial<QuestModelPolicy>;
-	ensemblePolicy?: Partial<QuestModelEnsemblePolicy>;
 	verificationBudget?: Partial<QuestVerificationBudget>;
 	contextPolicy?: Partial<QuestContextPolicy>;
-	workflowHintPolicy?: Partial<QuestWorkflowHintPolicy>;
 	traceGrading?: Partial<QuestTraceGradingThresholds>;
-	harnessPolicy?: Partial<QuestHarnessPolicy>;
 	adoptedChange?: string;
 }
 

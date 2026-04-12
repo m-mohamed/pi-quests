@@ -44,6 +44,10 @@ function benchmarkLabel(state: QuestTrialState): string {
 	return `${state.benchmarkFamily}${state.benchmarkDataset ? ` · ${state.benchmarkDataset}` : ""}`;
 }
 
+function activeCandidateLabel(state: QuestTrialState): string {
+	return state.activeRun?.candidateId ?? state.currentCandidateId ?? "none";
+}
+
 function summaryDetailMarkdown(state: QuestTrialState, profileId: string, liveRun: LiveRunSnapshot | null): string {
 	return [
 		"# Quest Trials",
@@ -52,7 +56,8 @@ function summaryDetailMarkdown(state: QuestTrialState, profileId: string, liveRu
 		`- Target: ${state.target}`,
 		`- Profile: ${profileId}`,
 		`- Benchmark: ${benchmarkLabel(state)}`,
-		`- Candidate: ${state.currentCandidateId ?? "none"}`,
+		`- Candidate: ${activeCandidateLabel(state)}`,
+		`- Frontier leader: ${state.currentCandidateId ?? "none"}`,
 		`- Live run: ${liveRun ? `${liveRun.role}/${liveRun.phase}${liveRun.latestToolName ? ` · ${liveRun.latestToolName}` : ""}` : "idle"}`,
 		`- Updated: ${new Date(state.updatedAt).toLocaleString()}`,
 		"",
@@ -76,7 +81,8 @@ function candidateDetailMarkdown(state: QuestTrialState): string {
 	return [
 		"# Frontier Candidate",
 		"",
-		`- Active candidate: ${state.currentCandidateId ?? "none"}`,
+		`- Active candidate: ${activeCandidateLabel(state)}`,
+		`- Frontier leader: ${state.currentCandidateId ?? "none"}`,
 		`- Frontier ids: ${(state.frontierCandidateIds ?? []).join(", ") || "none"}`,
 		"",
 		"## State Summary",
@@ -92,7 +98,7 @@ function liveRunDetailMarkdown(state: QuestTrialState, liveRun: LiveRunSnapshot)
 		`- Phase: ${liveRun.phase}`,
 		`- Tool: ${liveRun.latestToolName ?? "none"}`,
 		`- Message: ${liveRun.latestMessage ?? "none"}`,
-		`- Candidate: ${state.currentCandidateId ?? "none"}`,
+		`- Candidate: ${activeCandidateLabel(state)}`,
 	].join("\n");
 }
 
@@ -115,7 +121,7 @@ export function buildTrialsWidgetModel(
 		contextLabel: contextLabel ?? undefined,
 		runLabel,
 		runStatus,
-		iterationLabel: state.currentCandidateId ? `cand ${state.currentCandidateId}` : "no candidate",
+		iterationLabel: state.activeRun?.candidateId ? `cand ${state.activeRun.candidateId}` : state.currentCandidateId ? `cand ${state.currentCandidateId}` : "no candidate",
 		summary: truncate(state.lastSummary ?? "trials idle", 96),
 		progress: state.status === "running" ? "∫ running" : state.status === "blocked" ? "⊘ blocked" : "○ idle",
 	};
@@ -138,7 +144,7 @@ export function buildTrialsControlItems(state: QuestTrialState, profileId: strin
 		{
 			value: "candidate",
 			label: "Candidate",
-			description: state.currentCandidateId ?? "no active candidate",
+			description: activeCandidateLabel(state),
 			detailMarkdown: candidateDetailMarkdown(state),
 		},
 	];

@@ -20,6 +20,12 @@ export type ValidationAssertionStatus = "pending" | "passed" | "failed" | "limit
 export type ActiveRunKind = "feature" | "validator" | "replan" | "readiness";
 export type QuestTrialTarget = "repo" | "quest-core";
 export type QuestTrialStatus = "idle" | "running" | "stopped" | "blocked";
+export type QuestTrialPhase =
+	| "baseline-search"
+	| "baseline-hold-out"
+	| "propose"
+	| "search-benchmark"
+	| "hold-out-benchmark";
 export type QuestPromptSurfaceId =
 	| "planning"
 	| "feature-worker"
@@ -696,7 +702,7 @@ export interface QuestCandidateSummary {
 	profileId: string;
 	createdAt: number;
 	source: "baseline" | "proposer";
-	status: "accepted" | "rejected" | "frontier" | "archived";
+	status: "accepted" | "rejected" | "frontier" | "archived" | "partial" | "failed";
 	summary: string;
 	rationale: string;
 	generalizationNote?: string;
@@ -784,6 +790,14 @@ export interface QuestExperimentCandidate {
 	promptSurfaceIds: QuestPromptSurfaceId[];
 }
 
+export interface QuestTrialActiveRun {
+	candidateId: string;
+	phase: QuestTrialPhase;
+	pid?: number;
+	split?: "search" | "hold-out";
+	startedAt: number;
+}
+
 export interface QuestTrialState {
 	projectId: string;
 	target: QuestTrialTarget;
@@ -795,6 +809,7 @@ export interface QuestTrialState {
 	currentCandidateId?: string;
 	frontierCandidateIds?: string[];
 	status: QuestTrialStatus;
+	activeRun?: QuestTrialActiveRun;
 	lastSummary?: string;
 	updatedAt: number;
 }

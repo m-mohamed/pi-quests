@@ -25,12 +25,12 @@ tweaks.
 ## Verified State
 
 - Package gate is green via `npm run check`.
-- Harbor-backed `terminal-bench-sample@2.0` runs complete without harness errors.
+- Harbor smoke succeeds, but the integrity gate still fails closed and blocks trusted Terminal-Bench score claims.
 - Official SlopCodeBench runner path works with Quest overlay.
-- Community traces downloaded: 723 sessions from HuggingFace.
 - Multiple models tested: minimax-m2.5, glm-5, kimi-k2.5 all produce real output.
 - All models return 0.0 reward on chess task (agent quality gap, not plumbing).
-- Current baseline documented in `docs/internal/baseline-results.md`.
+- Canonical community-trace counts live in `.pi/quests/trials/community-stats.json`.
+- Canonical benchmark status and baseline interpretation live in `docs/internal/baseline-results.md`.
 
 ## Working Agreement
 

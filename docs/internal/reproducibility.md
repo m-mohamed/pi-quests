@@ -11,29 +11,35 @@ node --import tsx scripts/evals-scenario.ts
 ## Local headless substrate
 
 ```bash
-npm run benchmark:local
+npm run internal:benchmark:local
 ```
 
 This command exercises the standalone local Quest benchmark substrate. It is a development check, not a frontier benchmark family.
 
 ## Terminal-Bench through Harbor
 
+Inspect the trust gate directly:
+
+```bash
+npm run internal:benchmark:tbench:integrity
+```
+
 Preflight the local environment first:
 
 ```bash
-npm run benchmark:tbench:preflight
+npm run internal:benchmark:tbench:preflight
 ```
 
 Then run the official sample path:
 
 ```bash
-npm run benchmark:tbench:sample
+npm run internal:benchmark:tbench:sample
 ```
 
 For the full official dataset:
 
 ```bash
-npm run benchmark:tbench:full
+npm run internal:benchmark:tbench:full
 ```
 
 To preview the Harbor invocation without running it:
@@ -47,7 +53,7 @@ node --import tsx benchmarks/harbor/run.ts --dataset terminal-bench-sample@2.0 -
 Check out the official runner first, then execute one problem through the overlay:
 
 ```bash
-npm run benchmark:slop:official -- --repo /tmp/slop-code-bench --problem <problem-id>
+npm run internal:benchmark:slop:official -- --repo /tmp/slop-code-bench --problem <problem-id>
 ```
 
 ## Headless Quest directly

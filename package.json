@@ -58,6 +58,7 @@
     "test": "node --import tsx --test tests/*.test.js",
     "pack:check": "npm pack --dry-run",
     "internal:benchmark:local": "PI_QUESTS_INTERNAL=1 node --import tsx benchmarks/local/run.ts",
+    "internal:benchmark:tbench:integrity": "PI_QUESTS_INTERNAL=1 node --import tsx benchmarks/harbor/integrity.ts",
     "internal:benchmark:tbench:preflight": "PI_QUESTS_INTERNAL=1 node --import tsx benchmarks/harbor/preflight.ts",
     "internal:benchmark:tbench:sample": "PI_QUESTS_INTERNAL=1 node --import tsx benchmarks/harbor/run.ts --dataset terminal-bench-sample@2.0 --run-mode sample",
     "internal:benchmark:tbench:full": "PI_QUESTS_INTERNAL=1 node --import tsx benchmarks/harbor/run.ts --dataset terminal-bench@2.0 --run-mode full",

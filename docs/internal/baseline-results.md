@@ -1,16 +1,17 @@
 # Verified Baseline Results
 
-Last verified: 2026-04-07
+Last updated: 2026-04-11
 
 This document records the current reproducible benchmark and optimization facts for Quest.
-It is intentionally conservative: only commands and artifact shapes that have been validated locally are listed here.
+It is the canonical human-readable benchmark status document for this repo.
+Use `.pi/quests/trials/community-stats.json` as the canonical numeric source for community-trace counts and `.pi/quests/trials/candidates/` as the canonical source for archived candidate artifacts.
 
 ## Package gate
 
 - `npm run check`: passing
 - `npm run typecheck`: passing
 - `npm run test`: passing
-- `npm run benchmark:tbench:preflight`: passing
+- `npm run internal:benchmark:tbench:preflight`: smoke succeeds, integrity gate fails closed
 - `npm pack --dry-run`: passing
 
 ## Terminal-Bench via Harbor
@@ -38,21 +39,29 @@ Prepared sample split on 2026-04-07:
 
 ### Current status
 
-- Harbor preflight succeeds against the current local checkout.
+- Harbor smoke succeeds against the current local checkout.
+- Harbor integrity still fails closed because the verifier reuses a mutable environment, so trusted public Terminal-Bench scoring remains blocked.
+- Current Harbor integrity issue codes:
+  - `shared_phase_environment`
+  - `mutable_system_state_survives_verification`
+- Latest verified Harbor smoke artifact:
+  - `benchmarks/.runs/harbor/preflight-smoke/2026-04-11__16-18-08/regex-log__frdDUXZ/agent/quest-headless-output.json`
 - The frontier Trials pipeline is wired end-to-end in code:
   - benchmark split preparation
   - community trace analysis
   - baseline candidate `000`
   - proposer-driven candidate iterations
   - Pareto frontier recomputation
-- A live `/quest trials baseline` launch was verified through Harbor job creation and task startup with the canonical 7-task search split.
-- That run was interrupted during container-side agent setup, so no candidate was archived and no benchmark numbers are recorded here yet.
+- The trials runtime now treats interrupted or failed Harbor runs as explicit `partial` or `failed` candidates instead of leaving `state.json` wedged in `running`.
+- Only complete canonical candidates with both `scores.json` and `hold-out.json` participate in `frontier.json`.
+- The local sample baseline candidate `000` should currently be treated as a partial recovery artifact until Harbor integrity is fixed and a clean Harbor sample rerun archives a complete `summary.json`, `scores.json`, and `hold-out.json`.
+- No public score claim should be made until the official Harbor path is both complete and integrity-clean.
 
 ## Community traces
 
 Canonical location: `.pi/quests/trials/community-traces/`
 
-Verified on 2026-04-07:
+Canonical counts live in `.pi/quests/trials/community-stats.json`.
 
 | Source | Valid Pi sessions |
 |--------|-------------------|
@@ -94,7 +103,8 @@ Runtime code reads only `.pi/quests/trials/` for frontier state.
 ## How to run the frontier pipeline
 
 ```bash
-npm run benchmark:tbench:preflight
+npm run internal:benchmark:tbench:integrity
+npm run internal:benchmark:tbench:preflight
 
 /quest trials prepare-benchmark
 /quest trials analyze-community --force
@@ -104,6 +114,6 @@ npm run benchmark:tbench:preflight
 
 ## Next steps
 
-1. Run and archive the first official Harbor sample baseline through `/quest trials baseline`.
-2. Run the first real proposer iteration through `/quest trials run`.
-3. Promote the same pipeline from `terminal-bench-sample@2.0` to `terminal-bench@2.0`.
+1. Fix the Harbor integrity blocker so the official Terminal-Bench path can be trusted again.
+2. Rerun the Harbor sample baseline cleanly until candidate `000` is archived with the canonical candidate files.
+3. Run the first real proposer iteration through `/quest trials run` only after candidate `000` is complete.

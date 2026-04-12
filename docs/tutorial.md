@@ -64,6 +64,20 @@ Useful commands:
 - `/quest abort`
 - `/quest model <orchestrator|worker|validator> <provider/model[:thinking]>`
 
+Operator guidance:
+
+- Quest is serial by default. One bounded feature runs at a time, then Quest spends validator budget at milestone boundaries.
+- Pause when the contract is wrong, the repo changed under the run, or the worker is spending effort on environment churn instead of the feature.
+- Resume after you have clarified the contract, updated the repo, or changed the role models.
+- Abort when the goal has changed enough that the current quest should not continue.
+- Re-scope by refining the proposal before `/quest accept`, or by pausing, updating the repo-local contract files, and then resuming if the same quest still fits.
+
+Conservative run budget:
+
+- about one worker run per feature
+- up to two validator passes per milestone
+- extra replanning only when validation finds real drift
+
 ## Use the headless runner
 
 For repeatable non-interactive runs:

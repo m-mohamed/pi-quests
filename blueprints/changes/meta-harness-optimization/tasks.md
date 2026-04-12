@@ -88,7 +88,7 @@ The core frontier infrastructure is now implemented in the Quest extension:
   - hold-out regression rejection
 - [x] `npm run typecheck`
 - [x] `npm run test`
-- [x] `npm run benchmark:tbench:preflight`
+- [x] `npm run internal:benchmark:tbench:preflight`
 
 ## Verified facts
 

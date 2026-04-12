@@ -2,10 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { collectFrontierTrialStatus, prepareTrialBenchmark, runTrialBaseline, runTrialOptimization } from "../src/frontier-trials.js";
-import { getQuestTrialPaths } from "../src/state.js";
+import {
+	BenchmarkRunInterruptedError,
+	BenchmarkSplitIntegrityError,
+	collectFrontierTrialStatus,
+	parseHarborScorecard,
+	prepareTrialBenchmark,
+	runTrialBaseline,
+	runTrialOptimization,
+	validateHarborAggregateResult,
+} from "../src/frontier-trials.js";
+import { getQuestTrialPaths, loadQuestTrialState, saveQuestTrialState } from "../src/state.js";
 
 const DEFAULT_MODEL = {
 	provider: "openai-codex",
@@ -77,6 +86,24 @@ async function createFakeSlopRepo(problemCount = 20) {
 		);
 	}
 	return repo;
+}
+
+async function writeHarborAggregateResult(jobsDir, payload, runId = "2026-04-08__18-42-33") {
+	const runDir = join(jobsDir, runId);
+	await mkdir(runDir, { recursive: true });
+	await writeFile(join(runDir, "result.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
+	return runDir;
+}
+
+async function writeHarborTaskResult(runDir, taskName, result) {
+	const taskDir = join(runDir, taskName, "trial-001");
+	await mkdir(taskDir, { recursive: true });
+	await writeFile(
+		join(taskDir, "result.json"),
+		`${JSON.stringify({ task_name: taskName, trial_uri: `file://${taskDir}`, ...result }, null, 2)}\n`,
+		"utf-8",
+	);
+	return taskDir;
 }
 
 test("prepareTrialBenchmark writes the deterministic 7/3 sample split", async () => {
@@ -224,6 +251,74 @@ test("runTrialBaseline archives candidate 000 under the canonical trials layout"
 		assert.equal(candidateSummary.status, "frontier");
 		assert.equal(baseline.state.currentCandidateId, "000");
 		assert.deepEqual(baseline.state.frontierCandidateIds, ["000"]);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runTrialBaseline writes a failed candidate and clears running state on benchmark failure", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-baseline-failed-"));
+	try {
+		await assert.rejects(
+			() =>
+				runTrialBaseline(cwd, DEFAULT_MODEL, {}, {
+					runBenchmarkSet: async () => {
+						throw new BenchmarkSplitIntegrityError("Harbor search aggregate result is incomplete.");
+					},
+				}),
+			/incomplete/,
+		);
+		const status = await collectFrontierTrialStatus(cwd);
+		const candidateSummary = JSON.parse(await readFile(join(cwd, ".pi", "quests", "trials", "candidates", "000", "summary.json"), "utf-8"));
+		assert.equal(status.state.status, "blocked");
+		assert.equal(status.state.activeRun, undefined);
+		assert.equal(candidateSummary.status, "failed");
+		assert.match(candidateSummary.failureReason, /aggregate result is incomplete/);
+		assert.deepEqual(status.frontier?.frontierCandidateIds ?? [], []);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runTrialBaseline writes a partial candidate when interrupted during the search split", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-baseline-partial-"));
+	try {
+		const result = await runTrialBaseline(cwd, DEFAULT_MODEL, {}, {
+			runBenchmarkSet: async () => {
+				throw new BenchmarkRunInterruptedError("Harbor benchmark run was interrupted by SIGTERM.");
+			},
+		});
+		const candidateSummary = JSON.parse(await readFile(join(cwd, ".pi", "quests", "trials", "candidates", "000", "summary.json"), "utf-8"));
+		assert.equal(result.state.status, "stopped");
+		assert.equal(result.state.activeRun, undefined);
+		assert.equal(candidateSummary.status, "partial");
+		assert.match(candidateSummary.failureReason, /SIGTERM/);
+		assert.equal(existsSync(join(cwd, ".pi", "quests", "trials", "candidates", "000", "scores.json")), false);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runTrialBaseline preserves prior benchmark artifacts when retrying candidate 000", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-baseline-preserve-"));
+	try {
+		const preservedArtifact = join(cwd, ".pi", "quests", "trials", "candidates", "000", "benchmarks", "search", "old-run", "result.json");
+		await mkdir(dirname(preservedArtifact), { recursive: true });
+		await writeFile(preservedArtifact, "{\"status\":\"old\"}\n", "utf-8");
+
+		await assert.rejects(
+			() =>
+				runTrialBaseline(cwd, DEFAULT_MODEL, { force: true }, {
+					runBenchmarkSet: async () => {
+						throw new BenchmarkSplitIntegrityError("Harbor integrity gate failed.");
+					},
+				}),
+			/integrity gate failed/,
+		);
+
+		assert.equal(existsSync(preservedArtifact), true);
+		const candidateSummary = JSON.parse(await readFile(join(cwd, ".pi", "quests", "trials", "candidates", "000", "summary.json"), "utf-8"));
+		assert.equal(candidateSummary.status, "failed");
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
@@ -384,6 +479,269 @@ test("runTrialOptimization rejects candidates that regress hold-out performance"
 		const status = await collectFrontierTrialStatus(cwd);
 		assert.equal(rejected.status, "rejected");
 		assert.equal(status.frontier?.leaderCandidateId, "000");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runTrialOptimization writes a partial candidate when interrupted between search and hold-out", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-partial-optimization-"));
+	try {
+		await seedCommunityDir(cwd);
+		const result = await runTrialOptimization(
+			cwd,
+			DEFAULT_MODEL,
+			{ iterations: 1 },
+			{
+				analyzeCommunity: async () => ({
+					generatedAt: Date.now(),
+					totalFiles: 1,
+					totalSessions: 1,
+					parsedSessions: 1,
+					failedSessions: 0,
+					failedPaths: [],
+					sources: {},
+					models: {},
+					providers: {},
+					totalInputTokens: 0,
+					totalOutputTokens: 0,
+					totalCacheRead: 0,
+					totalCacheWrite: 0,
+					totalCost: 0,
+					avgDurationMs: 0,
+					avgToolCalls: 0,
+					avgErrors: 0,
+					avgMessages: 0,
+					failureTags: {},
+					topToolNames: {},
+					sessionDurationBuckets: [],
+				}),
+				proposeCandidate: async () => ({
+					run: {
+						id: "proposer-run",
+						role: "proposer",
+						startedAt: Date.now(),
+						endedAt: Date.now(),
+						provider: DEFAULT_MODEL.provider,
+						model: DEFAULT_MODEL.model,
+						thinkingLevel: DEFAULT_MODEL.thinkingLevel,
+						exitCode: 0,
+						ok: true,
+						summary: "Candidate",
+						phase: "propose",
+						events: [],
+					},
+					candidate: {
+						id: "candidate-agent",
+						source: "agent",
+						summary: "Candidate",
+						rationale: "Candidate rationale",
+						generalizationNote: "Candidate generalization note",
+						targetedTags: [],
+						targetedCaseIds: [],
+						promptSurfaceIds: ["feature-worker"],
+						patch: { promptSurfaces: { workerPolicy: "New worker policy" } },
+					},
+				}),
+				runBenchmarkSet: async (_cwd, _model, _profileId, split, candidateId) => {
+					if (candidateId === "000") return fakeScorecard(split, 1, 1, 100);
+					if (split.split === "search") return fakeScorecard(split, 0.8, 2, 200);
+					throw new BenchmarkRunInterruptedError("Harbor benchmark run was interrupted by SIGTERM.");
+				},
+			},
+		);
+		const partial = JSON.parse(await readFile(join(cwd, ".pi", "quests", "trials", "candidates", "001", "summary.json"), "utf-8"));
+		const status = await collectFrontierTrialStatus(cwd);
+		assert.equal(result.state.status, "stopped");
+		assert.equal(partial.status, "partial");
+		assert.ok(existsSync(join(cwd, ".pi", "quests", "trials", "candidates", "001", "scores.json")));
+		assert.equal(status.frontier?.leaderCandidateId, "000");
+		assert.deepEqual(status.frontier?.frontierCandidateIds, ["000"]);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runTrialOptimization excludes failed candidates from the frontier", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-failed-optimization-"));
+	try {
+		await seedCommunityDir(cwd);
+		await assert.rejects(
+			() =>
+				runTrialOptimization(
+					cwd,
+					DEFAULT_MODEL,
+					{ iterations: 1 },
+					{
+						analyzeCommunity: async () => ({
+							generatedAt: Date.now(),
+							totalFiles: 1,
+							totalSessions: 1,
+							parsedSessions: 1,
+							failedSessions: 0,
+							failedPaths: [],
+							sources: {},
+							models: {},
+							providers: {},
+							totalInputTokens: 0,
+							totalOutputTokens: 0,
+							totalCacheRead: 0,
+							totalCacheWrite: 0,
+							totalCost: 0,
+							avgDurationMs: 0,
+							avgToolCalls: 0,
+							avgErrors: 0,
+							avgMessages: 0,
+							failureTags: {},
+							topToolNames: {},
+							sessionDurationBuckets: [],
+						}),
+						proposeCandidate: async () => ({
+							run: {
+								id: "proposer-run",
+								role: "proposer",
+								startedAt: Date.now(),
+								endedAt: Date.now(),
+								provider: DEFAULT_MODEL.provider,
+								model: DEFAULT_MODEL.model,
+								thinkingLevel: DEFAULT_MODEL.thinkingLevel,
+								exitCode: 0,
+								ok: true,
+								summary: "Candidate",
+								phase: "propose",
+								events: [],
+							},
+							candidate: {
+								id: "candidate-agent",
+								source: "agent",
+								summary: "Candidate",
+								rationale: "Candidate rationale",
+								generalizationNote: "Candidate generalization note",
+								targetedTags: [],
+								targetedCaseIds: [],
+								promptSurfaceIds: ["feature-worker"],
+								patch: { promptSurfaces: { workerPolicy: "New worker policy" } },
+							},
+						}),
+						runBenchmarkSet: async (_cwd, _model, _profileId, split, candidateId) => {
+							if (candidateId === "000") return fakeScorecard(split, 1, 1, 100);
+							throw new BenchmarkSplitIntegrityError("Harbor search aggregate result is incomplete.");
+						},
+					},
+				),
+			/incomplete/,
+		);
+		const failed = JSON.parse(await readFile(join(cwd, ".pi", "quests", "trials", "candidates", "001", "summary.json"), "utf-8"));
+		const status = await collectFrontierTrialStatus(cwd);
+		assert.equal(failed.status, "failed");
+		assert.equal(status.state.status, "blocked");
+		assert.equal(status.frontier?.leaderCandidateId, "000");
+		assert.deepEqual(status.frontier?.frontierCandidateIds, ["000"]);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("collectFrontierTrialStatus self-heals stale running state into stopped with a partial candidate", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-recover-stale-"));
+	try {
+		const state = await loadQuestTrialState(cwd, { ensure: true });
+		const candidateBenchDir = join(cwd, ".pi", "quests", "trials", "candidates", "000", "benchmarks", "search", "probe");
+		await mkdir(candidateBenchDir, { recursive: true });
+		await writeFile(join(candidateBenchDir, "artifact.txt"), "partial search result\n", "utf-8");
+		state.status = "running";
+		state.currentCandidateId = "000";
+		state.activeRun = {
+			candidateId: "000",
+			phase: "baseline-search",
+			pid: 999999,
+			split: "search",
+			startedAt: Date.now() - 1000,
+		};
+		await saveQuestTrialState(cwd, state);
+
+		const status = await collectFrontierTrialStatus(cwd);
+		const partial = JSON.parse(await readFile(join(cwd, ".pi", "quests", "trials", "candidates", "000", "summary.json"), "utf-8"));
+		assert.equal(status.state.status, "stopped");
+		assert.equal(status.state.activeRun, undefined);
+		assert.equal(partial.status, "partial");
+		assert.deepEqual(status.frontier?.frontierCandidateIds ?? [], []);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("validateHarborAggregateResult rejects missing aggregate results", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-harbor-aggregate-missing-"));
+	try {
+		await assert.rejects(() => validateHarborAggregateResult(cwd, "search", 7), /aggregate result is missing/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("validateHarborAggregateResult rejects unfinished aggregate results", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-harbor-aggregate-unfinished-"));
+	try {
+		await writeHarborAggregateResult(cwd, {
+			finished_at: null,
+			n_total_trials: 7,
+			stats: { n_trials: 7 },
+		});
+		await assert.rejects(() => validateHarborAggregateResult(cwd, "search", 7), /finished_at is null/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("validateHarborAggregateResult rejects incomplete aggregate trial counts", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-harbor-aggregate-counts-"));
+	try {
+		await writeHarborAggregateResult(cwd, {
+			finished_at: "2026-04-08T18:42:37.902396",
+			n_total_trials: 7,
+			stats: { n_trials: 1 },
+		});
+		await assert.rejects(() => validateHarborAggregateResult(cwd, "search", 7), /completed 1 of 7 trials/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("parseHarborScorecard emits explicit error records for missing tasks in a completed split", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-harbor-scorecard-"));
+	try {
+		const items = Array.from({ length: 7 }, (_, index) => ({
+			id: `task-${index + 1}`,
+			name: `task-${index + 1}`,
+			family: "terminal-bench",
+			dataset: "terminal-bench-sample@2.0",
+			tags: ["terminal-bench"],
+		}));
+		const runDir = await writeHarborAggregateResult(cwd, {
+			finished_at: "2026-04-08T18:42:37.902396",
+			n_total_trials: 7,
+			stats: { n_trials: 7 },
+		});
+		await writeHarborTaskResult(runDir, "task-1", {
+			started_at: "2026-04-08T18:42:37.902396",
+			finished_at: "2026-04-08T18:43:37.902396",
+			verifier_result: { rewards: { reward: 1 } },
+			agent_result: { cost_usd: 1.25 },
+		});
+
+		const scorecard = await parseHarborScorecard(
+			cwd,
+			items,
+			"terminal-bench-sample@2.0",
+			"search",
+			"openai-codex/gpt-5.4",
+			"sample",
+		);
+		assert.equal(scorecard.items.length, 7);
+		assert.equal(scorecard.passed, 1);
+		assert.equal(scorecard.failed, 6);
+		assert.equal(scorecard.items.filter((item) => item.failureReason === "Harbor did not produce a result for this task.").length, 6);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

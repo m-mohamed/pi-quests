@@ -26,6 +26,9 @@ export interface HarborIntegrityReport {
 		sharedPhaseEnvironment: boolean;
 		restoresOnlyTestsDir: boolean;
 		executesVerifierInsideSharedEnvironment: boolean;
+		trialExecuteAgentSnippet?: string;
+		trialRunVerificationSnippet?: string;
+		verifierVerifySnippet?: string;
 	};
 }
 
@@ -33,6 +36,16 @@ let harborIntegrityPromise: Promise<HarborIntegrityReport> | null = null;
 
 function joinIssueDetails(issues: HarborIntegrityIssue[]): string {
 	return issues.map((issue) => `${issue.code}: ${issue.detail}`).join(" ");
+}
+
+function snippetFor(source: string, needles: string[]): string | undefined {
+	const lines = source
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0);
+	const matched = lines.filter((line) => needles.some((needle) => line.includes(needle)));
+	if (matched.length === 0) return undefined;
+	return matched.slice(0, 4).join("\n");
 }
 
 export function evaluateHarborIntegrity(evidence: HarborIntegrityEvidence): HarborIntegrityReport {
@@ -73,6 +86,9 @@ export function evaluateHarborIntegrity(evidence: HarborIntegrityEvidence): Harb
 			sharedPhaseEnvironment,
 			restoresOnlyTestsDir,
 			executesVerifierInsideSharedEnvironment,
+			trialExecuteAgentSnippet: snippetFor(evidence.trialExecuteAgentSource, ["environment=self._environment"]),
+			trialRunVerificationSnippet: snippetFor(evidence.trialRunVerificationSource, ["_verify_with_retry", "verify("]),
+			verifierVerifySnippet: snippetFor(evidence.verifierVerifySource, ["self._environment", 'target_dir="/tests"', "test_script_path"]),
 		},
 	};
 }

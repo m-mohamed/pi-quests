@@ -74,6 +74,23 @@ Instead of pushing everything through one long session, Quest turns the goal int
 
 You still steer the work. Quest handles decomposition, execution, validation, and handoff.
 
+## Supervising A Quest
+
+Quest is serial by default: it runs one bounded feature worker at a time and then spends validator budget at milestone boundaries. That keeps repo state inspectable, keeps handoffs readable, and avoids turning long-running coding work into parallel merge noise.
+
+Useful operator interventions:
+
+- Use `/quest pause` when prerequisites changed, the validation contract is wrong, or the current run is burning time on setup instead of repo progress.
+- Use `/quest resume` after you have clarified the contract, changed role models, or updated the repo state Quest should continue from.
+- Use `/quest abort` when the goal changed enough that the current proposal is no longer the right contract.
+- Re-scope before `/quest accept` by refining the proposal. After execution starts, pause, update the repo-local contract files, and resume only if the same quest still applies.
+
+Conservative planning heuristic:
+
+- Expect roughly one worker run per feature.
+- Expect up to two validator passes per milestone.
+- Reserve extra budget only for corrective replanning when validation finds real drift.
+
 ## Commands
 
 - `/quest new <goal>`

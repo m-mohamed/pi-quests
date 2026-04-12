@@ -14,6 +14,7 @@ interface CheckResult {
 	detail: string;
 	jobDir?: string;
 	artifactPath?: string;
+	context?: Record<string, unknown>;
 }
 
 interface PreflightOptions {
@@ -284,7 +285,7 @@ function summarizeChecks(model: string, checks: CheckResult[]): string {
 	return `Harbor preflight failed ${failedNames.length}/${total} checks for ${model}: ${failedNames.join(", ")}.`;
 }
 
-function deriveNextSteps(
+export function deriveNextSteps(
 	checks: CheckResult[],
 	smokeTask: string,
 	jobsDir: string,
@@ -293,22 +294,31 @@ function deriveNextSteps(
 	const failed = checks.filter((check) => !check.ok);
 	if (failed.length === 0) {
 		return skipSmoke
-			? [`Run npm run benchmark:tbench:preflight -- --smoke-task ${smokeTask} before moving on to sample runs.`]
-			: ["Run npm run benchmark:tbench:sample for a broader benchmark pass."];
+			? [`Run npm run internal:benchmark:tbench:preflight -- --smoke-task ${smokeTask} before moving on to sample runs.`]
+			: ["Run npm run internal:benchmark:tbench:sample for a broader benchmark pass."];
 	}
 	const steps: string[] = [];
 	const smokeFailure = failed.find((check) => check.name === "harbor-smoke");
 	const integrityFailure = failed.find((check) => check.name === "harbor-integrity");
+	const smokeSuccess = checks.find((check) => check.name === "harbor-smoke" && check.ok);
+	const prerequisiteFailures = failed.filter((check) => check.name !== "harbor-smoke" && check.name !== "harbor-integrity");
 	if (smokeFailure?.jobDir) {
 		steps.push(`Inspect the latest Harbor smoke run under ${smokeFailure.jobDir}.`);
 	}
 	if (smokeFailure?.artifactPath) {
 		steps.push(`Open ${smokeFailure.artifactPath} for the closest failure context.`);
 	}
-	if (!smokeFailure && failed.length > 0) {
-		steps.push(`Fix the failed prerequisite checks, then rerun npm run benchmark:tbench:preflight -- --smoke-task ${smokeTask}.`);
+	if (prerequisiteFailures.length > 0) {
+		steps.push(`Fix the failed prerequisite checks, then rerun npm run internal:benchmark:tbench:preflight -- --smoke-task ${smokeTask}.`);
 	}
 	if (integrityFailure) {
+		if (smokeSuccess?.jobDir) {
+			steps.push(`Harbor smoke already succeeded in ${smokeSuccess.jobDir}; treat this as a trust failure, not a smoke failure.`);
+		}
+		const issueCodes = Array.isArray(integrityFailure.context?.issueCodes) ? integrityFailure.context.issueCodes.join(", ") : "";
+		if (issueCodes) {
+			steps.push(`Capture the Harbor integrity issue codes for upstream follow-up: ${issueCodes}.`);
+		}
 		steps.push("Do not trust Terminal-Bench scores until Harbor verifier isolation is fixed.");
 	}
 	if (!smokeFailure) {
@@ -377,10 +387,20 @@ async function runHarborSmoke(
 
 async function runHarborIntegrityCheck(): Promise<CheckResult> {
 	const report = await inspectHarborInstallation();
+	const evidenceLines = [
+		report.evidence.trialExecuteAgentSnippet ? `Trial._execute_agent:\n${report.evidence.trialExecuteAgentSnippet}` : "",
+		report.evidence.verifierVerifySnippet ? `Verifier.verify:\n${report.evidence.verifierVerifySnippet}` : "",
+	]
+		.filter(Boolean)
+		.join("\n");
 	return {
 		name: "harbor-integrity",
 		ok: report.ok,
-		detail: report.summary,
+		detail: [report.summary, evidenceLines].filter(Boolean).join("\n"),
+		context: {
+			issueCodes: report.issues.map((issue) => issue.code),
+			evidence: report.evidence,
+		},
 	};
 }
 

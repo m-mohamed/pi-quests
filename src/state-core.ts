@@ -588,6 +588,7 @@ function defaultTrialState(cwd: string): QuestTrialState {
 		benchmarkRunMode: "sample",
 		frontierCandidateIds: [],
 		status: "idle",
+		activeRun: undefined,
 		updatedAt: Date.now(),
 	};
 }
@@ -616,6 +617,18 @@ export async function loadQuestTrialState(cwd: string, options: { ensure?: boole
 			benchmarkDataset: parsed.benchmarkDataset ?? defaults.benchmarkDataset,
 			benchmarkRunMode: parsed.benchmarkRunMode ?? defaults.benchmarkRunMode,
 			frontierCandidateIds: parsed.frontierCandidateIds ?? defaults.frontierCandidateIds,
+			activeRun: parsed.activeRun
+				? {
+						candidateId: parsed.activeRun.candidateId,
+						phase: parsed.activeRun.phase,
+						pid: typeof parsed.activeRun.pid === "number" ? parsed.activeRun.pid : undefined,
+						split: parsed.activeRun.split === "search" || parsed.activeRun.split === "hold-out" ? parsed.activeRun.split : undefined,
+						startedAt:
+							typeof parsed.activeRun.startedAt === "number" && Number.isFinite(parsed.activeRun.startedAt)
+								? parsed.activeRun.startedAt
+								: defaults.updatedAt,
+					}
+				: undefined,
 		};
 		if (options.ensure && JSON.stringify(parsed) !== JSON.stringify(normalized)) {
 			await writeFile(paths.stateFile, `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");

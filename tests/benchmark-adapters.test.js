@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 import { evaluateHarborIntegrity } from "../src/harbor-integrity.js";
 import { buildHarborCommand, bundledLinuxNodeArchitectures } from "../benchmarks/harbor/run.ts";
-import { inspectHarborSmokeJobs } from "../benchmarks/harbor/preflight.ts";
+import { deriveNextSteps, inspectHarborSmokeJobs } from "../benchmarks/harbor/preflight.ts";
 import { buildOfficialSlopCodeBenchCommand, resolveSlopCodeBenchRepo } from "../benchmarks/slopcodebench/official-run.ts";
 
 const DEFAULT_MODEL = {
@@ -213,4 +213,36 @@ test("evaluateHarborIntegrity fails closed for shared verifier environments", ()
 		"mutable_system_state_survives_verification",
 	]);
 	assert.match(report.summary, /failed the local benchmark integrity probe/);
+	assert.match(report.evidence.trialExecuteAgentSnippet ?? "", /environment=self\._environment/);
+	assert.match(report.evidence.verifierVerifySnippet ?? "", /target_dir="\/tests"/);
+	assert.match(report.evidence.verifierVerifySnippet ?? "", /self\._environment\.exec/);
+});
+
+test("deriveNextSteps treats an integrity-only failure as a trust blocker, not a smoke failure", () => {
+	const steps = deriveNextSteps(
+		[
+			{
+				name: "harbor-smoke",
+				ok: true,
+				detail: "smoke ok",
+				jobDir: "/tmp/harbor-smoke-job",
+				artifactPath: "/tmp/harbor-smoke-job/agent/quest-headless-output.json",
+			},
+			{
+				name: "harbor-integrity",
+				ok: false,
+				detail: "integrity failed",
+				context: {
+					issueCodes: ["shared_phase_environment", "mutable_system_state_survives_verification"],
+				},
+			},
+		],
+		"regex-log",
+		"/tmp/preflight-smoke",
+		false,
+	);
+	assert.equal(steps.some((step) => /Fix the failed prerequisite checks/.test(step)), false);
+	assert.equal(steps.some((step) => /Harbor smoke already succeeded/.test(step)), true);
+	assert.equal(steps.some((step) => /shared_phase_environment, mutable_system_state_survives_verification/.test(step)), true);
+	assert.equal(steps.some((step) => /Do not trust Terminal-Bench scores/.test(step)), true);
 });

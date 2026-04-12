@@ -5,7 +5,7 @@ This directory contains the official-run overlay for a local checkout of the ups
 Official runner path:
 
 ```bash
-npm run benchmark:slop:official -- --repo /tmp/slop-code-bench --problem <problem-id>
+npm run internal:benchmark:slop:official -- --repo /tmp/slop-code-bench --problem <problem-id>
 ```
 
 The official path uses `benchmarks/slopcodebench/official-overlay/` to register Quest with the upstream `slop-code run` CLI without patching the upstream repo.

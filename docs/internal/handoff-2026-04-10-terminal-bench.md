@@ -1,5 +1,7 @@
 # Terminal-Bench Handoff (2026-04-10)
 
+Historical handoff only. The current benchmark status source of truth is [`docs/internal/baseline-results.md`](./baseline-results.md).
+
 ## Scope
 
 This pass stayed focused on `pi-quests` benchmark execution quality and Terminal-Bench substrate health:
@@ -73,7 +75,7 @@ That live-proven fix is now baked into `src/benchmark-helpers.ts`.
 Run this first:
 
 ```bash
-npm run benchmark:tbench:preflight -- --smoke-task qemu-alpine-ssh
+npm run internal:benchmark:tbench:preflight -- --smoke-task qemu-alpine-ssh
 ```
 
 Expected outcome:

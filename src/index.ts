@@ -815,6 +815,10 @@ ${
 		const summary = trials.summarizeTrialStatus(status);
 		currentTrialState = status.state;
 		currentProfile = status.profile;
+		if (status.state.status !== "running") {
+			activeTrialPid = undefined;
+			trialLiveRun = null;
+		}
 		if (!ctx.hasUI || !ctx.ui.custom) {
 			await emitNote(pi, ctx, summarizeTrials(status, summary));
 			return;
@@ -825,6 +829,10 @@ ${
 			const nextStatus = await trials.collectFrontierTrialStatus(ctx.cwd);
 			currentTrialState = nextStatus.state;
 			currentProfile = nextStatus.profile;
+			if (nextStatus.state.status !== "running") {
+				activeTrialPid = undefined;
+				trialLiveRun = null;
+			}
 			let internalUi: InternalUiModule;
 			try {
 				internalUi = await loadInternalUi();
@@ -881,6 +889,10 @@ ${
 		const status = await trials.collectFrontierTrialStatus(ctx.cwd);
 		currentTrialState = status.state;
 		currentProfile = status.profile;
+		if (status.state.status !== "running") {
+			activeTrialPid = undefined;
+			trialLiveRun = null;
+		}
 
 		if (!trimmed) {
 			await emitNote(pi, ctx, trials.summarizeTrialStatus(status));
@@ -909,42 +921,53 @@ ${
 						? currentOrDefaultModel(currentQuest, "orchestrator")
 						: createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
 				const iterations = Number(readFlag("--iterations") ?? "1");
-				const result = await trials.runTrialOptimization(
-					ctx.cwd,
-					modelChoice,
-					{
-						benchmark,
-						dataset,
-						repo,
-						force: hasFlag("--force"),
-						iterations: Number.isFinite(iterations) && iterations > 0 ? iterations : 1,
-						onSnapshot: async (snapshotUpdate) => {
-							trialLiveRun = snapshotUpdate;
-							await applyQuestUi(ctx, currentQuest);
+				try {
+					const result = await trials.runTrialOptimization(
+						ctx.cwd,
+						modelChoice,
+						{
+							benchmark,
+							dataset,
+							repo,
+							force: hasFlag("--force"),
+							iterations: Number.isFinite(iterations) && iterations > 0 ? iterations : 1,
+							onSnapshot: async (snapshotUpdate) => {
+								trialLiveRun = snapshotUpdate;
+								await applyQuestUi(ctx, currentQuest);
+							},
+							onProcessStart: async (pid) => {
+								activeTrialPid = pid;
+							},
 						},
-						onProcessStart: async (pid) => {
-							activeTrialPid = pid;
-						},
-					},
-				);
-				activeTrialPid = undefined;
-				trialLiveRun = null;
-				currentTrialState = result.state;
-				currentProfile = result.profile;
-				await applyQuestUi(ctx, currentQuest);
-				await emitNote(pi, ctx, result.summary);
-				return;
+					);
+					currentTrialState = result.state;
+					currentProfile = result.profile;
+					await emitNote(pi, ctx, result.summary);
+					return;
+				} finally {
+					activeTrialPid = undefined;
+					trialLiveRun = null;
+					const nextStatus = await trials.collectFrontierTrialStatus(ctx.cwd);
+					currentTrialState = nextStatus.state;
+					currentProfile = nextStatus.profile;
+					await applyQuestUi(ctx, currentQuest);
+				}
 			}
 
 			case "stop": {
-				if (typeof activeTrialPid === "number") {
-					await terminateQuestProcess(activeTrialPid);
+				const persistedState = await loadQuestTrialState(ctx.cwd, { ensure: true });
+				const activePid = persistedState.activeRun?.pid ?? activeTrialPid;
+				if (typeof activePid === "number") {
+					await terminateQuestProcess(activePid);
 				}
 				activeTrialPid = undefined;
 				trialLiveRun = null;
-				currentTrialState.status = "stopped";
-				currentTrialState.lastSummary = "Trials stopped by operator.";
-				await saveQuestTrialState(ctx.cwd, currentTrialState);
+				persistedState.activeRun = undefined;
+				persistedState.status = "stopped";
+				persistedState.lastSummary = "Trials stopped by operator.";
+				await saveQuestTrialState(ctx.cwd, persistedState);
+				currentTrialState = persistedState;
+				await applyQuestUi(ctx, currentQuest);
 				await emitNote(pi, ctx, "Trials stopped.", "warning");
 				return;
 			}
@@ -979,30 +1002,36 @@ ${
 					currentQuest && currentQuest.status !== "completed" && currentQuest.status !== "aborted"
 						? currentOrDefaultModel(currentQuest, "orchestrator")
 						: createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
-				const result = await trials.runTrialBaseline(
-					ctx.cwd,
-					modelChoice,
-					{
-						benchmark,
-						dataset,
-						repo,
-						force: hasFlag("--force"),
-						onSnapshot: async (snapshotUpdate) => {
-							trialLiveRun = snapshotUpdate;
-							await applyQuestUi(ctx, currentQuest);
+				try {
+					const result = await trials.runTrialBaseline(
+						ctx.cwd,
+						modelChoice,
+						{
+							benchmark,
+							dataset,
+							repo,
+							force: hasFlag("--force"),
+							onSnapshot: async (snapshotUpdate) => {
+								trialLiveRun = snapshotUpdate;
+								await applyQuestUi(ctx, currentQuest);
+							},
+							onProcessStart: async (pid) => {
+								activeTrialPid = pid;
+							},
 						},
-						onProcessStart: async (pid) => {
-							activeTrialPid = pid;
-						},
-					},
-				);
-				activeTrialPid = undefined;
-				trialLiveRun = null;
-				currentTrialState = result.state;
-				currentProfile = result.profile;
-				await applyQuestUi(ctx, currentQuest);
-				await emitNote(pi, ctx, result.summary);
-				return;
+					);
+					currentTrialState = result.state;
+					currentProfile = result.profile;
+					await emitNote(pi, ctx, result.summary);
+					return;
+				} finally {
+					activeTrialPid = undefined;
+					trialLiveRun = null;
+					const nextStatus = await trials.collectFrontierTrialStatus(ctx.cwd);
+					currentTrialState = nextStatus.state;
+					currentProfile = nextStatus.profile;
+					await applyQuestUi(ctx, currentQuest);
+				}
 			}
 
 			case "status": {

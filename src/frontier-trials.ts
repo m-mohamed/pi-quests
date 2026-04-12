@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { inspectHarborInstallation } from "./harbor-integrity.js";
 import { resolveHarborPython } from "./harbor-runtime.js";
 import { applyQuestProfilePatch } from "./internal-profile-core.js";
+import { processExists } from "./runtime-core.js";
 import { getQuestTrialPaths, loadQuestProfile, loadQuestTrialState, saveQuestProfile, saveQuestTrialState } from "./state.js";
 import { analyzeCommunityTraces, loadCommunityStats, writeCommunityStats } from "./trace-analyzer.js";
 import { compact } from "./utils.js";
@@ -28,6 +29,7 @@ import type {
 	QuestFrontierBenchmarkFamily,
 	QuestFrontierState,
 	QuestProfile,
+	QuestTrialPhase,
 } from "./types.js";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -153,6 +155,22 @@ interface SlopRunSummary {
 	ratios?: Record<string, unknown>;
 	delta?: Record<string, unknown>;
 	composite_scores?: Record<string, unknown>;
+}
+
+interface HarborAggregateResult {
+	finished_at?: string | null;
+	n_total_trials?: number;
+	stats?: {
+		n_trials?: number;
+	};
+}
+
+export class BenchmarkRunInterruptedError extends Error {
+	override name = "BenchmarkRunInterruptedError";
+}
+
+export class BenchmarkSplitIntegrityError extends Error {
+	override name = "BenchmarkSplitIntegrityError";
 }
 
 interface RawTerminalBenchTask {
@@ -730,7 +748,55 @@ function benchmarkProvenance(
 	};
 }
 
-async function parseHarborScorecard(
+async function findLatestHarborAggregateResultFile(jobsDir: string): Promise<string | null> {
+	if (!existsSync(jobsDir)) return null;
+	const entries = await readdir(jobsDir, { withFileTypes: true });
+	let latestFile: string | null = null;
+	let latestMtimeMs = -1;
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const file = join(jobsDir, entry.name, "result.json");
+		if (!existsSync(file)) continue;
+		const info = await stat(file);
+		if (info.mtimeMs >= latestMtimeMs) {
+			latestFile = file;
+			latestMtimeMs = info.mtimeMs;
+		}
+	}
+	return latestFile;
+}
+
+export async function validateHarborAggregateResult(
+	jobsDir: string,
+	split: "search" | "hold-out",
+	expectedItemCount: number,
+): Promise<void> {
+	const aggregateFile = await findLatestHarborAggregateResultFile(jobsDir);
+	if (!aggregateFile) {
+		throw new BenchmarkSplitIntegrityError(`Harbor ${split} aggregate result is missing under ${jobsDir}.`);
+	}
+	const aggregate = await readJsonFile<HarborAggregateResult>(aggregateFile);
+	if (!aggregate) {
+		throw new BenchmarkSplitIntegrityError(`Harbor ${split} aggregate result could not be parsed: ${aggregateFile}.`);
+	}
+	if (!aggregate.finished_at) {
+		throw new BenchmarkSplitIntegrityError(`Harbor ${split} aggregate result is incomplete: finished_at is null.`);
+	}
+	const completedTrials = Number(aggregate.stats?.n_trials ?? 0);
+	const totalTrials = Number(aggregate.n_total_trials ?? 0);
+	if (
+		!Number.isFinite(completedTrials) ||
+		!Number.isFinite(totalTrials) ||
+		completedTrials !== totalTrials ||
+		totalTrials !== expectedItemCount
+	) {
+		throw new BenchmarkSplitIntegrityError(
+			`Harbor ${split} aggregate result is incomplete: completed ${completedTrials} of ${totalTrials} trials for ${expectedItemCount} expected work items.`,
+		);
+	}
+}
+
+export async function parseHarborScorecard(
 	jobsDir: string,
 	items: QuestBenchmarkWorkItem[],
 	dataset: string,
@@ -738,6 +804,7 @@ async function parseHarborScorecard(
 	fallbackModel: string,
 	runMode: QuestBenchmarkRunMode,
 ): Promise<QuestCandidateScorecard> {
+	await validateHarborAggregateResult(jobsDir, split, items.length);
 	const trialResults = await discoverHarborResults(jobsDir);
 	const byTask = new Map<string, HarborTaskResultRecord>();
 	for (const trialResult of trialResults) {
@@ -876,9 +943,13 @@ async function runTerminalBenchSplit(options: {
 		if (typeof proc.pid === "number" && options.onProcessStart) {
 			void Promise.resolve(options.onProcessStart(proc.pid));
 		}
-		proc.on("close", (code) => {
+		proc.on("close", (code, signal) => {
 			if ((code ?? 1) === 0) {
 				resolvePromise();
+				return;
+			}
+			if (signal === "SIGTERM" || signal === "SIGKILL") {
+				reject(new BenchmarkRunInterruptedError(`Harbor benchmark run was interrupted by ${signal}.`));
 				return;
 			}
 			reject(new Error(`Harbor benchmark run failed with exit code ${code ?? 1}.`));
@@ -1034,9 +1105,13 @@ async function runOfficialSlopCodeBench(options: {
 		if (typeof proc.pid === "number" && options.onProcessStart) {
 			void Promise.resolve(options.onProcessStart(proc.pid));
 		}
-		proc.on("close", (code) => {
+		proc.on("close", (code, signal) => {
 			if ((code ?? 1) === 0) {
 				resolvePromise();
+				return;
+			}
+			if (signal === "SIGTERM" || signal === "SIGKILL") {
+				reject(new BenchmarkRunInterruptedError(`SlopCodeBench run was interrupted by ${signal}.`));
 				return;
 			}
 			reject(new Error(`SlopCodeBench official run failed with exit code ${code ?? 1}.`));
@@ -1275,6 +1350,40 @@ async function resetCandidateDir(cwd: string, candidateId: string): Promise<void
 	await mkdir(candidateDir(cwd, candidateId), { recursive: true });
 }
 
+async function prepareBaselineCandidateDir(cwd: string, candidateId: string): Promise<void> {
+	await mkdir(candidateDir(cwd, candidateId), { recursive: true });
+	for (const file of [
+		candidateProfileFile(cwd, candidateId),
+		candidatePatchFile(cwd, candidateId),
+		candidateScoreFile(cwd, candidateId),
+		candidateHoldOutFile(cwd, candidateId),
+		candidateSummaryFile(cwd, candidateId),
+	]) {
+		await rm(file, { force: true });
+	}
+	await rm(candidateTracesRoot(cwd, candidateId), { recursive: true, force: true });
+}
+
+async function initializeCandidateArtifacts(cwd: string, candidateId: string, profile: QuestProfile, patch: unknown): Promise<void> {
+	await mkdir(candidateDir(cwd, candidateId), { recursive: true });
+	await writeJsonFile(candidateProfileFile(cwd, candidateId), profile);
+	await writeJsonFile(candidatePatchFile(cwd, candidateId), patch);
+}
+
+async function saveCandidateScorecard(cwd: string, candidateId: string, scorecard: QuestCandidateScorecard): Promise<void> {
+	await mkdir(candidateDir(cwd, candidateId), { recursive: true });
+	if (scorecard.split === "search") {
+		await writeJsonFile(candidateScoreFile(cwd, candidateId), scorecard);
+		return;
+	}
+	await writeJsonFile(candidateHoldOutFile(cwd, candidateId), scorecard);
+}
+
+async function saveCandidateSummary(cwd: string, candidateId: string, summary: QuestCandidateSummary): Promise<void> {
+	await mkdir(candidateDir(cwd, candidateId), { recursive: true });
+	await writeJsonFile(candidateSummaryFile(cwd, candidateId), summary);
+}
+
 async function saveCandidateArtifacts(
 	cwd: string,
 	candidateId: string,
@@ -1284,12 +1393,10 @@ async function saveCandidateArtifacts(
 	holdOutScore: QuestCandidateScorecard,
 	summary: QuestCandidateSummary,
 ): Promise<void> {
-	await mkdir(candidateDir(cwd, candidateId), { recursive: true });
-	await writeJsonFile(candidateProfileFile(cwd, candidateId), profile);
-	await writeJsonFile(candidatePatchFile(cwd, candidateId), patch);
-	await writeJsonFile(candidateScoreFile(cwd, candidateId), searchScore);
-	await writeJsonFile(candidateHoldOutFile(cwd, candidateId), holdOutScore);
-	await writeJsonFile(candidateSummaryFile(cwd, candidateId), summary);
+	await initializeCandidateArtifacts(cwd, candidateId, profile, patch);
+	await saveCandidateScorecard(cwd, candidateId, searchScore);
+	await saveCandidateScorecard(cwd, candidateId, holdOutScore);
+	await saveCandidateSummary(cwd, candidateId, summary);
 }
 
 async function stageBenchmarkProfile(cwd: string, profile: QuestProfile): Promise<void> {
@@ -1356,6 +1463,37 @@ async function runBenchmarkSet(
 	return archiveScorecardArtifacts(cwd, candidateId, scorecard);
 }
 
+function isCanonicalCandidateSummary(
+	summary: QuestCandidateSummary | null | undefined,
+	family?: QuestFrontierBenchmarkFamily,
+	dataset?: string,
+): summary is QuestCandidateSummary {
+	if (!summary) return false;
+	if (summary.status === "partial" || summary.status === "failed" || summary.status === "rejected") return false;
+	if (!summary.searchScore || !summary.holdOutScore) return false;
+	if (family && summary.searchScore.family !== family) return false;
+	if (dataset && summary.searchScore.dataset !== dataset) return false;
+	return true;
+}
+
+async function directoryHasEntries(path: string): Promise<boolean> {
+	if (!existsSync(path)) return false;
+	const entries = await readdir(path);
+	return entries.length > 0;
+}
+
+async function candidateHasRunEvidence(cwd: string, candidateId: string): Promise<boolean> {
+	return (
+		existsSync(candidateProfileFile(cwd, candidateId)) ||
+		existsSync(candidatePatchFile(cwd, candidateId)) ||
+		(await directoryHasEntries(benchmarkRoot(cwd, candidateId, "search"))) ||
+		(await directoryHasEntries(benchmarkRoot(cwd, candidateId, "hold-out"))) ||
+		(await directoryHasEntries(candidateTracesRoot(cwd, candidateId))) ||
+		existsSync(candidateScoreFile(cwd, candidateId)) ||
+		existsSync(candidateHoldOutFile(cwd, candidateId))
+	);
+}
+
 function dominates(left: QuestCandidateSummary, right: QuestCandidateSummary): boolean {
 	if (!left.searchScore || !right.searchScore) return false;
 	const betterOrEqual =
@@ -1399,8 +1537,7 @@ async function recomputeFrontier(
 		if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
 		const summary = await loadCandidateSummary(cwd, entry.name);
 		if (!summary) continue;
-		if (summary.status === "rejected") continue;
-		if (summary.searchScore?.family !== family || summary.searchScore?.dataset !== dataset) continue;
+		if (!isCanonicalCandidateSummary(summary, family, dataset)) continue;
 		summaries.push(summary);
 	}
 	const frontierCandidates = summaries.filter((candidate) => !summaries.some((other) => other.candidateId !== candidate.candidateId && dominates(other, candidate)));
@@ -1467,6 +1604,112 @@ function candidateSummaryFromProposal(
 		paretoOptimal: false,
 		failureReason,
 	};
+}
+
+function splitForPhase(phase: QuestTrialPhase): "search" | "hold-out" | undefined {
+	if (phase === "baseline-search" || phase === "search-benchmark") return "search";
+	if (phase === "baseline-hold-out" || phase === "hold-out-benchmark") return "hold-out";
+	return undefined;
+}
+
+function setActiveTrialPhase(
+	state: Awaited<ReturnType<typeof loadQuestTrialState>>,
+	candidateId: string,
+	phase: QuestTrialPhase,
+	summary: string,
+): void {
+	state.status = "running";
+	state.activeRun = {
+		candidateId,
+		phase,
+		split: splitForPhase(phase),
+		startedAt: Date.now(),
+	};
+	state.lastSummary = summary;
+}
+
+async function persistActiveRunPid(
+	cwd: string,
+	state: Awaited<ReturnType<typeof loadQuestTrialState>>,
+	pid: number,
+	onProcessStart?: (pid: number) => void | Promise<void>,
+): Promise<void> {
+	if (state.activeRun) {
+		state.activeRun = {
+			...state.activeRun,
+			pid,
+		};
+		await saveQuestTrialState(cwd, state);
+	}
+	if (onProcessStart) await onProcessStart(pid);
+}
+
+async function resolveCandidateProfileForRecovery(
+	cwd: string,
+	state: Awaited<ReturnType<typeof loadQuestTrialState>>,
+	candidateId: string,
+): Promise<QuestProfile> {
+	return (
+		(await readJsonFile<QuestProfile>(candidateProfileFile(cwd, candidateId))) ??
+		(await loadQuestProfile(cwd, state.activeProfileId, { ensure: true, target: state.target }))
+	);
+}
+
+async function resolveCandidatePatchForRecovery(cwd: string, candidateId: string): Promise<unknown> {
+	return (await readJsonFile<unknown>(candidatePatchFile(cwd, candidateId))) ?? {};
+}
+
+async function materializeIncompleteCandidate(
+	cwd: string,
+	state: Awaited<ReturnType<typeof loadQuestTrialState>>,
+	params: {
+		candidateId: string;
+		source: "baseline" | "proposer";
+		status: "partial" | "failed";
+		summary: string;
+		rationale: string;
+		generalizationNote?: string;
+		targetedTags?: QuestCandidateSummary["targetedTags"];
+		promptSurfaceIds?: QuestCandidateSummary["promptSurfaceIds"];
+		failureReason?: string;
+		searchScore?: QuestCandidateScorecard;
+		holdOutScore?: QuestCandidateScorecard;
+		profile?: QuestProfile;
+		patch?: unknown;
+	},
+): Promise<QuestCandidateSummary | null> {
+	const evidence =
+		params.searchScore ||
+		params.holdOutScore ||
+		(await candidateHasRunEvidence(cwd, params.candidateId)) ||
+		existsSync(candidateSummaryFile(cwd, params.candidateId));
+	if (!evidence) return null;
+
+	const existing = await loadCandidateSummary(cwd, params.candidateId);
+	const profile = params.profile ?? (await resolveCandidateProfileForRecovery(cwd, state, params.candidateId));
+	const patch = params.patch ?? (await resolveCandidatePatchForRecovery(cwd, params.candidateId));
+	await initializeCandidateArtifacts(cwd, params.candidateId, profile, patch);
+	if (params.searchScore) await saveCandidateScorecard(cwd, params.candidateId, params.searchScore);
+	if (params.holdOutScore) await saveCandidateScorecard(cwd, params.candidateId, params.holdOutScore);
+
+	const summary: QuestCandidateSummary = {
+		candidateId: params.candidateId,
+		profileId: profile.id,
+		createdAt: existing?.createdAt ?? Date.now(),
+		source: existing?.source ?? params.source,
+		status: params.status,
+		summary: params.summary,
+		rationale: params.rationale,
+		generalizationNote: params.generalizationNote ?? existing?.generalizationNote,
+		targetedTags: params.targetedTags ?? existing?.targetedTags ?? [],
+		promptSurfaceIds: params.promptSurfaceIds ?? existing?.promptSurfaceIds ?? [],
+		searchScore: params.searchScore ?? existing?.searchScore,
+		holdOutScore: params.holdOutScore ?? existing?.holdOutScore,
+		paretoOptimal: false,
+		failureReason: params.failureReason,
+	};
+	await saveCandidateSummary(cwd, params.candidateId, summary);
+	return summary;
 }
 
 function passesHoldOutGate(candidate: QuestCandidateSummary, leader: QuestCandidateSummary | null): boolean {
@@ -1599,14 +1842,93 @@ export async function prepareTrialBenchmark(
 	return { state, searchSet, holdOutSet, manifest };
 }
 
+async function recoverStaleRunningTrialState(
+	cwd: string,
+	state: Awaited<ReturnType<typeof loadQuestTrialState>>,
+): Promise<{ state: Awaited<ReturnType<typeof loadQuestTrialState>>; frontier: QuestFrontierState | null; leader: QuestCandidateSummary | null }> {
+	if (state.status !== "running") {
+		return { state, frontier: await loadFrontierState(cwd), leader: null };
+	}
+
+	const candidateId = state.activeRun?.candidateId ?? state.currentCandidateId;
+	const candidateSummary = candidateId ? await loadCandidateSummary(cwd, candidateId) : null;
+	const candidateCanonical = isCanonicalCandidateSummary(candidateSummary);
+	const activePid = state.activeRun?.pid;
+	const processAlive = typeof activePid === "number" ? processExists(activePid) : false;
+	const shouldRecover =
+		state.activeRun
+			? !processAlive || !candidateCanonical
+			: candidateId
+				? !candidateCanonical
+				: true;
+	if (!shouldRecover) {
+		return {
+			state,
+			frontier: await loadFrontierState(cwd),
+			leader: candidateCanonical && candidateSummary ? candidateSummary : null,
+		};
+	}
+
+	let partialSummary: QuestCandidateSummary | null = null;
+	if (candidateId && !candidateCanonical) {
+		partialSummary = await materializeIncompleteCandidate(cwd, state, {
+			candidateId,
+			source: candidateId === "000" ? "baseline" : "proposer",
+			status: "partial",
+			summary: `Candidate ${candidateId} recovered from stale running state after ${state.activeRun?.phase ?? "benchmark execution"}.`,
+			rationale: "Preserve partial benchmark artifacts discovered during status recovery.",
+			failureReason:
+				typeof activePid === "number" && !processAlive
+					? `Recovered stale running state after process ${activePid} exited.`
+					: "Recovered stale running state without an active process marker.",
+			searchScore: await readJsonFile<QuestCandidateScorecard>(candidateScoreFile(cwd, candidateId)) ?? undefined,
+			holdOutScore: await readJsonFile<QuestCandidateScorecard>(candidateHoldOutFile(cwd, candidateId)) ?? undefined,
+		});
+	}
+
+	const family = state.benchmarkFamily ?? "terminal-bench";
+	const dataset = state.benchmarkDataset ?? defaultDatasetForFamily(family);
+	const recomputed = await recomputeFrontier(cwd, family, dataset);
+	state.activeRun = undefined;
+	state.status = "stopped";
+	state.currentCandidateId = recomputed.leader?.candidateId;
+	state.frontierCandidateIds = recomputed.frontier.frontierCandidateIds;
+	state.lastSummary =
+		partialSummary?.summary ??
+		(candidateId
+			? `Recovered stale running state for candidate ${candidateId}.`
+			: "Recovered stale running state without an active candidate.");
+	await saveQuestTrialState(cwd, state);
+	return {
+		state,
+		frontier: recomputed.frontier,
+		leader: recomputed.leader,
+	};
+}
+
 export async function collectFrontierTrialStatus(cwd: string): Promise<FrontierTrialStatus> {
-	const state = await loadQuestTrialState(cwd, { ensure: true });
+	const loadedState = await loadQuestTrialState(cwd, { ensure: true });
+	const recovered = await recoverStaleRunningTrialState(cwd, loadedState);
+	const state = recovered.state;
 	const profile = await loadQuestProfile(cwd, state.activeProfileId, { ensure: true, target: state.target });
 	const searchSet = await loadSplit(getQuestTrialPaths(cwd).searchSetFile);
 	const holdOutSet = await loadSplit(getQuestTrialPaths(cwd).holdOutSetFile);
-	const frontier = await loadFrontierState(cwd);
+	const frontier = recovered.frontier ?? (await loadFrontierState(cwd));
 	const communityStats = await loadCommunityStats(cwd);
-	const leader = frontier?.leaderCandidateId ? await loadCandidateSummary(cwd, frontier.leaderCandidateId) : null;
+	const leader = recovered.leader ?? (frontier?.leaderCandidateId ? await loadCandidateSummary(cwd, frontier.leaderCandidateId) : null);
+	if (state.status !== "running") {
+		const expectedLeaderId = frontier?.leaderCandidateId;
+		const expectedFrontierIds = frontier?.frontierCandidateIds ?? [];
+		const currentFrontierIds = state.frontierCandidateIds ?? [];
+		const frontierChanged =
+			currentFrontierIds.length !== expectedFrontierIds.length ||
+			currentFrontierIds.some((candidateId, index) => candidateId !== expectedFrontierIds[index]);
+		if (state.currentCandidateId !== expectedLeaderId || frontierChanged) {
+			state.currentCandidateId = expectedLeaderId;
+			state.frontierCandidateIds = expectedFrontierIds;
+			await saveQuestTrialState(cwd, state);
+		}
+	}
 	return { state, profile, searchSet, holdOutSet, frontier, communityStats, leader };
 }
 
@@ -1624,10 +1946,10 @@ export async function runTrialBaseline(
 	const { state, searchSet, holdOutSet } = await ensurePreparedBenchmark(cwd, options, deps);
 	const existing = await loadCandidateSummary(cwd, "000");
 	if (
-		existing &&
+		isCanonicalCandidateSummary(existing, searchSet.family, searchSet.dataset) &&
 		!options.force &&
-		existing.searchScore?.family === searchSet.family &&
-		existing.searchScore?.dataset === searchSet.dataset
+		existing.holdOutScore?.family === searchSet.family &&
+		existing.holdOutScore?.dataset === holdOutSet.dataset
 	) {
 		const profile = await loadQuestProfile(cwd, state.activeProfileId, { ensure: true, target: state.target });
 		return {
@@ -1640,40 +1962,115 @@ export async function runTrialBaseline(
 
 	const profile = await loadQuestProfile(cwd, state.activeProfileId, { ensure: true, target: state.target });
 	await stageBenchmarkProfile(cwd, profile);
-	await resetCandidateDir(cwd, "000");
-	state.status = "running";
-	state.lastSummary = `Running baseline candidate 000 on ${searchSet.family}:${searchSet.dataset}.`;
-	await saveQuestTrialState(cwd, state);
-	if (options.onSnapshot) {
-		await options.onSnapshot({ role: "trial", phase: "baseline-search", updatedAt: Date.now() });
-	}
+	await prepareBaselineCandidateDir(cwd, "000");
 	const runSet = deps.runBenchmarkSet ?? runBenchmarkSet;
-	const searchScore = await runSet(cwd, modelChoice, profile.id, searchSet, "000", {
-		repo: options.repo,
-		onProcessStart: options.onProcessStart,
-	});
-	if (options.onSnapshot) {
-		await options.onSnapshot({ role: "trial", phase: "baseline-hold-out", updatedAt: Date.now() });
+	await initializeCandidateArtifacts(cwd, "000", profile, {});
+	let searchScore: QuestCandidateScorecard | undefined;
+	let holdOutScore: QuestCandidateScorecard | undefined;
+
+	try {
+		setActiveTrialPhase(state, "000", "baseline-search", `Running baseline candidate 000 on ${searchSet.family}:${searchSet.dataset}.`);
+		await saveQuestTrialState(cwd, state);
+		if (options.onSnapshot) {
+			await options.onSnapshot({ role: "trial", phase: "baseline-search", updatedAt: Date.now() });
+		}
+		searchScore = await runSet(cwd, modelChoice, profile.id, searchSet, "000", {
+			repo: options.repo,
+			onProcessStart: async (pid) => persistActiveRunPid(cwd, state, pid, options.onProcessStart),
+		});
+		await saveCandidateScorecard(cwd, "000", searchScore);
+
+		setActiveTrialPhase(state, "000", "baseline-hold-out", `Running hold-out for baseline candidate 000 on ${holdOutSet.family}:${holdOutSet.dataset}.`);
+		await saveQuestTrialState(cwd, state);
+		if (options.onSnapshot) {
+			await options.onSnapshot({ role: "trial", phase: "baseline-hold-out", updatedAt: Date.now() });
+		}
+		holdOutScore = await runSet(cwd, modelChoice, profile.id, holdOutSet, "000", {
+			repo: options.repo,
+			onProcessStart: async (pid) => persistActiveRunPid(cwd, state, pid, options.onProcessStart),
+		});
+		await saveCandidateScorecard(cwd, "000", holdOutScore);
+
+		const candidate = baselineSummary("000", profile, searchScore, holdOutScore);
+		await saveCandidateSummary(cwd, "000", candidate);
+		const { frontier, leader } = await recomputeFrontier(cwd, searchSet.family, searchSet.dataset);
+		state.currentCandidateId = leader?.candidateId ?? "000";
+		state.frontierCandidateIds = frontier.frontierCandidateIds;
+		state.status = "idle";
+		state.lastSummary = `Baseline archived as candidate 000: ${searchScore.passed}/${searchScore.itemCount} search, ${holdOutScore.passed}/${holdOutScore.itemCount} hold-out.`;
+		await saveQuestProfile(cwd, profile);
+		return {
+			state,
+			profile,
+			summary: state.lastSummary,
+			candidate: (leader && leader.candidateId === "000" ? leader : await loadCandidateSummary(cwd, "000")) ?? candidate,
+		};
+	} catch (error) {
+		if (error instanceof BenchmarkRunInterruptedError) {
+			const partial = await materializeIncompleteCandidate(cwd, state, {
+				candidateId: "000",
+				source: "baseline",
+				status: "partial",
+				summary: `Baseline candidate 000 stopped during ${state.activeRun?.phase ?? "baseline execution"}.`,
+				rationale: "Preserve interrupted baseline benchmark artifacts for inspection before the next rerun.",
+				failureReason: error.message,
+				searchScore,
+				holdOutScore,
+				profile,
+				patch: {},
+			});
+			const { frontier, leader } = await recomputeFrontier(cwd, searchSet.family, searchSet.dataset);
+			state.currentCandidateId = leader?.candidateId;
+			state.frontierCandidateIds = frontier.frontierCandidateIds;
+			state.status = "stopped";
+			state.lastSummary = partial?.summary ?? "Baseline run stopped.";
+			return {
+				state,
+				profile,
+				summary: state.lastSummary,
+				candidate:
+					partial ??
+					({
+						candidateId: "000",
+						profileId: profile.id,
+						createdAt: Date.now(),
+						source: "baseline",
+						status: "partial",
+						summary: state.lastSummary,
+						rationale: "Preserve interrupted baseline benchmark artifacts for inspection before the next rerun.",
+						targetedTags: [],
+						promptSurfaceIds: [],
+						searchScore,
+						holdOutScore,
+						paretoOptimal: false,
+						failureReason: error.message,
+					} satisfies QuestCandidateSummary),
+			};
+		}
+
+		const failed = await materializeIncompleteCandidate(cwd, state, {
+			candidateId: "000",
+			source: "baseline",
+			status: "failed",
+			summary: `Baseline candidate 000 failed during ${state.activeRun?.phase ?? "baseline execution"}.`,
+			rationale: "Preserve failed baseline artifacts while keeping incomplete candidates out of the frontier.",
+			failureReason: error instanceof Error ? error.message : String(error),
+			searchScore,
+			holdOutScore,
+			profile,
+			patch: {},
+		});
+		const { frontier, leader } = await recomputeFrontier(cwd, searchSet.family, searchSet.dataset);
+		state.currentCandidateId = leader?.candidateId;
+		state.frontierCandidateIds = frontier.frontierCandidateIds;
+		state.status = "blocked";
+		state.lastSummary = failed?.summary ?? (error instanceof Error ? error.message : String(error));
+		throw error;
+	} finally {
+		state.activeRun = undefined;
+		if (state.status === "running") state.status = "idle";
+		await saveQuestTrialState(cwd, state);
 	}
-	const holdOutScore = await runSet(cwd, modelChoice, profile.id, holdOutSet, "000", {
-		repo: options.repo,
-		onProcessStart: options.onProcessStart,
-	});
-	const candidate = baselineSummary("000", profile, searchScore, holdOutScore);
-	await saveCandidateArtifacts(cwd, "000", profile, {}, searchScore, holdOutScore, candidate);
-	const { frontier, leader } = await recomputeFrontier(cwd, searchSet.family, searchSet.dataset);
-	state.currentCandidateId = leader?.candidateId ?? "000";
-	state.frontierCandidateIds = frontier.frontierCandidateIds;
-	state.status = "idle";
-	state.lastSummary = `Baseline archived as candidate 000: ${searchScore.passed}/${searchScore.itemCount} search, ${holdOutScore.passed}/${holdOutScore.itemCount} hold-out.`;
-	await saveQuestTrialState(cwd, state);
-	await saveQuestProfile(cwd, profile);
-	return {
-		state,
-		profile,
-		summary: state.lastSummary,
-		candidate: (leader && leader.candidateId === "000" ? leader : await loadCandidateSummary(cwd, "000")) ?? candidate,
-	};
 }
 
 export async function runTrialOptimization(
@@ -1691,7 +2088,18 @@ export async function runTrialOptimization(
 	const iterations = Math.max(1, options.iterations ?? 1);
 	const prepared = await ensurePreparedBenchmark(cwd, options, deps);
 	await ensureCommunityStats(cwd, deps);
-	await runTrialBaseline(cwd, modelChoice, options, deps);
+	const baseline = await runTrialBaseline(cwd, modelChoice, options, deps);
+	if (baseline.state.status !== "idle") {
+		const frontier = (await loadFrontierState(cwd)) ?? initialFrontier();
+		const leader = frontier.leaderCandidateId ? await loadCandidateSummary(cwd, frontier.leaderCandidateId) : null;
+		return {
+			state: baseline.state,
+			profile: baseline.profile,
+			summary: baseline.summary,
+			frontier,
+			leader,
+		};
+	}
 
 	let state = await loadQuestTrialState(cwd, { ensure: true });
 	let frontier = (await loadFrontierState(cwd)) ?? initialFrontier();
@@ -1709,101 +2117,168 @@ export async function runTrialOptimization(
 			throw new Error("Community stats are required for frontier optimization. Run /quest trials analyze-community first.");
 		}
 
-		state.status = "running";
-		state.lastSummary = `Proposer is generating candidate ${candidateId} for ${searchSet.family}:${searchSet.dataset}.`;
-		await saveQuestTrialState(cwd, state);
-		if (options.onSnapshot) {
-			await options.onSnapshot({ role: "proposer", phase: "propose", updatedAt: Date.now() });
-		}
+		let proposal: Awaited<ReturnType<typeof executeTrialProposerAgent>> | undefined;
+		let nextProfile: QuestProfile | undefined;
+		let searchScore: QuestCandidateScorecard | undefined;
+		let holdOutScore: QuestCandidateScorecard | undefined;
 
-		const proposal = await propose(
-			cwd,
-			modelChoice,
-			currentProfile,
-			state.target,
-			{
-				communityStatsPath: getQuestTrialPaths(cwd).communityStatsFile,
-				frontierStatePath: getQuestTrialPaths(cwd).frontierFile,
-				candidatesDir: getQuestTrialPaths(cwd).candidatesDir,
-				searchSetPath: getQuestTrialPaths(cwd).searchSetFile,
-				holdOutSetPath: getQuestTrialPaths(cwd).holdOutSetFile,
-				searchTagSummary: searchSet.tagSummary,
-				holdOutTagSummary: holdOutSet.tagSummary,
-				communityStats,
-				leaderSummary:
-					leader && leader.searchScore
-						? {
-								candidateId: leader.candidateId,
-								summary: leader.summary,
-								searchScore: {
-									meanScore: leader.searchScore.meanScore,
-									totalCost: leader.searchScore.totalCost,
-									totalDurationMs: leader.searchScore.totalDurationMs,
-								},
-								tagBreakdown: leader.searchScore.tagBreakdown,
-								failureCategoryBreakdown: (leader.searchScore.benchmarkMetrics?.failureCategories as Record<string, number> | undefined) ?? undefined,
-							}
-						: undefined,
-			},
-			options.onSnapshot,
-			options.onProcessStart,
-		);
-		if (!proposal.candidate) {
+		try {
+			setActiveTrialPhase(state, candidateId, "propose", `Proposer is generating candidate ${candidateId} for ${searchSet.family}:${searchSet.dataset}.`);
+			await saveQuestTrialState(cwd, state);
+			if (options.onSnapshot) {
+				await options.onSnapshot({ role: "proposer", phase: "propose", updatedAt: Date.now() });
+			}
+
+			proposal = await propose(
+				cwd,
+				modelChoice,
+				currentProfile,
+				state.target,
+				{
+					communityStatsPath: getQuestTrialPaths(cwd).communityStatsFile,
+					frontierStatePath: getQuestTrialPaths(cwd).frontierFile,
+					candidatesDir: getQuestTrialPaths(cwd).candidatesDir,
+					searchSetPath: getQuestTrialPaths(cwd).searchSetFile,
+					holdOutSetPath: getQuestTrialPaths(cwd).holdOutSetFile,
+					searchTagSummary: searchSet.tagSummary,
+					holdOutTagSummary: holdOutSet.tagSummary,
+					communityStats,
+					leaderSummary:
+						leader && leader.searchScore
+							? {
+									candidateId: leader.candidateId,
+									summary: leader.summary,
+									searchScore: {
+										meanScore: leader.searchScore.meanScore,
+										totalCost: leader.searchScore.totalCost,
+										totalDurationMs: leader.searchScore.totalDurationMs,
+									},
+									tagBreakdown: leader.searchScore.tagBreakdown,
+									failureCategoryBreakdown: (leader.searchScore.benchmarkMetrics?.failureCategories as Record<string, number> | undefined) ?? undefined,
+								}
+							: undefined,
+				},
+				options.onSnapshot,
+				async (pid) => persistActiveRunPid(cwd, state, pid, options.onProcessStart),
+			);
+			if (!proposal.candidate) {
+				state.status = "blocked";
+				state.lastSummary = "Proposer did not return a valid profile patch.";
+				throw new Error(state.lastSummary);
+			}
+
+			nextProfile = applyQuestProfilePatch(currentProfile, proposal.candidate.patch);
+			nextProfile.id = `${state.target}-${state.projectId}-candidate-${candidateId}`;
+			nextProfile.updatedAt = Date.now();
+			await stageBenchmarkProfile(cwd, nextProfile);
+			await resetCandidateDir(cwd, candidateId);
+			await initializeCandidateArtifacts(cwd, candidateId, nextProfile, proposal.candidate.patch);
+
+			setActiveTrialPhase(state, candidateId, "search-benchmark", `Running search split for candidate ${candidateId} on ${searchSet.family}:${searchSet.dataset}.`);
+			await saveQuestTrialState(cwd, state);
+			if (options.onSnapshot) {
+				await options.onSnapshot({ role: "trial", phase: "search-benchmark", updatedAt: Date.now() });
+			}
+			searchScore = await runSet(cwd, modelChoice, nextProfile.id, searchSet, candidateId, {
+				repo: options.repo,
+				onProcessStart: async (pid) => persistActiveRunPid(cwd, state, pid, options.onProcessStart),
+			});
+			await saveCandidateScorecard(cwd, candidateId, searchScore);
+
+			setActiveTrialPhase(state, candidateId, "hold-out-benchmark", `Running hold-out split for candidate ${candidateId} on ${holdOutSet.family}:${holdOutSet.dataset}.`);
+			await saveQuestTrialState(cwd, state);
+			if (options.onSnapshot) {
+				await options.onSnapshot({ role: "trial", phase: "hold-out-benchmark", updatedAt: Date.now() });
+			}
+			holdOutScore = await runSet(cwd, modelChoice, nextProfile.id, holdOutSet, candidateId, {
+				repo: options.repo,
+				onProcessStart: async (pid) => persistActiveRunPid(cwd, state, pid, options.onProcessStart),
+			});
+			await saveCandidateScorecard(cwd, candidateId, holdOutScore);
+
+			let summary = candidateSummaryFromProposal(candidateId, nextProfile, proposal.candidate, searchScore, holdOutScore, "accepted");
+			if (!passesHoldOutGate(summary, leader)) {
+				summary = {
+					...summary,
+					status: "rejected",
+					failureReason: "Hold-out score regressed relative to the current leader.",
+				};
+				await saveCandidateSummary(cwd, candidateId, summary);
+				state.lastSummary = `Candidate ${candidateId} rejected: hold-out score regressed.`;
+				await saveQuestTrialState(cwd, state);
+				continue;
+			}
+
+			await saveCandidateSummary(cwd, candidateId, summary);
+			const recomputed = await recomputeFrontier(cwd, searchSet.family, searchSet.dataset);
+			frontier = recomputed.frontier;
+			leader = recomputed.leader;
+			const promotedProfile = await promoteLeaderProfile(cwd, leader);
+			if (promotedProfile) currentProfile = promotedProfile;
+			state.currentCandidateId = leader?.candidateId ?? candidateId;
+			state.frontierCandidateIds = frontier.frontierCandidateIds;
+			state.lastSummary = leader
+				? `Candidate ${candidateId} archived. Leader ${leader.candidateId}: mean=${leader.searchScore?.meanScore.toFixed(3) ?? "0.000"} cost=${leader.searchScore?.totalCost.toFixed(3) ?? "0.000"} duration=${leader.searchScore?.totalDurationMs ?? 0}ms.`
+				: `Candidate ${candidateId} archived.`;
+			await saveQuestTrialState(cwd, state);
+		} catch (error) {
+			if (error instanceof BenchmarkRunInterruptedError) {
+				const partial = await materializeIncompleteCandidate(cwd, state, {
+					candidateId,
+					source: "proposer",
+					status: "partial",
+					summary: `Candidate ${candidateId} stopped during ${state.activeRun?.phase ?? "optimization"}.`,
+					rationale: "Preserve interrupted optimization artifacts for inspection before continuing the frontier search.",
+					generalizationNote: proposal?.candidate?.generalizationNote,
+					targetedTags: proposal?.candidate?.targetedTags,
+					promptSurfaceIds: proposal?.candidate?.promptSurfaceIds,
+					failureReason: error.message,
+					searchScore,
+					holdOutScore,
+					profile: nextProfile,
+					patch: proposal?.candidate?.patch,
+				});
+				const recomputed = await recomputeFrontier(cwd, searchSet.family, searchSet.dataset);
+				frontier = recomputed.frontier;
+				leader = recomputed.leader;
+				state.currentCandidateId = leader?.candidateId;
+				state.frontierCandidateIds = frontier.frontierCandidateIds;
+				state.status = "stopped";
+				state.lastSummary = partial?.summary ?? `Candidate ${candidateId} stopped.`;
+				break;
+			}
+
+			const failed = await materializeIncompleteCandidate(cwd, state, {
+				candidateId,
+				source: "proposer",
+				status: "failed",
+				summary: `Candidate ${candidateId} failed during ${state.activeRun?.phase ?? "optimization"}.`,
+				rationale: "Preserve failed optimization artifacts while keeping incomplete candidates out of the frontier.",
+				generalizationNote: proposal?.candidate?.generalizationNote,
+				targetedTags: proposal?.candidate?.targetedTags,
+				promptSurfaceIds: proposal?.candidate?.promptSurfaceIds,
+				failureReason: error instanceof Error ? error.message : String(error),
+				searchScore,
+				holdOutScore,
+				profile: nextProfile,
+				patch: proposal?.candidate?.patch,
+			});
+			const recomputed = await recomputeFrontier(cwd, searchSet.family, searchSet.dataset);
+			frontier = recomputed.frontier;
+			leader = recomputed.leader;
+			state.currentCandidateId = leader?.candidateId;
+			state.frontierCandidateIds = frontier.frontierCandidateIds;
 			state.status = "blocked";
-			state.lastSummary = "Proposer did not return a valid profile patch.";
+			state.lastSummary = failed?.summary ?? (error instanceof Error ? error.message : String(error));
+			throw error;
+		} finally {
+			state.activeRun = undefined;
 			await saveQuestTrialState(cwd, state);
-			throw new Error(state.lastSummary);
 		}
-
-		const nextProfile = applyQuestProfilePatch(currentProfile, proposal.candidate.patch);
-		nextProfile.id = `${state.target}-${state.projectId}-candidate-${candidateId}`;
-		nextProfile.updatedAt = Date.now();
-		await stageBenchmarkProfile(cwd, nextProfile);
-		await resetCandidateDir(cwd, candidateId);
-		if (options.onSnapshot) {
-			await options.onSnapshot({ role: "trial", phase: "search-benchmark", updatedAt: Date.now() });
-		}
-		const searchScore = await runSet(cwd, modelChoice, nextProfile.id, searchSet, candidateId, {
-			repo: options.repo,
-			onProcessStart: options.onProcessStart,
-		});
-		if (options.onSnapshot) {
-			await options.onSnapshot({ role: "trial", phase: "hold-out-benchmark", updatedAt: Date.now() });
-		}
-		const holdOutScore = await runSet(cwd, modelChoice, nextProfile.id, holdOutSet, candidateId, {
-			repo: options.repo,
-			onProcessStart: options.onProcessStart,
-		});
-		let summary = candidateSummaryFromProposal(candidateId, nextProfile, proposal.candidate, searchScore, holdOutScore, "accepted");
-		if (!passesHoldOutGate(summary, leader)) {
-			summary = {
-				...summary,
-				status: "rejected",
-				failureReason: "Hold-out score regressed relative to the current leader.",
-			};
-			await saveCandidateArtifacts(cwd, candidateId, nextProfile, proposal.candidate.patch, searchScore, holdOutScore, summary);
-			state.lastSummary = `Candidate ${candidateId} rejected: hold-out score regressed.`;
-			await saveQuestTrialState(cwd, state);
-			continue;
-		}
-
-		await saveCandidateArtifacts(cwd, candidateId, nextProfile, proposal.candidate.patch, searchScore, holdOutScore, summary);
-		const recomputed = await recomputeFrontier(cwd, searchSet.family, searchSet.dataset);
-		frontier = recomputed.frontier;
-		leader = recomputed.leader;
-		const promotedProfile = await promoteLeaderProfile(cwd, leader);
-		if (promotedProfile) currentProfile = promotedProfile;
-		state = await loadQuestTrialState(cwd, { ensure: true });
-		state.currentCandidateId = leader?.candidateId ?? candidateId;
-		state.frontierCandidateIds = frontier.frontierCandidateIds;
-		state.lastSummary = leader
-			? `Candidate ${candidateId} archived. Leader ${leader.candidateId}: mean=${leader.searchScore?.meanScore.toFixed(3) ?? "0.000"} cost=${leader.searchScore?.totalCost.toFixed(3) ?? "0.000"} duration=${leader.searchScore?.totalDurationMs ?? 0}ms.`
-			: `Candidate ${candidateId} archived.`;
-		await saveQuestTrialState(cwd, state);
 	}
 
-	state.status = "idle";
-	state.currentCandidateId = leader?.candidateId ?? state.currentCandidateId;
+	if (state.status === "running") state.status = "idle";
+	state.currentCandidateId = leader?.candidateId;
 	state.frontierCandidateIds = frontier.frontierCandidateIds;
 	await saveQuestTrialState(cwd, state);
 	return {

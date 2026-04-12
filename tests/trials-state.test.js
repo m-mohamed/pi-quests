@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { getQuestTrialPaths, loadQuestProfile, loadQuestTrialState, saveQuestProfile } from "../src/state.js";
+import { getQuestTrialPaths, loadQuestProfile, loadQuestTrialState, saveQuestProfile } from "../src/state-core.js";
 
 test("loadQuestTrialState initializes only canonical frontier storage and ignores legacy roots", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-trials-state-"));

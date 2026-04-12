@@ -14,7 +14,7 @@ import {
 	runTrialOptimization,
 	validateHarborAggregateResult,
 } from "../src/frontier-trials.js";
-import { getQuestTrialPaths, loadQuestTrialState, saveQuestTrialState } from "../src/state.js";
+import { getQuestTrialPaths, loadQuestTrialState, saveQuestTrialState } from "../src/state-core.js";
 
 const DEFAULT_MODEL = {
 	provider: "openai-codex",

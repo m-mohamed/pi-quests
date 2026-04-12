@@ -3,7 +3,7 @@ import type { Model } from "@mariozechner/pi-ai";
 import { defaultHumanQaChecklist, synthesizeValidationAssertions } from "./plan-core.js";
 import { defaultQuestProfile } from "./profile-core.js";
 import { describeActiveRun } from "./runtime-core.js";
-import { projectIdFor } from "./state.js";
+import { projectIdFor } from "./state-core.js";
 import { truncate } from "./utils.js";
 import type {
 	LearnedWorkflow,

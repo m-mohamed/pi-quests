@@ -1,6 +1,6 @@
 import { assertInternalMode } from "./internal-mode.js";
 import { defaultInternalQuestProfile } from "./internal-profile-core.js";
-import { loadQuestProfile, loadQuestTrialState } from "./state.js";
+import { loadQuestProfile, loadQuestTrialState } from "./state-core.js";
 import {
 	DEFAULT_HEADLESS_EXECUTORS,
 	runQuestHeadlessExecution,

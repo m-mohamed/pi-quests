@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { runQuestHeadless } from "../src/headless-core.js";
-import { getQuestTelemetryPaths, getQuestTrialPaths, listQuestTraceBundles } from "../src/state.js";
+import { getQuestTelemetryPaths, getQuestTrialPaths, listQuestTraceBundles } from "../src/state-core.js";
 
 const DEFAULT_MODEL = {
 	provider: "openai-codex",

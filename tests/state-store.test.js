@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createQuest, getQuestPaths, loadActiveQuest, loadLearnedWorkflows, loadQuest, saveLearnedWorkflows, saveQuest } from "../src/state.js";
+import { createQuest, getQuestPaths, loadActiveQuest, loadLearnedWorkflows, loadQuest, saveLearnedWorkflows, saveQuest } from "../src/state-core.js";
 
 test("quest state sync writes canonical repo-local artifacts", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-repo-"));

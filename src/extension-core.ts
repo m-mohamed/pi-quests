@@ -1,6 +1,6 @@
 import type { ContextUsage } from "@mariozechner/pi-coding-agent";
 import { resolve } from "node:path";
-import { getQuestPaths } from "./state.js";
+import { getQuestPaths } from "./state-core.js";
 import type { QuestTrialState, QuestState } from "./types.js";
 
 const PROTECTED_QUEST_FILES = new Set([

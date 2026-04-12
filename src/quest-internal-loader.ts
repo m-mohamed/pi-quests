@@ -1,6 +1,6 @@
 import { internalModeEnabled } from "./internal-mode.js";
 import { defaultQuestProfile } from "./profile-core.js";
-import { loadQuestProfile, loadQuestTrialState, projectIdFor } from "./state.js";
+import { loadQuestProfile, loadQuestTrialState, projectIdFor } from "./state-core.js";
 import type { QuestProfile, QuestTrialState } from "./types.js";
 
 export type FrontierTrialsModule = typeof import("./frontier-trials.js");

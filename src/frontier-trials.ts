@@ -8,7 +8,7 @@ import { inspectHarborInstallation } from "./harbor-integrity.js";
 import { resolveHarborPython } from "./harbor-runtime.js";
 import { applyQuestProfilePatch } from "./internal-profile-core.js";
 import { processExists } from "./runtime-core.js";
-import { getQuestTrialPaths, loadQuestProfile, loadQuestTrialState, saveQuestProfile, saveQuestTrialState } from "./state.js";
+import { getQuestTrialPaths, loadQuestProfile, loadQuestTrialState, saveQuestProfile, saveQuestTrialState } from "./state-core.js";
 import { analyzeCommunityTraces, loadCommunityStats, writeCommunityStats } from "./trace-analyzer.js";
 import { compact } from "./utils.js";
 import { executeTrialProposerAgent } from "./workers.js";

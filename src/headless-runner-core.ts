@@ -11,7 +11,7 @@ import {
 	trimRecentRuns,
 	writeQuestTraceBundle,
 	writeWorkerRun,
-} from "./state.js";
+} from "./state-core.js";
 import {
 	executeFeatureWorker,
 	executeQuestPlanner,

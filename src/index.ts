@@ -28,11 +28,8 @@ import { internalModeEnabled } from "./internal-mode.js";
 import { traceBundleFromPlanningSession, traceBundleFromWorkerRun } from "./profile-core.js";
 import { mergeRemainingPlan, parseQuestPlanText, planningInstructions } from "./plan-core.js";
 import {
-	loadFrontierTrials,
 	loadInternalUi,
 	loadRuntimeProfile,
-	type FrontierTrialsModule,
-	type InternalUiModule,
 } from "./quest-internal-loader.js";
 import {
 	activeProfileFor,
@@ -53,7 +50,8 @@ import {
 	syncQuestConfig,
 	synthesizeAssertionsForQuestPlan,
 } from "./quest-runtime-helpers.js";
-import { applyQuestUi as renderQuestUi, summarizeTrials } from "./quest-ui-controller.js";
+import { handleQuestTrialsCommand as runQuestTrialsCommand, openQuestTrialsControl as showQuestTrialsControl } from "./quest-trials-controller.js";
+import { applyQuestUi as renderQuestUi } from "./quest-ui-controller.js";
 import { registerQuestTools } from "./quest-tools.js";
 import { describeActiveRun, markQuestAborted, prepareQuestForResume, terminateQuestProcess } from "./runtime-core.js";
 import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
@@ -322,263 +320,57 @@ export default function questExtension(pi: ExtensionAPI) {
 	}
 
 	async function openQuestTrialsControl(ctx: ExtensionContext) {
-		if (!internalModeEnabled()) {
-			await emitNote(pi, ctx, "Quest Trials is maintainer-only and not part of the public package surface.", "warning");
-			return;
-		}
-		let trials: FrontierTrialsModule;
-		try {
-			trials = await loadFrontierTrials();
-		} catch (error) {
-			await emitNote(pi, ctx, error instanceof Error ? error.message : String(error), "warning");
-			return;
-		}
-		const status = await trials.collectFrontierTrialStatus(ctx.cwd);
-		const summary = trials.summarizeTrialStatus(status);
-		currentTrialState = status.state;
-		currentProfile = status.profile;
-		if (status.state.status !== "running") {
-			activeTrialPid = undefined;
-			trialLiveRun = null;
-		}
-		if (!ctx.hasUI || !ctx.ui.custom) {
-			await emitNote(pi, ctx, summarizeTrials(summary, trialLiveRun));
-			return;
-		}
-
-		let selectedValue: string | null = null;
-		while (true) {
-			const nextStatus = await trials.collectFrontierTrialStatus(ctx.cwd);
-			currentTrialState = nextStatus.state;
-			currentProfile = nextStatus.profile;
-			if (nextStatus.state.status !== "running") {
-				activeTrialPid = undefined;
-				trialLiveRun = null;
-			}
-			let internalUi: InternalUiModule;
-			try {
-				internalUi = await loadInternalUi();
-			} catch (error) {
-				await emitNote(pi, ctx, error instanceof Error ? error.message : String(error), "warning");
-				return;
-			}
-			const actions: ControlPanelAction<"baseline" | "run" | "stop" | "profile" | "refresh">[] =
-				nextStatus.state.status === "running"
-					? [
-							{ key: "s", label: "stop", result: "stop" },
-							{ key: "p", label: "profile", result: "profile" },
-							{ key: "g", label: "refresh", result: "refresh" },
-						]
-					: [
-							{ key: "b", label: "baseline", result: "baseline" },
-							{ key: "r", label: "run", result: "run" },
-							{ key: "p", label: "profile", result: "profile" },
-							{ key: "g", label: "refresh", result: "refresh" },
-						];
-			const outcome: ControlPanelOutcome<"baseline" | "run" | "stop" | "profile" | "refresh"> | null = await openControlPanel(ctx, {
-				title: "Quest Trials",
-				subtitle: `${nextStatus.state.status} · ${nextStatus.profile.id}`,
-				items: internalUi.buildTrialsControlItems(nextStatus.state, nextStatus.profile.id, trialLiveRun),
-				selectedValue,
-				actions,
-			});
-			if (!outcome || outcome.action === "close") return;
-			selectedValue = outcome.selectedValue;
-			if (outcome.action === "refresh") continue;
-			await handleQuestTrialsCommand(outcome.action, ctx);
-		}
+		await showQuestTrialsControl({
+			pi,
+			ctx,
+			currentQuest,
+			currentTrialState,
+			currentProfile,
+			trialLiveRun,
+			activeTrialPid,
+			setCurrentTrialState: (state) => {
+				currentTrialState = state;
+			},
+			setCurrentProfile: (profile) => {
+				currentProfile = profile;
+			},
+			setTrialLiveRun: (snapshot) => {
+				trialLiveRun = snapshot;
+			},
+			setActiveTrialPid: (pid) => {
+				activeTrialPid = pid;
+			},
+			emitNote: async (content, level = "info") => emitNote(pi, ctx, content, level),
+			applyQuestUi: async () => applyQuestUi(ctx, currentQuest),
+			internalModeEnabled: internalModeEnabled(),
+		});
 	}
 
 	async function handleQuestTrialsCommand(args: string, ctx: ExtensionContext) {
-		if (!internalModeEnabled()) {
-			await emitNote(pi, ctx, "Quest Trials is maintainer-only and not part of the public package surface.", "warning");
-			return;
-		}
-		let trials: FrontierTrialsModule;
-		try {
-			trials = await loadFrontierTrials();
-		} catch (error) {
-			await emitNote(pi, ctx, error instanceof Error ? error.message : String(error), "warning");
-			return;
-		}
-		const trimmed = args.trim();
-		const readFlag = (flag: string): string | undefined => {
-			const parts = trimmed.split(/\s+/);
-			const index = parts.indexOf(flag);
-			return index >= 0 ? parts[index + 1] : undefined;
-		};
-		const hasFlag = (flag: string): boolean => trimmed.split(/\s+/).includes(flag);
-		const status = await trials.collectFrontierTrialStatus(ctx.cwd);
-		currentTrialState = status.state;
-		currentProfile = status.profile;
-		if (status.state.status !== "running") {
-			activeTrialPid = undefined;
-			trialLiveRun = null;
-		}
-
-		if (!trimmed) {
-			await emitNote(pi, ctx, trials.summarizeTrialStatus(status));
-			return;
-		}
-
-		const [subcommand, ...rest] = trimmed.split(/\s+/);
-		const remainder = rest.join(" ").trim();
-		const requestedBenchmark = readFlag("--benchmark");
-		if (requestedBenchmark && requestedBenchmark !== "terminal-bench" && requestedBenchmark !== "slopcodebench") {
-			await emitNote(pi, ctx, "Unsupported benchmark family. Use --benchmark terminal-bench or --benchmark slopcodebench.", "warning");
-			return;
-		}
-		const benchmark = requestedBenchmark as "terminal-bench" | "slopcodebench" | undefined;
-		const dataset = readFlag("--dataset") ?? (remainder && !remainder.startsWith("--") ? remainder : undefined);
-		const repo = readFlag("--repo");
-
-		switch (subcommand) {
-			case "run": {
-				if (currentTrialState.status === "running") {
-					await emitNote(pi, ctx, "Trials are already running.", "warning");
-					return;
-				}
-				const modelChoice =
-					currentQuest && currentQuest.status !== "completed" && currentQuest.status !== "aborted"
-						? currentOrDefaultModel(currentQuest, "orchestrator")
-						: createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
-				const iterations = Number(readFlag("--iterations") ?? "1");
-				try {
-					const result = await trials.runTrialOptimization(
-						ctx.cwd,
-						modelChoice,
-						{
-							benchmark,
-							dataset,
-							repo,
-							force: hasFlag("--force"),
-							iterations: Number.isFinite(iterations) && iterations > 0 ? iterations : 1,
-							onSnapshot: async (snapshotUpdate) => {
-								trialLiveRun = snapshotUpdate;
-								await applyQuestUi(ctx, currentQuest);
-							},
-							onProcessStart: async (pid) => {
-								activeTrialPid = pid;
-							},
-						},
-					);
-					currentTrialState = result.state;
-					currentProfile = result.profile;
-					await emitNote(pi, ctx, result.summary);
-					return;
-				} finally {
-					activeTrialPid = undefined;
-					trialLiveRun = null;
-					const nextStatus = await trials.collectFrontierTrialStatus(ctx.cwd);
-					currentTrialState = nextStatus.state;
-					currentProfile = nextStatus.profile;
-					await applyQuestUi(ctx, currentQuest);
-				}
-			}
-
-			case "stop": {
-				const persistedState = await loadQuestTrialState(ctx.cwd, { ensure: true });
-				const activePid = persistedState.activeRun?.pid ?? activeTrialPid;
-				if (typeof activePid === "number") {
-					await terminateQuestProcess(activePid);
-				}
-				activeTrialPid = undefined;
-				trialLiveRun = null;
-				persistedState.activeRun = undefined;
-				persistedState.status = "stopped";
-				persistedState.lastSummary = "Trials stopped by operator.";
-				await saveQuestTrialState(ctx.cwd, persistedState);
-				currentTrialState = persistedState;
-				await applyQuestUi(ctx, currentQuest);
-				await emitNote(pi, ctx, "Trials stopped.", "warning");
-				return;
-			}
-
-			case "prepare-benchmark": {
-				const prepared = await trials.prepareTrialBenchmark(ctx.cwd, { benchmark, dataset, repo, force: hasFlag("--force") });
-				currentTrialState = prepared.state;
-				await emitNote(
-					pi,
-					ctx,
-					`Prepared ${prepared.manifest.family}:${prepared.manifest.dataset}: ${prepared.searchSet.totalItems} search / ${prepared.holdOutSet.totalItems} hold-out items.\nNext: /quest trials baseline${benchmark ? ` --benchmark ${benchmark}` : ""}${dataset ? ` --dataset ${dataset}` : ""}${repo ? ` --repo ${repo}` : ""}`,
-				);
-				return;
-			}
-
-			case "analyze-community": {
-				const stats = await trials.analyzeTrialCommunity(ctx.cwd, hasFlag("--force"));
-				await emitNote(
-					pi,
-					ctx,
-					`Analyzed community traces: ${stats.parsedSessions}/${stats.totalSessions} valid Pi sessions across ${Object.keys(stats.sources).length} source(s).`,
-				);
-				return;
-			}
-
-			case "baseline": {
-				if (currentTrialState.status === "running") {
-					await emitNote(pi, ctx, "Trials are already running.", "warning");
-					return;
-				}
-				const modelChoice =
-					currentQuest && currentQuest.status !== "completed" && currentQuest.status !== "aborted"
-						? currentOrDefaultModel(currentQuest, "orchestrator")
-						: createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
-				try {
-					const result = await trials.runTrialBaseline(
-						ctx.cwd,
-						modelChoice,
-						{
-							benchmark,
-							dataset,
-							repo,
-							force: hasFlag("--force"),
-							onSnapshot: async (snapshotUpdate) => {
-								trialLiveRun = snapshotUpdate;
-								await applyQuestUi(ctx, currentQuest);
-							},
-							onProcessStart: async (pid) => {
-								activeTrialPid = pid;
-							},
-						},
-					);
-					currentTrialState = result.state;
-					currentProfile = result.profile;
-					await emitNote(pi, ctx, result.summary);
-					return;
-				} finally {
-					activeTrialPid = undefined;
-					trialLiveRun = null;
-					const nextStatus = await trials.collectFrontierTrialStatus(ctx.cwd);
-					currentTrialState = nextStatus.state;
-					currentProfile = nextStatus.profile;
-					await applyQuestUi(ctx, currentQuest);
-				}
-			}
-
-			case "status": {
-				await emitNote(pi, ctx, trials.summarizeTrialStatus(await trials.collectFrontierTrialStatus(ctx.cwd)));
-				return;
-			}
-
-			case "profile": {
-				await emitNote(
-					pi,
-					ctx,
-					`Trials profile ${status.profile.id}\n- target: ${status.profile.target}\n- adopted changes: ${status.profile.adoptedChanges.length}\n- same-model bias: ${status.profile.modelPolicy.preferSameModelFamily}\n- spill-to-reports: ${status.profile.contextPolicy.spillLongOutputsToReports}\n- frontier size: ${status.frontier?.frontierCandidateIds.length ?? 0}`,
-				);
-				return;
-			}
-
-			default: {
-				await emitNote(
-					pi,
-					ctx,
-					"Unknown /quest trials subcommand. Use /quest trials status, /quest trials prepare-benchmark, /quest trials analyze-community, /quest trials baseline, /quest trials run, /quest trials stop, or /quest trials profile.",
-					"warning",
-				);
-			}
-		}
+		await runQuestTrialsCommand(args, {
+			pi,
+			ctx,
+			currentQuest,
+			currentTrialState,
+			currentProfile,
+			trialLiveRun,
+			activeTrialPid,
+			setCurrentTrialState: (state) => {
+				currentTrialState = state;
+			},
+			setCurrentProfile: (profile) => {
+				currentProfile = profile;
+			},
+			setTrialLiveRun: (snapshot) => {
+				trialLiveRun = snapshot;
+			},
+			setActiveTrialPid: (pid) => {
+				activeTrialPid = pid;
+			},
+			emitNote: async (content, level = "info") => emitNote(pi, ctx, content, level),
+			applyQuestUi: async () => applyQuestUi(ctx, currentQuest),
+			internalModeEnabled: internalModeEnabled(),
+		});
 	}
 
 	async function queueSteeringNote(ctx: ExtensionContext, quest: QuestState, note: string, source: "command" | "quest-mode"): Promise<QuestState> {

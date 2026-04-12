@@ -21,6 +21,7 @@
     "src/quest-headless.ts",
     "src/quest-internal-loader.ts",
     "src/quest-runtime-helpers.ts",
+    "src/quest-trials-controller.ts",
     "src/quest-tools.ts",
     "src/quest-ui-controller.ts",
     "src/runtime-core.ts",

@@ -810,6 +810,8 @@ function workerRunFromResult(
 ): WorkerRunRecord {
 	return {
 		id: randomUUID(),
+		sessionId: result.sessionId,
+		sessionFile: result.sessionFile,
 		role,
 		startedAt,
 		endedAt: Date.now(),

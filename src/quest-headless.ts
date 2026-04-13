@@ -49,7 +49,7 @@ Options:
   --cwd <path>                     Working directory (default: current directory)
   --model <provider/model>         Model to use (default: zai/glm-5.1)
   --thinking <level>               Thinking level (default: high)
-  --timeout-ms <ms>                Soft timeout budget in milliseconds
+  --timeout-ms <ms>                Execution timeout budget in milliseconds
   --dry-run                        Stop after proposal generation
   --no-auto-accept                 Keep the quest at proposal_ready
   --json                           Print machine-readable JSON to stdout

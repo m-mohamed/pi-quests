@@ -8,11 +8,11 @@ import { loadQuestTrialState, saveQuestTrialState } from "./state-core.js";
 import type { LiveRunSnapshot, QuestProfile, QuestState, QuestTrialState, ThinkingLevel } from "./types.js";
 
 interface MutableTrialsState {
-	currentQuest: QuestState | null;
-	currentTrialState: QuestTrialState | null;
-	currentProfile: QuestProfile | null;
-	trialLiveRun: LiveRunSnapshot | null;
-	activeTrialPid?: number;
+	getCurrentQuest: () => QuestState | null;
+	getCurrentTrialState: () => QuestTrialState | null;
+	getCurrentProfile: () => QuestProfile | null;
+	getTrialLiveRun: () => LiveRunSnapshot | null;
+	getActiveTrialPid: () => number | undefined;
 	setCurrentTrialState: (state: QuestTrialState) => void;
 	setCurrentProfile: (profile: QuestProfile) => void;
 	setTrialLiveRun: (snapshot: LiveRunSnapshot | null) => void;
@@ -25,6 +25,8 @@ interface QuestTrialsControllerDeps extends MutableTrialsState {
 	emitNote: (content: string, level?: "info" | "warning" | "error") => Promise<void>;
 	applyQuestUi: () => Promise<void>;
 	internalModeEnabled: boolean;
+	loadFrontierTrials?: typeof loadFrontierTrials;
+	loadInternalUi?: typeof loadInternalUi;
 }
 
 function syncTrialStatus(state: MutableTrialsState, trialState: QuestTrialState, profile: QuestProfile): void {
@@ -43,7 +45,7 @@ export async function openQuestTrialsControl(deps: QuestTrialsControllerDeps): P
 	}
 	let trials;
 	try {
-		trials = await loadFrontierTrials();
+		trials = await (deps.loadFrontierTrials ?? loadFrontierTrials)();
 	} catch (error) {
 		await deps.emitNote(error instanceof Error ? error.message : String(error), "warning");
 		return;
@@ -51,7 +53,7 @@ export async function openQuestTrialsControl(deps: QuestTrialsControllerDeps): P
 	const status = await trials.collectFrontierTrialStatus(deps.ctx.cwd);
 	syncTrialStatus(deps, status.state, status.profile);
 	if (!deps.ctx.hasUI || !deps.ctx.ui.custom) {
-		await deps.emitNote(summarizeTrials(trials.summarizeTrialStatus(status), deps.trialLiveRun));
+		await deps.emitNote(summarizeTrials(trials.summarizeTrialStatus(status), deps.getTrialLiveRun()));
 		return;
 	}
 
@@ -61,7 +63,7 @@ export async function openQuestTrialsControl(deps: QuestTrialsControllerDeps): P
 		syncTrialStatus(deps, nextStatus.state, nextStatus.profile);
 		let internalUi;
 		try {
-			internalUi = await loadInternalUi();
+			internalUi = await (deps.loadInternalUi ?? loadInternalUi)();
 		} catch (error) {
 			await deps.emitNote(error instanceof Error ? error.message : String(error), "warning");
 			return;
@@ -82,7 +84,7 @@ export async function openQuestTrialsControl(deps: QuestTrialsControllerDeps): P
 		const outcome: ControlPanelOutcome<"baseline" | "run" | "stop" | "profile" | "refresh"> | null = await openControlPanel(deps.ctx, {
 			title: "Quest Trials",
 			subtitle: `${nextStatus.state.status} · ${nextStatus.profile.id}`,
-			items: internalUi.buildTrialsControlItems(nextStatus.state, nextStatus.profile.id, deps.trialLiveRun),
+			items: internalUi.buildTrialsControlItems(nextStatus.state, nextStatus.profile.id, deps.getTrialLiveRun()),
 			selectedValue,
 			actions,
 		});
@@ -100,7 +102,7 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 	}
 	let trials;
 	try {
-		trials = await loadFrontierTrials();
+		trials = await (deps.loadFrontierTrials ?? loadFrontierTrials)();
 	} catch (error) {
 		await deps.emitNote(error instanceof Error ? error.message : String(error), "warning");
 		return;
@@ -133,13 +135,14 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 
 	switch (subcommand) {
 		case "run": {
-			if (deps.currentTrialState?.status === "running") {
+			if (deps.getCurrentTrialState()?.status === "running") {
 				await deps.emitNote("Trials are already running.", "warning");
 				return;
 			}
+			const currentQuest = deps.getCurrentQuest();
 			const modelChoice =
-				deps.currentQuest && deps.currentQuest.status !== "completed" && deps.currentQuest.status !== "aborted"
-					? currentOrDefaultModel(deps.currentQuest, "orchestrator")
+				currentQuest && currentQuest.status !== "completed" && currentQuest.status !== "aborted"
+					? currentOrDefaultModel(currentQuest, "orchestrator")
 					: createDefaultModelChoice(deps.ctx.model ?? null, deps.pi.getThinkingLevel() as ThinkingLevel);
 			const iterations = Number(readFlag("--iterations") ?? "1");
 			try {
@@ -171,7 +174,7 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 
 		case "stop": {
 			const persistedState = await loadQuestTrialState(deps.ctx.cwd, { ensure: true });
-			const activePid = persistedState.activeRun?.pid ?? deps.activeTrialPid;
+			const activePid = persistedState.activeRun?.pid ?? deps.getActiveTrialPid();
 			if (typeof activePid === "number") {
 				await terminateQuestProcess(activePid);
 			}
@@ -190,6 +193,7 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 		case "prepare-benchmark": {
 			const prepared = await trials.prepareTrialBenchmark(deps.ctx.cwd, { benchmark, dataset, repo, force: hasFlag("--force") });
 			deps.setCurrentTrialState(prepared.state);
+			await deps.applyQuestUi();
 			await deps.emitNote(
 				`Prepared ${prepared.manifest.family}:${prepared.manifest.dataset}: ${prepared.searchSet.totalItems} search / ${prepared.holdOutSet.totalItems} hold-out items.\nNext: /quest trials baseline${benchmark ? ` --benchmark ${benchmark}` : ""}${dataset ? ` --dataset ${dataset}` : ""}${repo ? ` --repo ${repo}` : ""}`,
 			);
@@ -203,13 +207,14 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 		}
 
 		case "baseline": {
-			if (deps.currentTrialState?.status === "running") {
+			if (deps.getCurrentTrialState()?.status === "running") {
 				await deps.emitNote("Trials are already running.", "warning");
 				return;
 			}
+			const currentQuest = deps.getCurrentQuest();
 			const modelChoice =
-				deps.currentQuest && deps.currentQuest.status !== "completed" && deps.currentQuest.status !== "aborted"
-					? currentOrDefaultModel(deps.currentQuest, "orchestrator")
+				currentQuest && currentQuest.status !== "completed" && currentQuest.status !== "aborted"
+					? currentOrDefaultModel(currentQuest, "orchestrator")
 					: createDefaultModelChoice(deps.ctx.model ?? null, deps.pi.getThinkingLevel() as ThinkingLevel);
 			try {
 				const result = await trials.runTrialBaseline(deps.ctx.cwd, modelChoice, {

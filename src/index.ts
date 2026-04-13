@@ -323,11 +323,11 @@ export default function questExtension(pi: ExtensionAPI) {
 		await showQuestTrialsControl({
 			pi,
 			ctx,
-			currentQuest,
-			currentTrialState,
-			currentProfile,
-			trialLiveRun,
-			activeTrialPid,
+			getCurrentQuest: () => currentQuest,
+			getCurrentTrialState: () => currentTrialState,
+			getCurrentProfile: () => currentProfile,
+			getTrialLiveRun: () => trialLiveRun,
+			getActiveTrialPid: () => activeTrialPid,
 			setCurrentTrialState: (state) => {
 				currentTrialState = state;
 			},
@@ -350,11 +350,11 @@ export default function questExtension(pi: ExtensionAPI) {
 		await runQuestTrialsCommand(args, {
 			pi,
 			ctx,
-			currentQuest,
-			currentTrialState,
-			currentProfile,
-			trialLiveRun,
-			activeTrialPid,
+			getCurrentQuest: () => currentQuest,
+			getCurrentTrialState: () => currentTrialState,
+			getCurrentProfile: () => currentProfile,
+			getTrialLiveRun: () => trialLiveRun,
+			getActiveTrialPid: () => activeTrialPid,
 			setCurrentTrialState: (state) => {
 				currentTrialState = state;
 			},

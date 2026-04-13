@@ -277,13 +277,15 @@ export function traceBundleFromWorkerRun(quest: QuestState, run: WorkerRunRecord
 	const tags = deriveFailureTagsFromText(evidence, run, quest, profile);
 	const validatorFindings = run.role === "validator" ? run.issues ?? [] : [];
 
-	return {
-		id: randomUUID(),
-		traceVersion: TRACE_VERSION,
-		projectId: quest.projectId,
-		questId: quest.id,
-		runId: run.id,
-		role: run.role,
+		return {
+			id: randomUUID(),
+			traceVersion: TRACE_VERSION,
+			projectId: quest.projectId,
+			questId: quest.id,
+			runId: run.id,
+			sessionId: run.sessionId,
+			sessionFile: run.sessionFile,
+			role: run.role,
 		kind: run.role === "worker" ? "feature" : run.role === "validator" ? (run.phase === "readiness" ? "readiness" : "validator") : "replan",
 		featureId: run.featureId,
 		milestoneId: run.milestoneId,

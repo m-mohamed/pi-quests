@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { defaultQuestProfile, normalizeQuestProfile } from "./profile-core.js";
 import type {
@@ -321,19 +321,32 @@ ${workflow.evidence.length ? workflow.evidence.map((line) => `- ${line}`).join("
 	}
 }
 
+async function writeAtomicFile(path: string, contents: string): Promise<void> {
+	const tempPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
+	try {
+		await writeFile(tempPath, contents, "utf-8");
+		await rename(tempPath, path);
+	} catch (error) {
+		await rm(tempPath, { force: true }).catch(() => {});
+		throw error;
+	}
+}
+
 async function syncQuestArtifacts(quest: QuestState): Promise<void> {
 	const paths = await ensureQuestDir(quest.cwd, quest.id);
-	await writeFile(paths.questFile, `${JSON.stringify(quest, null, 2)}\n`, "utf-8");
-	await writeFile(paths.proposalFile, `${proposalMarkdown(quest).trimEnd()}\n`, "utf-8");
-	await writeFile(paths.validationReadinessFile, `${JSON.stringify(quest.validationReadiness ?? { summary: "", checks: [] }, null, 2)}\n`, "utf-8");
-	await writeFile(paths.validationContractFile, `${validationContractMarkdown(quest).trimEnd()}\n`, "utf-8");
-	await writeFile(
-		paths.validationStateFile,
-		`${JSON.stringify(quest.validationState ?? { assertions: [], updatedAt: Date.now() }, null, 2)}\n`,
-		"utf-8",
-	);
-	await writeFile(paths.featuresFile, `${JSON.stringify(quest.plan?.features ?? [], null, 2)}\n`, "utf-8");
-	await writeFile(paths.servicesFile, `${servicesYaml(quest)}\n`, "utf-8");
+	const stagedWrites: Array<[string, string]> = [
+		[paths.proposalFile, `${proposalMarkdown(quest).trimEnd()}\n`],
+		[paths.validationReadinessFile, `${JSON.stringify(quest.validationReadiness ?? { summary: "", checks: [] }, null, 2)}\n`],
+		[paths.validationContractFile, `${validationContractMarkdown(quest).trimEnd()}\n`],
+		[paths.validationStateFile, `${JSON.stringify(quest.validationState ?? { assertions: [], updatedAt: Date.now() }, null, 2)}\n`],
+		[paths.featuresFile, `${JSON.stringify(quest.plan?.features ?? [], null, 2)}\n`],
+		[paths.servicesFile, `${servicesYaml(quest)}\n`],
+		// Write the canonical quest object last so its timestamp becomes the commit point for derived projections.
+		[paths.questFile, `${JSON.stringify(quest, null, 2)}\n`],
+	];
+	for (const [path, contents] of stagedWrites) {
+		await writeAtomicFile(path, contents);
+	}
 }
 
 function normalizeQuest(quest: QuestState): QuestState {

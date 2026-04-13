@@ -497,6 +497,8 @@ export interface QuestInterruption {
 
 export interface WorkerRunRecord {
 	id: string;
+	sessionId?: string;
+	sessionFile?: string;
 	role: QuestRole;
 	featureId?: string;
 	milestoneId?: string;
@@ -536,6 +538,8 @@ export interface QuestTraceBundle {
 	projectId: string;
 	questId?: string;
 	runId?: string;
+	sessionId?: string;
+	sessionFile?: string;
 	role: QuestRole;
 	kind: ActiveRunKind | "planning";
 	featureId?: string;

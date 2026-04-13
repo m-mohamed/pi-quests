@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -73,6 +74,8 @@ test("quest state sync writes canonical repo-local artifacts", async () => {
 
 		const servicesYaml = await readFile(paths.servicesFile, "utf-8");
 		assert.match(servicesYaml, /name: web/);
+		const stagedTemps = (await readdir(paths.questDir)).filter((entry) => entry.includes(".tmp-"));
+		assert.deepEqual(stagedTemps, []);
 
 		const loaded = await loadQuest(cwd, quest.id);
 		const active = await loadActiveQuest(cwd);

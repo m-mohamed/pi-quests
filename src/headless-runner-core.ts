@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { traceBundleFromPlanningSession, traceBundleFromWorkerRun } from "./profile-core.js";
 import { synthesizeValidationAssertions } from "./plan-core.js";
+import { terminateQuestProcess } from "./runtime-core.js";
 import {
 	createQuest,
 	getQuestPaths,
@@ -72,6 +73,10 @@ export const DEFAULT_HEADLESS_EXECUTORS: QuestHeadlessExecutors = {
 	worker: executeFeatureWorker,
 	validator: executeValidator,
 };
+
+type TimedStepResult<T> =
+	| { timedOut: false; value: T }
+	| { timedOut: true; timeoutReason: string };
 
 function benchmarkContext(
 	input: QuestHeadlessExecutionInput["benchmark"],
@@ -258,6 +263,7 @@ function resultArtifactPaths(quest: QuestState, resultFile: string): Record<stri
 	return {
 		quest: paths.questFile,
 		proposal: paths.proposalFile,
+		validationContract: paths.validationContractFile,
 		validationReadiness: paths.validationReadinessFile,
 		validationState: paths.validationStateFile,
 		features: paths.featuresFile,
@@ -272,6 +278,65 @@ async function persistResultFile(quest: QuestState, payload: QuestHeadlessExecut
 	const file = join(paths.questDir, "headless-run.json");
 	await writeFile(file, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
 	return file;
+}
+
+function timeoutReasonFor(timeoutMs: number | undefined, stepLabel: string): string {
+	return `Exceeded ${timeoutMs ?? 0}ms during ${stepLabel}.`;
+}
+
+async function runStepWithDeadline<T>(
+	stepLabel: string,
+	deadline: number | undefined,
+	timeoutMs: number | undefined,
+	invoke: (onProcessStart?: (pid: number) => void | Promise<void>) => Promise<T>,
+): Promise<TimedStepResult<T>> {
+	if (!deadline) {
+		return { timedOut: false, value: await invoke(undefined) };
+	}
+	const remainingMs = deadline - Date.now();
+	if (remainingMs <= 0) {
+		return {
+			timedOut: true,
+			timeoutReason: timeoutReasonFor(timeoutMs, stepLabel),
+		};
+	}
+
+	let activePid: number | undefined;
+	let settled = false;
+	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+	return new Promise<TimedStepResult<T>>((resolve, reject) => {
+		const finish = (result: TimedStepResult<T>) => {
+			if (settled) return;
+			settled = true;
+			if (timeoutHandle) clearTimeout(timeoutHandle);
+			resolve(result);
+		};
+
+		timeoutHandle = setTimeout(() => {
+			void (async () => {
+				if (typeof activePid === "number") {
+					await terminateQuestProcess(activePid);
+				}
+				finish({
+					timedOut: true,
+					timeoutReason: timeoutReasonFor(timeoutMs, stepLabel),
+				});
+			})();
+		}, remainingMs);
+
+		void invoke(async (pid) => {
+			activePid = pid;
+		}).then(
+			(value) => {
+				finish({ timedOut: false, value });
+			},
+			(error) => {
+				if (settled) return;
+				if (timeoutHandle) clearTimeout(timeoutHandle);
+				reject(error);
+			},
+		);
+	});
 }
 
 export async function runQuestHeadlessExecution(
@@ -296,13 +361,43 @@ export async function runQuestHeadlessExecution(
 	const startedAt = Date.now();
 	const benchmarkFastPath = Boolean(benchmark);
 	let failureCategory: string | undefined;
+	const deadline = input.timeoutMs ? startedAt + input.timeoutMs : undefined;
+
+	const finalizeTimeout = async (timeoutReason: string): Promise<QuestHeadlessExecutionResult> => {
+		quest.status = "blocked";
+		quest.shipReadiness = "not_ready";
+		quest.lastError = timeoutReason;
+		quest.lastSummary = timeoutReason;
+		await saveQuest(quest);
+		failureCategory = benchmark ? inferBenchmarkFailureCategory("timeout", executionFindings, quest.lastSummary, timeoutReason) : undefined;
+		const timeoutResult: QuestHeadlessExecutionResult = {
+			status: "timeout",
+			summary: nextSummary("timeout", quest, validatorFindings, benchmark),
+			questId: quest.id,
+			profileId: resolvedProfile.id,
+			traceBundleIds,
+			validatorFindings,
+			executionFindings,
+			timeoutReason,
+			failureCategory,
+			artifactPaths: {},
+			benchmark: benchmark ? { ...benchmark } : undefined,
+		};
+		const resultFile = await persistResultFile(quest, timeoutResult);
+		timeoutResult.artifactPaths = resultArtifactPaths(quest, resultFile);
+		return timeoutResult;
+	};
 
 	let readiness: ValidationReadiness | null = benchmark ? benchmarkFastPathReadiness(benchmark) : null;
 	if (benchmarkFastPath && readiness) {
 		quest.validationReadiness = readiness;
 	}
 	if (!input.dryRun && !benchmarkFastPath) {
-		const probe = await executors.probe(input.cwd, input.modelChoice, resolvedProfile, benchmark, undefined, undefined);
+		const probeStep = await runStepWithDeadline("validation readiness", deadline, input.timeoutMs, (onProcessStart) =>
+			executors.probe(input.cwd, input.modelChoice, resolvedProfile, benchmark, undefined, onProcessStart),
+		);
+		if (probeStep.timedOut) return finalizeTimeout(probeStep.timeoutReason);
+		const probe = probeStep.value;
 		readiness = probe.readiness;
 		quest.validationReadiness = probe.readiness ?? quest.validationReadiness;
 		if (probe.servicesYaml) quest.servicesYaml = probe.servicesYaml;
@@ -317,7 +412,11 @@ export async function runQuestHeadlessExecution(
 	let plan = fallbackPlan(input.instruction, readiness, benchmarkFastPath);
 	if (!input.dryRun && !benchmarkFastPath) {
 		const planningStartedAt = Date.now();
-		const planned = await executors.planner(input.cwd, input.instruction, input.modelChoice, readiness, resolvedProfile, benchmark);
+		const planningStep = await runStepWithDeadline("planning", deadline, input.timeoutMs, (onProcessStart) =>
+			executors.planner(input.cwd, input.instruction, input.modelChoice, readiness, resolvedProfile, benchmark, undefined, onProcessStart),
+		);
+		if (planningStep.timedOut) return finalizeTimeout(planningStep.timeoutReason);
+		const planned = planningStep.value;
 		quest.recentRuns = trimRecentRuns([planned.run, ...quest.recentRuns]);
 		appendFindings(executionFindings, workerExecutionFindings(planned.run));
 		await writeWorkerRun(quest.cwd, quest.id, planned.run);
@@ -350,6 +449,9 @@ export async function runQuestHeadlessExecution(
 		requestIds: [],
 	});
 	quest.validationState = { assertions: synthesizeValidationAssertions(quest.plan.milestones, quest.plan.features), updatedAt: Date.now() };
+	quest.status = "proposal_ready";
+	quest.lastError = undefined;
+	quest.lastSummary = "Quest proposal is ready for review.";
 	await saveQuest(quest);
 
 	if (!autoAccept || input.dryRun) {
@@ -374,29 +476,9 @@ export async function runQuestHeadlessExecution(
 	quest.startedAt = startedAt;
 	await saveQuest(quest);
 
-	const deadline = input.timeoutMs ? startedAt + input.timeoutMs : undefined;
-
 	for (const milestone of currentMilestones(quest)) {
 		if (deadline && Date.now() > deadline) {
-			failureCategory = benchmark
-				? inferBenchmarkFailureCategory("timeout", executionFindings, quest.lastSummary, `Exceeded ${input.timeoutMs}ms before finishing the quest.`)
-				: undefined;
-			const timeoutResult: QuestHeadlessExecutionResult = {
-				status: "timeout",
-				summary: nextSummary("timeout", quest, validatorFindings, benchmark),
-				questId: quest.id,
-				profileId: resolvedProfile.id,
-				traceBundleIds,
-				validatorFindings,
-				executionFindings,
-				timeoutReason: `Exceeded ${input.timeoutMs}ms before finishing the quest.`,
-				failureCategory,
-				artifactPaths: {},
-				benchmark: benchmark ? { ...benchmark } : undefined,
-			};
-			const resultFile = await persistResultFile(quest, timeoutResult);
-			timeoutResult.artifactPaths = resultArtifactPaths(quest, resultFile);
-			return timeoutResult;
+			return finalizeTimeout(timeoutReasonFor(input.timeoutMs, "quest execution"));
 		}
 
 		milestone.status = "running";
@@ -406,7 +488,16 @@ export async function runQuestHeadlessExecution(
 			if (feature.status === "completed") continue;
 			feature.status = "running";
 			await saveQuest(quest);
-			const run = await executors.worker(quest, feature, milestone, input.modelChoice, workflows, resolvedProfile, benchmark, undefined, undefined);
+			const workerStep = await runStepWithDeadline(`feature ${feature.title}`, deadline, input.timeoutMs, (onProcessStart) =>
+				executors.worker(quest, feature, milestone, input.modelChoice, workflows, resolvedProfile, benchmark, undefined, onProcessStart),
+			);
+			if (workerStep.timedOut) {
+				feature.status = "blocked";
+				feature.lastError = workerStep.timeoutReason;
+				milestone.status = "blocked";
+				return finalizeTimeout(workerStep.timeoutReason);
+			}
+			const run = workerStep.value;
 			const benchmarkFindings = benchmarkFastPath ? workerExecutionFindings(run) : [];
 			const runBlocked = !run.ok || (benchmarkFastPath && benchmarkFindings.length > 0);
 			appendFindings(executionFindings, benchmarkFastPath ? benchmarkFindings : workerExecutionFindings(run));
@@ -459,18 +550,25 @@ export async function runQuestHeadlessExecution(
 			continue;
 		}
 		for (const pass of ["code_review", "user_surface"] as const) {
-			const validationRun = await executors.validator(
-				quest,
-				milestone,
-				milestoneFeatures,
-				input.modelChoice,
-				workflows,
-				pass,
-				resolvedProfile,
-				benchmark,
-				undefined,
-				undefined,
+			const validationStep = await runStepWithDeadline(`${pass} validation for ${milestone.title}`, deadline, input.timeoutMs, (onProcessStart) =>
+				executors.validator(
+					quest,
+					milestone,
+					milestoneFeatures,
+					input.modelChoice,
+					workflows,
+					pass,
+					resolvedProfile,
+					benchmark,
+					undefined,
+					onProcessStart,
+				),
 			);
+			if (validationStep.timedOut) {
+				milestone.status = "blocked";
+				return finalizeTimeout(validationStep.timeoutReason);
+			}
+			const validationRun = validationStep.value;
 			quest.recentRuns = trimRecentRuns([validationRun, ...quest.recentRuns]);
 			appendFindings(validatorFindings, validationRun.issues);
 			await writeWorkerRun(quest.cwd, quest.id, validationRun);

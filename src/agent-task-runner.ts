@@ -1,3 +1,5 @@
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
 import {
 	DefaultResourceLoader,
@@ -47,6 +49,8 @@ export interface RunAgentTaskOptions {
 
 export interface RunAgentTaskResult {
 	exitCode: number;
+	sessionId: string;
+	sessionFile?: string;
 	messages: Message[];
 	stderr: string;
 	stopReason?: string;
@@ -72,8 +76,11 @@ const DEFAULT_USAGE: UsageStats = {
 };
 
 const BUILTIN_TOOLS = [readTool, bashTool, editTool, writeTool, grepTool, findTool, lsTool];
+const RUNTIME_SESSION_DIR = join(".pi", "quests", "runtime-sessions");
 
 export async function runAgentTask(options: RunAgentTaskOptions): Promise<RunAgentTaskResult> {
+	const sessionDir = join(options.cwd, RUNTIME_SESSION_DIR);
+	await mkdir(sessionDir, { recursive: true });
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: options.cwd,
 		appendSystemPromptOverride: (base) => (options.systemPrompt ? [...base, options.systemPrompt] : base),
@@ -83,7 +90,7 @@ export async function runAgentTask(options: RunAgentTaskOptions): Promise<RunAge
 	const { session } = await createAgentSession({
 		cwd: options.cwd,
 		resourceLoader,
-		sessionManager: SessionManager.inMemory(),
+		sessionManager: SessionManager.create(options.cwd, sessionDir),
 		tools: BUILTIN_TOOLS,
 	});
 
@@ -99,6 +106,8 @@ export async function runAgentTask(options: RunAgentTaskOptions): Promise<RunAge
 
 	const result: RunAgentTaskResult = {
 		exitCode: 1,
+		sessionId: session.sessionId,
+		sessionFile: session.sessionFile,
 		messages: [],
 		stderr: "",
 		usage: { ...DEFAULT_USAGE },

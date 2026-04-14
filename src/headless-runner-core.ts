@@ -478,7 +478,13 @@ export async function runQuestHeadlessExecution(
 
 	for (const milestone of currentMilestones(quest)) {
 		if (deadline && Date.now() > deadline) {
-			return finalizeTimeout(timeoutReasonFor(input.timeoutMs, "quest execution"));
+			const pendingFeature = currentMilestoneFeatures(quest, milestone.id).find(
+				(feature) => feature.status !== "completed",
+			);
+			const stepLabel = pendingFeature
+				? `feature ${pendingFeature.title}`
+				: `milestone ${milestone.title}`;
+			return finalizeTimeout(timeoutReasonFor(input.timeoutMs, stepLabel));
 		}
 
 		milestone.status = "running";

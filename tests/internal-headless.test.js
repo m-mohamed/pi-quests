@@ -13,7 +13,7 @@ const DEFAULT_MODEL = {
 	thinkingLevel: "high",
 };
 
-function makeRun(role, summary, benchmark, overrides = {}) {
+function makeRun(role, summary, evaluation, overrides = {}) {
 	return {
 		id: `${role}-${Math.random().toString(16).slice(2)}`,
 		role,
@@ -28,7 +28,7 @@ function makeRun(role, summary, benchmark, overrides = {}) {
 		phase: role === "validator" ? "code_review" : "streaming",
 		events: [],
 		issues: [],
-		benchmark,
+		evaluation,
 		...overrides,
 	};
 }
@@ -44,7 +44,7 @@ async function withInternalMode(run) {
 	}
 }
 
-test("runQuestHeadless writes a completed benchmark contract and trace provenance", async () => {
+test("runInternalQuestHeadless writes a completed eval contract and trace provenance", async () => {
 	await withInternalMode(async () => {
 		const repoDir = await mkdtemp(join(tmpdir(), "pi-quests-headless-"));
 		try {
@@ -53,80 +53,60 @@ test("runQuestHeadless writes a completed benchmark contract and trace provenanc
 			let validatorCalls = 0;
 			let workerCalls = 0;
 			const result = await runInternalQuestHeadless(
-			{
-				cwd: repoDir,
-				instruction: "Finish the benchmark task.",
-				modelChoice: DEFAULT_MODEL,
-				benchmark: {
-					benchmark: "terminal-bench",
-					dataset: "terminal-bench-sample@2.0",
-					taskId: "task-001",
-					runMode: "sample",
-					adapterVersion: "quest-bench-v1",
+				{
+					cwd: repoDir,
+					instruction: "Finish the eval task.",
+					modelChoice: DEFAULT_MODEL,
+					evaluation: {
+						name: "frontierswe",
+						dataset: "frontierswe-sample@v1",
+						taskId: "task-001",
+						runMode: "sample",
+						adapterVersion: "frontierswe-sample-v1",
+					},
 				},
-			},
-			{
-				async probe(_cwd, _modelChoice, _profile, benchmark) {
-					probeCalls += 1;
-					return {
-						readiness: {
-							summary: "Repo checks supported.",
-							checks: [{ id: "repo", surface: "repo-checks", description: "rg works", status: "supported", commands: ["rg"], evidence: [] }],
-						},
-						servicesYaml: null,
-						run: makeRun("validator", "Captured readiness.", benchmark, { phase: "readiness" }),
-					};
+				{
+					async probe(_cwd, _modelChoice, _profile, evaluation) {
+						probeCalls += 1;
+						return {
+							readiness: {
+								summary: "Repo checks supported.",
+								checks: [{ id: "repo", surface: "repo-checks", description: "rg works", status: "supported", commands: ["rg"], evidence: [] }],
+							},
+							servicesYaml: null,
+							run: makeRun("validator", "Captured readiness.", evaluation, { phase: "readiness" }),
+						};
+					},
+					async planner(_cwd, _goal, _modelChoice, _readiness, _profile, evaluation) {
+						plannerCalls += 1;
+						return {
+							plan: {
+								title: "Eval Quest",
+								summary: "Solve the task with one feature.",
+								risks: [],
+								environment: [],
+								services: [],
+								validationSummary: "Repo checks supported.",
+								humanQaChecklist: ["Run manual QA before shipping."],
+								milestones: [{ id: "m1", order: 1, title: "Complete eval task", description: "Finish the task.", successCriteria: ["Task passes validation."], status: "pending" }],
+								features: [{ id: "f1", order: 1, milestoneId: "m1", title: "Implement task", description: "Do the work.", preconditions: [], fulfills: ["Task passes validation."], status: "pending" }],
+							},
+							run: makeRun("orchestrator", "Planned the quest.", evaluation, { phase: "planning" }),
+						};
+					},
+					async worker(_quest, _feature, _milestone, _modelChoice, _workflows, _profile, evaluation) {
+						workerCalls += 1;
+						return makeRun("worker", "Finished the feature.", evaluation, { featureId: "f1", milestoneId: "m1" });
+					},
+					async validator(_quest, _milestone, _features, _modelChoice, _workflows, pass, _profile, evaluation) {
+						validatorCalls += 1;
+						return makeRun("validator", `Validator passed ${pass}.`, evaluation, { milestoneId: "m1", phase: pass });
+					},
 				},
-				async planner(_cwd, _goal, _modelChoice, _readiness, _profile, benchmark) {
-					plannerCalls += 1;
-					return {
-						plan: {
-							title: "Benchmark Quest",
-							summary: "Solve the task with one feature.",
-							risks: [],
-							environment: [],
-							services: [],
-							validationSummary: "Repo checks supported.",
-							humanQaChecklist: ["Run manual QA before shipping."],
-							milestones: [
-								{
-									id: "m1",
-									order: 1,
-									title: "Complete benchmark task",
-									description: "Finish the task.",
-									successCriteria: ["Task passes validation."],
-									status: "pending",
-								},
-							],
-							features: [
-								{
-									id: "f1",
-									order: 1,
-									milestoneId: "m1",
-									title: "Implement task",
-									description: "Do the work.",
-									preconditions: [],
-									fulfills: ["Task passes validation."],
-									status: "pending",
-								},
-							],
-						},
-						run: makeRun("orchestrator", "Planned the quest.", benchmark, { phase: "planning" }),
-					};
-				},
-				async worker(_quest, _feature, _milestone, _modelChoice, _workflows, _profile, benchmark) {
-					workerCalls += 1;
-					return makeRun("worker", "Finished the feature.", benchmark, { featureId: "f1", milestoneId: "m1" });
-				},
-				async validator(_quest, _milestone, _features, _modelChoice, _workflows, pass, _profile, benchmark) {
-					validatorCalls += 1;
-					return makeRun("validator", `Validator passed ${pass}.`, benchmark, { milestoneId: "m1", phase: pass });
-				},
-			},
 			);
 
 			assert.equal(result.status, "completed");
-			assert.equal(result.benchmark?.benchmark, "terminal-bench");
+			assert.equal(result.evaluation?.name, "frontierswe");
 			assert.equal(probeCalls, 0);
 			assert.equal(plannerCalls, 0);
 			assert.equal(validatorCalls, 0);
@@ -137,108 +117,106 @@ test("runQuestHeadless writes a completed benchmark contract and trace provenanc
 			const traces = await listQuestTraceBundles(repoDir);
 			assert.equal(traces.length, result.traceBundleIds.length);
 			assert.ok(traces.every((trace) => trace.role === "worker"));
-			assert.ok(traces.every((trace) => trace.benchmark?.benchmark === "terminal-bench"));
+			assert.ok(traces.every((trace) => trace.evaluation?.name === "frontierswe"));
 		} finally {
 			await rm(repoDir, { recursive: true, force: true });
 		}
 	});
 });
 
-test("benchmark trace bundles preserve slopcodebench provenance without replay datasets", async () => {
+test("eval trace bundles preserve checkpoint provenance without replay datasets", async () => {
 	await withInternalMode(async () => {
 		const repoDir = await mkdtemp(join(tmpdir(), "pi-quests-headless-replay-"));
 		try {
 			let workerCalls = 0;
 			const result = await runInternalQuestHeadless(
-			{
-				cwd: repoDir,
-				instruction: "Checkpoint task",
-				modelChoice: DEFAULT_MODEL,
-				benchmark: {
-					benchmark: "slopcodebench",
-					dataset: "slopcodebench@official",
-					taskId: "trajectory-api",
-					checkpointId: "checkpoint-2",
-					runMode: "custom",
-					adapterVersion: "frontier-v2",
+				{
+					cwd: repoDir,
+					instruction: "Checkpoint task",
+					modelChoice: DEFAULT_MODEL,
+					evaluation: {
+						name: "frontierswe",
+						dataset: "frontierswe@public-v1",
+						taskId: "trajectory-api",
+						checkpointId: "checkpoint-2",
+						runMode: "full",
+						adapterVersion: "frontier-v2",
+					},
 				},
-			},
-			{
-				async probe(_cwd, _modelChoice, _profile, benchmark) {
-					throw new Error(`benchmark fast path should not call probe: ${benchmark?.taskId ?? "unknown"}`);
+				{
+					async probe(_cwd, _modelChoice, _profile, evaluation) {
+						throw new Error(`eval fast path should not call probe: ${evaluation?.taskId ?? "unknown"}`);
+					},
+					async planner(_cwd, _goal, _modelChoice, _readiness, _profile, evaluation) {
+						throw new Error(`eval fast path should not call planner: ${evaluation?.taskId ?? "unknown"}`);
+					},
+					async worker(_quest, _feature, _milestone, _modelChoice, _workflows, _profile, evaluation) {
+						workerCalls += 1;
+						return makeRun("worker", "Worker finished.", evaluation, { featureId: "f1", milestoneId: "m1" });
+					},
+					async validator(_quest, _milestone, _features, _modelChoice, _workflows, pass, _profile, evaluation) {
+						throw new Error(`eval fast path should not call validator ${pass}: ${evaluation?.taskId ?? "unknown"}`);
+					},
 				},
-				async planner(_cwd, _goal, _modelChoice, _readiness, _profile, benchmark) {
-					throw new Error(`benchmark fast path should not call planner: ${benchmark?.taskId ?? "unknown"}`);
-				},
-				async worker(_quest, _feature, _milestone, _modelChoice, _workflows, _profile, benchmark) {
-					workerCalls += 1;
-					return makeRun("worker", "Worker finished.", benchmark, { featureId: "f1", milestoneId: "m1" });
-				},
-				async validator(_quest, _milestone, _features, _modelChoice, _workflows, pass, _profile, benchmark) {
-					throw new Error(`benchmark fast path should not call validator ${pass}: ${benchmark?.taskId ?? "unknown"}`);
-				},
-			},
 			);
 
 			const traces = await listQuestTraceBundles(repoDir);
 			assert.equal(result.status, "completed");
 			assert.equal(workerCalls, 1);
-			assert.equal(result.benchmark?.benchmark, "slopcodebench");
-			assert.equal(result.benchmark?.checkpointId, "checkpoint-2");
+			assert.equal(result.evaluation?.name, "frontierswe");
+			assert.equal(result.evaluation?.checkpointId, "checkpoint-2");
 			assert.ok(existsSync(result.artifactPaths.result));
-			const workerTrace = traces.find((trace) => trace.role === "worker" && trace.benchmark?.checkpointId === "checkpoint-2");
+			const workerTrace = traces.find((trace) => trace.role === "worker" && trace.evaluation?.checkpointId === "checkpoint-2");
 			assert.ok(workerTrace);
-			assert.ok(traces.every((trace) => trace.benchmark?.benchmark === "slopcodebench"));
-			assert.ok(traces.some((trace) => trace.benchmark?.checkpointId === "checkpoint-2"));
-			assert.ok(traces.every((trace) => trace.role === "worker"));
+			assert.ok(traces.every((trace) => trace.evaluation?.name === "frontierswe"));
 		} finally {
 			await rm(repoDir, { recursive: true, force: true });
 		}
 	});
 });
 
-test("runQuestHeadless blocks benchmark runs with unresolved execution findings", async () => {
+test("runInternalQuestHeadless blocks eval runs with unresolved execution findings", async () => {
 	await withInternalMode(async () => {
 		const repoDir = await mkdtemp(join(tmpdir(), "pi-quests-headless-blocked-"));
 		try {
 			let validatorCalls = 0;
 			const result = await runInternalQuestHeadless(
-			{
-				cwd: repoDir,
-				instruction: "Finish the benchmark task.",
-				modelChoice: DEFAULT_MODEL,
-				benchmark: {
-					benchmark: "terminal-bench",
-					dataset: "terminal-bench-sample@2.0",
-					taskId: "task-002",
-					runMode: "sample",
-					adapterVersion: "quest-bench-v1",
+				{
+					cwd: repoDir,
+					instruction: "Finish the eval task.",
+					modelChoice: DEFAULT_MODEL,
+					evaluation: {
+						name: "frontierswe",
+						dataset: "frontierswe-sample@v1",
+						taskId: "task-002",
+						runMode: "sample",
+						adapterVersion: "frontierswe-sample-v1",
+					},
 				},
-			},
-			{
-				async probe() {
-					throw new Error("benchmark fast path should not call probe");
+				{
+					async probe() {
+						throw new Error("eval fast path should not call probe");
+					},
+					async planner() {
+						throw new Error("eval fast path should not call planner");
+					},
+					async worker(_quest, _feature, _milestone, _modelChoice, _workflows, _profile, evaluation) {
+						return makeRun("worker", "Worker stopped with unresolved handoff.", evaluation, {
+							ok: true,
+							issues: ["Worker requested human handoff during eval execution."],
+							featureId: "f1",
+							milestoneId: "m1",
+						});
+					},
+					async validator() {
+						validatorCalls += 1;
+						throw new Error("eval fast path should not call validator");
+					},
 				},
-				async planner() {
-					throw new Error("benchmark fast path should not call planner");
-				},
-				async worker(_quest, _feature, _milestone, _modelChoice, _workflows, _profile, benchmark) {
-					return makeRun("worker", "Worker stopped with unresolved handoff.", benchmark, {
-						ok: true,
-						issues: ["Worker requested human handoff during benchmark execution."],
-						featureId: "f1",
-						milestoneId: "m1",
-					});
-				},
-				async validator() {
-					validatorCalls += 1;
-					throw new Error("benchmark fast path should not call validator");
-				},
-			},
 			);
 
 			assert.equal(result.status, "blocked");
-			assert.deepEqual(result.executionFindings, ["Worker requested human handoff during benchmark execution."]);
+			assert.deepEqual(result.executionFindings, ["Worker requested human handoff during eval execution."]);
 			assert.equal(result.failureCategory, "human_handoff");
 			assert.equal(validatorCalls, 0);
 			assert.ok(existsSync(result.artifactPaths.result));

@@ -1,0 +1,14 @@
+[metadata]
+category = "scripts"
+difficulty = "easy"
+tags = ["shell", "file-create"]
+
+[environment]
+docker_image = "pi-quests/frontierswe-sample-add-healthcheck-script:v1"
+build_timeout_sec = 180
+
+[agent]
+timeout_sec = 300
+
+[verifier]
+timeout_sec = 60

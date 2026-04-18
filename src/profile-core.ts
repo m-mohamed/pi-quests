@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type {
-	QuestBenchmarkProvenance,
 	QuestFailureTag,
 	ModelChoice,
+	QuestEvalProvenance,
 	QuestTrialTarget,
 	QuestProfile,
 	QuestPromptSurfaceId,
@@ -314,7 +314,7 @@ export function traceBundleFromWorkerRun(quest: QuestState, run: WorkerRunRecord
 		cancellationReason: run.aborted === true ? "user_abort" : undefined,
 		usage: run.usage,
 		source: "worker_run",
-		benchmark: run.benchmark,
+		evaluation: run.evaluation,
 	};
 }
 
@@ -328,7 +328,7 @@ export function traceBundleFromPlanningSession(
 	startedAt: number,
 	endedAt: number,
 	latestMessage?: string,
-	benchmark?: QuestBenchmarkProvenance,
+	evaluation?: QuestEvalProvenance,
 ): QuestTraceBundle {
 	const mockRun: Pick<WorkerRunRecord, "role" | "ok" | "aborted" | "events" | "issues"> = {
 		role: "orchestrator",
@@ -366,6 +366,6 @@ export function traceBundleFromPlanningSession(
 		compactionEvents: [],
 		cancellationReason: undefined,
 		source: "planning_session",
-		benchmark,
+		evaluation,
 	};
 }

@@ -21,7 +21,7 @@ import {
 } from "./workers.js";
 import type {
 	ModelChoice,
-	QuestBenchmarkProvenance,
+	QuestEvalProvenance,
 	QuestFeature,
 	QuestMilestone,
 	QuestPlan,
@@ -39,7 +39,7 @@ export interface QuestHeadlessExecutionInput {
 	autoAccept?: boolean;
 	dryRun?: boolean;
 	timeoutMs?: number;
-	benchmark?: Omit<QuestBenchmarkProvenance, "recordedAt" | "model">;
+	evaluation?: Omit<QuestEvalProvenance, "recordedAt" | "model">;
 }
 
 export interface QuestHeadlessExecutionResult {
@@ -53,7 +53,7 @@ export interface QuestHeadlessExecutionResult {
 	timeoutReason?: string;
 	failureCategory?: string;
 	artifactPaths: Record<string, string>;
-	benchmark?: QuestBenchmarkProvenance;
+	evaluation?: QuestEvalProvenance;
 }
 
 export interface QuestHeadlessExecutors {
@@ -78,10 +78,10 @@ type TimedStepResult<T> =
 	| { timedOut: false; value: T }
 	| { timedOut: true; timeoutReason: string };
 
-function benchmarkContext(
-	input: QuestHeadlessExecutionInput["benchmark"],
+function evaluationContext(
+	input: QuestHeadlessExecutionInput["evaluation"],
 	modelChoice: ModelChoice,
-): QuestBenchmarkProvenance | undefined {
+): QuestEvalProvenance | undefined {
 	if (!input) return undefined;
 	return {
 		...input,
@@ -90,11 +90,11 @@ function benchmarkContext(
 	};
 }
 
-function fallbackPlan(goal: string, readiness: ValidationReadiness | null, benchmark = false): QuestPlan {
+function fallbackPlan(goal: string, readiness: ValidationReadiness | null, evaluationMode = false): QuestPlan {
 	return {
 		title: goal.slice(0, 72),
-		summary: benchmark
-			? "Complete the assigned benchmark task with a minimal serial quest plan."
+		summary: evaluationMode
+			? "Complete the assigned eval task with a minimal serial quest plan."
 			: "Complete the assigned quest with a minimal serial plan.",
 		goal,
 		risks: readiness
@@ -102,19 +102,19 @@ function fallbackPlan(goal: string, readiness: ValidationReadiness | null, bench
 					.filter((check) => check.status === "limited" || check.status === "unsupported")
 					.map((check) => `${check.surface}: ${check.status}`)
 			: [],
-		environment: [benchmark ? "Headless benchmark execution." : "Headless quest execution."],
+		environment: [evaluationMode ? "Headless eval execution." : "Headless quest execution."],
 		services: [],
 		validationSummary: readiness?.summary ?? "No readiness summary captured.",
 		humanQaChecklist: [
-			benchmark
-				? "Review the final repo state manually before shipping any benchmark-derived changes."
+			evaluationMode
+				? "Review the final repo state manually before shipping any eval-derived changes."
 				: "Review the final repo state manually before shipping any Quest-derived changes.",
 		],
 		milestones: [
 			{
 				id: "m1",
 				order: 1,
-				title: benchmark ? "Complete benchmark task" : "Complete quest task",
+				title: evaluationMode ? "Complete eval task" : "Complete quest task",
 				description: "Solve the assigned task and collect validation evidence.",
 				successCriteria: ["The task completes with validator confirmation."],
 				status: "pending",
@@ -125,7 +125,7 @@ function fallbackPlan(goal: string, readiness: ValidationReadiness | null, bench
 				id: "f1",
 				order: 1,
 				milestoneId: "m1",
-				title: benchmark ? "Implement benchmark task" : "Implement quest task",
+				title: evaluationMode ? "Implement eval task" : "Implement quest task",
 				description: goal,
 				preconditions: [],
 				fulfills: ["The task completes with validator confirmation."],
@@ -137,27 +137,27 @@ function fallbackPlan(goal: string, readiness: ValidationReadiness | null, bench
 	};
 }
 
-function benchmarkFastPathReadiness(benchmark: QuestBenchmarkProvenance): ValidationReadiness {
+function evaluationFastPathReadiness(evaluation: QuestEvalProvenance): ValidationReadiness {
 	return {
-		summary: `Benchmark mode for ${benchmark.benchmark}/${benchmark.dataset}: use the external verifier as a score sensor only, keep harness surfaces immutable, and rely on a lightweight Quest execution self-check before completion.`,
+		summary: `Eval mode for ${evaluation.name}/${evaluation.dataset}: treat the external verifier as the final score sensor, keep verifier-owned surfaces immutable, and rely on a lightweight Quest execution self-check before completion.`,
 		checks: [
 			{
-				id: "benchmark-verifier",
+				id: "eval-verifier",
 				surface: "repo-checks",
-				description: "The benchmark harness provides external scoring, but verifier and harness surfaces must remain immutable.",
+				description: "The external eval verifier provides scoring, but verifier-owned surfaces must remain immutable.",
 				status: "supported",
 				commands: [],
-				evidence: [`${benchmark.benchmark}:${benchmark.dataset}:${benchmark.taskId}`],
-				notes: "Skip the exploratory readiness/planning passes, but do not modify verifier scripts, reward files, PATH-critical tools, or system binaries.",
+				evidence: [`${evaluation.name}:${evaluation.dataset}:${evaluation.taskId}`],
+				notes: "Skip exploratory readiness/planning passes, but do not modify verifier scripts, reward files, PATH-critical tools, or system binaries.",
 			},
 			{
 				id: "human-qa",
 				surface: "user-surface",
-				description: "User-surface QA remains limited during benchmark runs and is not used as a gate.",
+				description: "User-surface QA remains limited during eval runs and is not used as a gate.",
 				status: "limited",
 				commands: [],
 				evidence: [],
-				notes: "Benchmark tasks still rely on the external harness for scoring, but only after integrity gates and the final Quest self-check are satisfied.",
+				notes: "Eval tasks still rely on the external verifier for scoring, but only after the final Quest self-check is satisfied.",
 			},
 		],
 	};
@@ -215,7 +215,7 @@ function workerExecutionFindings(run: WorkerRunRecord): string[] {
 	return [...new Set((run.issues ?? []).map((issue) => issue.trim()).filter(Boolean))];
 }
 
-function inferBenchmarkFailureCategory(
+function inferEvalFailureCategory(
 	status: QuestHeadlessExecutionResult["status"],
 	executionFindings: string[],
 	summary?: string,
@@ -236,7 +236,7 @@ function nextSummary(
 	status: QuestHeadlessExecutionResult["status"],
 	quest: QuestState,
 	validatorFindings: string[],
-	benchmark?: QuestBenchmarkProvenance,
+	evaluation?: QuestEvalProvenance,
 ): string {
 	switch (status) {
 		case "proposal_ready":
@@ -244,12 +244,12 @@ function nextSummary(
 		case "running":
 			return "Quest is still running.";
 		case "blocked":
-			return benchmark
-				? quest.lastError ?? validatorFindings[0] ?? "Quest blocked during benchmark execution."
+			return evaluation
+				? quest.lastError ?? validatorFindings[0] ?? "Quest blocked during eval execution."
 				: quest.lastError ?? validatorFindings[0] ?? "Quest blocked during execution.";
 		case "completed":
-			return benchmark
-				? "Quest completed execution; benchmark scoring still depends on external harness integrity gates."
+			return evaluation
+				? "Quest completed execution; eval scoring still depends on the external verifier."
 				: "Quest completed with explicit human QA still pending.";
 		case "timeout":
 			return "Quest timed out before completion.";
@@ -345,7 +345,7 @@ export async function runQuestHeadlessExecution(
 	executors: QuestHeadlessExecutors = DEFAULT_HEADLESS_EXECUTORS,
 ): Promise<QuestHeadlessExecutionResult> {
 	const autoAccept = input.autoAccept !== false;
-	const benchmark = benchmarkContext(input.benchmark, input.modelChoice);
+	const evaluation = evaluationContext(input.evaluation, input.modelChoice);
 	const workflows = await loadLearnedWorkflows(input.cwd);
 	const resolvedProfile = await options.resolveProfile(input);
 	const quest = await createQuest(input.cwd, input.instruction, input.modelChoice);
@@ -359,7 +359,7 @@ export async function runQuestHeadlessExecution(
 	const validatorFindings: string[] = [];
 	const executionFindings: string[] = [];
 	const startedAt = Date.now();
-	const benchmarkFastPath = Boolean(benchmark);
+	const evaluationFastPath = Boolean(evaluation);
 	let failureCategory: string | undefined;
 	const deadline = input.timeoutMs ? startedAt + input.timeoutMs : undefined;
 
@@ -369,10 +369,10 @@ export async function runQuestHeadlessExecution(
 		quest.lastError = timeoutReason;
 		quest.lastSummary = timeoutReason;
 		await saveQuest(quest);
-		failureCategory = benchmark ? inferBenchmarkFailureCategory("timeout", executionFindings, quest.lastSummary, timeoutReason) : undefined;
+		failureCategory = evaluation ? inferEvalFailureCategory("timeout", executionFindings, quest.lastSummary, timeoutReason) : undefined;
 		const timeoutResult: QuestHeadlessExecutionResult = {
 			status: "timeout",
-			summary: nextSummary("timeout", quest, validatorFindings, benchmark),
+			summary: nextSummary("timeout", quest, validatorFindings, evaluation),
 			questId: quest.id,
 			profileId: resolvedProfile.id,
 			traceBundleIds,
@@ -381,20 +381,20 @@ export async function runQuestHeadlessExecution(
 			timeoutReason,
 			failureCategory,
 			artifactPaths: {},
-			benchmark: benchmark ? { ...benchmark } : undefined,
+			evaluation: evaluation ? { ...evaluation } : undefined,
 		};
 		const resultFile = await persistResultFile(quest, timeoutResult);
 		timeoutResult.artifactPaths = resultArtifactPaths(quest, resultFile);
 		return timeoutResult;
 	};
 
-	let readiness: ValidationReadiness | null = benchmark ? benchmarkFastPathReadiness(benchmark) : null;
-	if (benchmarkFastPath && readiness) {
+	let readiness: ValidationReadiness | null = evaluation ? evaluationFastPathReadiness(evaluation) : null;
+	if (evaluationFastPath && readiness) {
 		quest.validationReadiness = readiness;
 	}
-	if (!input.dryRun && !benchmarkFastPath) {
+	if (!input.dryRun && !evaluationFastPath) {
 		const probeStep = await runStepWithDeadline("validation readiness", deadline, input.timeoutMs, (onProcessStart) =>
-			executors.probe(input.cwd, input.modelChoice, resolvedProfile, benchmark, undefined, onProcessStart),
+			executors.probe(input.cwd, input.modelChoice, resolvedProfile, evaluation, undefined, onProcessStart),
 		);
 		if (probeStep.timedOut) return finalizeTimeout(probeStep.timeoutReason);
 		const probe = probeStep.value;
@@ -409,11 +409,11 @@ export async function runQuestHeadlessExecution(
 		await writeQuestTraceBundle(quest.cwd, trace);
 	}
 
-	let plan = fallbackPlan(input.instruction, readiness, benchmarkFastPath);
-	if (!input.dryRun && !benchmarkFastPath) {
+	let plan = fallbackPlan(input.instruction, readiness, evaluationFastPath);
+	if (!input.dryRun && !evaluationFastPath) {
 		const planningStartedAt = Date.now();
 		const planningStep = await runStepWithDeadline("planning", deadline, input.timeoutMs, (onProcessStart) =>
-			executors.planner(input.cwd, input.instruction, input.modelChoice, readiness, resolvedProfile, benchmark, undefined, onProcessStart),
+			executors.planner(input.cwd, input.instruction, input.modelChoice, readiness, resolvedProfile, evaluation, undefined, onProcessStart),
 		);
 		if (planningStep.timedOut) return finalizeTimeout(planningStep.timeoutReason);
 		const planned = planningStep.value;
@@ -430,7 +430,7 @@ export async function runQuestHeadlessExecution(
 			planningStartedAt,
 			Date.now(),
 			planned.run.latestAssistantText,
-			benchmark ? { ...benchmark } : undefined,
+			evaluation ? { ...evaluation } : undefined,
 		);
 		traceBundleIds.push(planningTrace.id);
 		await writeQuestTraceBundle(quest.cwd, planningTrace);
@@ -457,7 +457,7 @@ export async function runQuestHeadlessExecution(
 	if (!autoAccept || input.dryRun) {
 		const preliminary: QuestHeadlessExecutionResult = {
 			status: quest.status,
-			summary: nextSummary(quest.status, quest, validatorFindings, benchmark),
+			summary: nextSummary(quest.status, quest, validatorFindings, evaluation),
 			questId: quest.id,
 			profileId: resolvedProfile.id,
 			traceBundleIds,
@@ -465,7 +465,7 @@ export async function runQuestHeadlessExecution(
 			executionFindings,
 			failureCategory,
 			artifactPaths: {},
-			benchmark: benchmark ? { ...benchmark } : undefined,
+			evaluation: evaluation ? { ...evaluation } : undefined,
 		};
 		const resultFile = await persistResultFile(quest, preliminary);
 		preliminary.artifactPaths = resultArtifactPaths(quest, resultFile);
@@ -495,7 +495,7 @@ export async function runQuestHeadlessExecution(
 			feature.status = "running";
 			await saveQuest(quest);
 			const workerStep = await runStepWithDeadline(`feature ${feature.title}`, deadline, input.timeoutMs, (onProcessStart) =>
-				executors.worker(quest, feature, milestone, input.modelChoice, workflows, resolvedProfile, benchmark, undefined, onProcessStart),
+				executors.worker(quest, feature, milestone, input.modelChoice, workflows, resolvedProfile, evaluation, undefined, onProcessStart),
 			);
 			if (workerStep.timedOut) {
 				feature.status = "blocked";
@@ -504,11 +504,11 @@ export async function runQuestHeadlessExecution(
 				return finalizeTimeout(workerStep.timeoutReason);
 			}
 			const run = workerStep.value;
-			const benchmarkFindings = benchmarkFastPath ? workerExecutionFindings(run) : [];
-			const runBlocked = !run.ok || (benchmarkFastPath && benchmarkFindings.length > 0);
-			appendFindings(executionFindings, benchmarkFastPath ? benchmarkFindings : workerExecutionFindings(run));
+			const evaluationFindings = evaluationFastPath ? workerExecutionFindings(run) : [];
+			const runBlocked = !run.ok || (evaluationFastPath && evaluationFindings.length > 0);
+			appendFindings(executionFindings, evaluationFastPath ? evaluationFindings : workerExecutionFindings(run));
 			feature.lastRunSummary = run.summary;
-			feature.lastError = runBlocked ? (benchmarkFindings[0] ?? run.stderr ?? run.summary) : undefined;
+			feature.lastError = runBlocked ? (evaluationFindings[0] ?? run.stderr ?? run.summary) : undefined;
 			feature.status = runBlocked ? "blocked" : "completed";
 			quest.recentRuns = trimRecentRuns([run, ...quest.recentRuns]);
 			await writeWorkerRun(quest.cwd, quest.id, run);
@@ -520,14 +520,14 @@ export async function runQuestHeadlessExecution(
 			if (runBlocked) {
 				milestone.status = "blocked";
 				quest.status = "blocked";
-				quest.lastError = benchmarkFindings[0] ?? run.summary;
-				failureCategory = benchmark
-					? inferBenchmarkFailureCategory(quest.status, executionFindings, run.summary, run.stderr)
+				quest.lastError = evaluationFindings[0] ?? run.summary;
+				failureCategory = evaluation
+					? inferEvalFailureCategory(quest.status, executionFindings, run.summary, run.stderr)
 					: undefined;
 				await saveQuest(quest);
 				const blockedResult: QuestHeadlessExecutionResult = {
 					status: quest.status,
-					summary: nextSummary(quest.status, quest, validatorFindings, benchmark),
+					summary: nextSummary(quest.status, quest, validatorFindings, evaluation),
 					questId: quest.id,
 					profileId: resolvedProfile.id,
 					traceBundleIds,
@@ -535,7 +535,7 @@ export async function runQuestHeadlessExecution(
 					executionFindings,
 					failureCategory,
 					artifactPaths: {},
-					benchmark: benchmark ? { ...benchmark } : undefined,
+					evaluation: evaluation ? { ...evaluation } : undefined,
 				};
 				const resultFile = await persistResultFile(quest, blockedResult);
 				blockedResult.artifactPaths = resultArtifactPaths(quest, resultFile);
@@ -544,12 +544,12 @@ export async function runQuestHeadlessExecution(
 		}
 
 		const milestoneFeatures = currentMilestoneFeatures(quest, milestone.id);
-		if (benchmarkFastPath) {
+		if (evaluationFastPath) {
 			markAssertions(
 				quest,
 				(quest.validationState?.assertions ?? []).filter((assertion) => assertion.milestoneId === milestone.id),
 				"passed",
-				"Benchmark fast path: harness integrity still gates any external score.",
+				"Eval fast path: the external verifier still determines the final score.",
 			);
 			milestone.status = "completed";
 			await saveQuest(quest);
@@ -565,7 +565,7 @@ export async function runQuestHeadlessExecution(
 					workflows,
 					pass,
 					resolvedProfile,
-					benchmark,
+					evaluation,
 					undefined,
 					onProcessStart,
 				),
@@ -594,7 +594,7 @@ export async function runQuestHeadlessExecution(
 			await saveQuest(quest);
 			const blockedResult: QuestHeadlessExecutionResult = {
 				status: quest.status,
-				summary: nextSummary(quest.status, quest, validatorFindings, benchmark),
+				summary: nextSummary(quest.status, quest, validatorFindings, evaluation),
 				questId: quest.id,
 				profileId: resolvedProfile.id,
 				traceBundleIds,
@@ -602,7 +602,7 @@ export async function runQuestHeadlessExecution(
 				executionFindings,
 				failureCategory,
 				artifactPaths: {},
-				benchmark: benchmark ? { ...benchmark } : undefined,
+				evaluation: evaluation ? { ...evaluation } : undefined,
 			};
 			const resultFile = await persistResultFile(quest, blockedResult);
 			blockedResult.artifactPaths = resultArtifactPaths(quest, resultFile);
@@ -617,14 +617,14 @@ export async function runQuestHeadlessExecution(
 	quest.humanQaStatus = "pending";
 	quest.shipReadiness = "validated_waiting_for_human_qa";
 	quest.completedAt = Date.now();
-	quest.lastSummary = benchmark
-		? "Benchmark quest completed execution after a final self-check. External scores remain contingent on harness integrity."
+	quest.lastSummary = evaluation
+		? "Eval quest completed execution after a final self-check. External scores remain contingent on the verifier."
 		: "Quest completed. Human QA remains explicit before any release claim or shipping step.";
 	await saveQuest(quest);
 
 	const completedResult: QuestHeadlessExecutionResult = {
 		status: quest.status,
-		summary: nextSummary(quest.status, quest, validatorFindings, benchmark),
+		summary: nextSummary(quest.status, quest, validatorFindings, evaluation),
 		questId: quest.id,
 		profileId: resolvedProfile.id,
 		traceBundleIds,
@@ -632,7 +632,7 @@ export async function runQuestHeadlessExecution(
 		executionFindings,
 		failureCategory,
 		artifactPaths: {},
-		benchmark: benchmark ? { ...benchmark } : undefined,
+		evaluation: evaluation ? { ...evaluation } : undefined,
 	};
 	const resultFile = await persistResultFile(quest, completedResult);
 	completedResult.artifactPaths = resultArtifactPaths(quest, resultFile);

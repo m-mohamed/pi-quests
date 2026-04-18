@@ -51,16 +51,16 @@ test("buildQuestShellEnvironment exports active quest and trial metadata for age
 		{
 			status: "running",
 			activeProfileId: "repo-project-ui",
-			benchmarkFamily: "terminal-bench",
-			benchmarkDataset: "terminal-bench-sample@2.0",
+			evalFamily: "frontierswe",
+			evalDataset: "frontierswe-sample@v1",
 		},
 	);
 	assert.equal(env.PI_QUESTS_ACTIVE_QUEST_ID, "quest-123");
 	assert.equal(env.PI_QUESTS_ACTIVE_QUEST_STATUS, "running");
 	assert.equal(env.PI_QUESTS_ACTIVE_QUEST_ROOT, "/tmp/pi-quests/.pi/quests/quest-123");
 	assert.equal(env.PI_QUESTS_TRIAL_PROFILE_ID, "repo-project-ui");
-	assert.equal(env.PI_QUESTS_TRIAL_BENCHMARK, "terminal-bench");
-	assert.equal(env.PI_QUESTS_TRIAL_DATASET, "terminal-bench-sample@2.0");
+	assert.equal(env.PI_QUESTS_TRIAL_EVAL, "frontierswe");
+	assert.equal(env.PI_QUESTS_TRIAL_SUITE, "frontierswe-sample@v1");
 });
 
 test("prefixQuestShellCommand prepends shell-safe exports without changing empty env commands", () => {

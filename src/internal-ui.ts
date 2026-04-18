@@ -39,9 +39,9 @@ export interface TrialsControlItem {
 
 export type TrialsWidgetFactory = (tui: TUI, theme: Theme) => Component;
 
-function benchmarkLabel(state: QuestTrialState): string {
-	if (!state.benchmarkFamily) return "not prepared";
-	return `${state.benchmarkFamily}${state.benchmarkDataset ? ` · ${state.benchmarkDataset}` : ""}`;
+function evalLabel(state: QuestTrialState): string {
+	if (!state.evalFamily) return "not prepared";
+	return `${state.evalFamily}${state.evalDataset ? ` · ${state.evalDataset}` : ""}`;
 }
 
 function activeCandidateLabel(state: QuestTrialState): string {
@@ -55,7 +55,7 @@ function summaryDetailMarkdown(state: QuestTrialState, profileId: string, liveRu
 		`- Status: ${state.status}`,
 		`- Target: ${state.target}`,
 		`- Profile: ${profileId}`,
-		`- Benchmark: ${benchmarkLabel(state)}`,
+		`- Eval: ${evalLabel(state)}`,
 		`- Candidate: ${activeCandidateLabel(state)}`,
 		`- Frontier leader: ${state.currentCandidateId ?? "none"}`,
 		`- Live run: ${liveRun ? `${liveRun.role}/${liveRun.phase}${liveRun.latestToolName ? ` · ${liveRun.latestToolName}` : ""}` : "idle"}`,
@@ -66,13 +66,13 @@ function summaryDetailMarkdown(state: QuestTrialState, profileId: string, liveRu
 	].join("\n");
 }
 
-function benchmarkDetailMarkdown(state: QuestTrialState): string {
+function evalDetailMarkdown(state: QuestTrialState): string {
 	return [
-		"# Benchmark",
+		"# Eval",
 		"",
-		`- Family: ${state.benchmarkFamily ?? "unset"}`,
-		`- Dataset: ${state.benchmarkDataset ?? "unset"}`,
-		`- Run mode: ${state.benchmarkRunMode ?? "unset"}`,
+		`- Family: ${state.evalFamily ?? "unset"}`,
+		`- Dataset: ${state.evalDataset ?? "unset"}`,
+		`- Run mode: ${state.evalRunMode ?? "unset"}`,
 		`- Target: ${state.target}`,
 	].join("\n");
 }
@@ -132,14 +132,14 @@ export function buildTrialsControlItems(state: QuestTrialState, profileId: strin
 		{
 			value: "summary",
 			label: "Summary",
-			description: `${state.status} · ${benchmarkLabel(state)}`,
+			description: `${state.status} · ${evalLabel(state)}`,
 			detailMarkdown: summaryDetailMarkdown(state, profileId, liveRun),
 		},
 		{
-			value: "benchmark",
-			label: "Benchmark",
-			description: benchmarkLabel(state),
-			detailMarkdown: benchmarkDetailMarkdown(state),
+			value: "eval",
+			label: "Eval",
+			description: evalLabel(state),
+			detailMarkdown: evalDetailMarkdown(state),
 		},
 		{
 			value: "candidate",
@@ -169,7 +169,7 @@ export function renderTrialsWidgetLines(model: TrialsWidgetModel): string[] {
 
 export function renderTrialsActionLines(): string[] {
 	return [
-		"Actions /quest trials status  |  /quest trials prepare-benchmark  |  /quest trials analyze-community  |  /quest trials baseline  |  /quest trials run",
+		"Actions /quest trials status  |  /quest trials prepare-eval  |  /quest trials analyze-community  |  /quest trials baseline  |  /quest trials run",
 	];
 }
 

@@ -152,7 +152,7 @@ test("handleQuestTrialsCommand uses refreshed trial status instead of captured r
 	assert.ok(notes.some((note) => note.includes("optimization complete")));
 });
 
-test("handleQuestTrialsCommand refreshes the Quest UI after prepare-benchmark", async () => {
+test("handleQuestTrialsCommand refreshes the Quest UI after prepare-eval", async () => {
 	const profile = makeProfile();
 	const harness = createDeps({
 		collectFrontierTrialStatus: async () => ({
@@ -160,23 +160,23 @@ test("handleQuestTrialsCommand refreshes the Quest UI after prepare-benchmark", 
 			profile,
 		}),
 		summarizeTrialStatus: () => "idle summary",
-		prepareTrialBenchmark: async () => ({
+		prepareTrialEval: async () => ({
 			state: makeTrialState("idle", {
-				benchmarkFamily: "slopcodebench",
-				benchmarkDataset: "slopcodebench-sample@1.0",
+				evalFamily: "frontierswe",
+				evalDataset: "frontierswe-sample@v1",
 			}),
-			searchSet: { totalItems: 14 },
-			holdOutSet: { totalItems: 6 },
+			searchSet: { totalItems: 3 },
+			holdOutSet: { totalItems: 1 },
 			manifest: {
-				family: "slopcodebench",
-				dataset: "slopcodebench-sample@1.0",
+				family: "frontierswe",
+				dataset: "frontierswe-sample@v1",
 			},
 		}),
 	});
 
-	await handleQuestTrialsCommand("prepare-benchmark --benchmark slopcodebench --dataset slopcodebench-sample@1.0", harness.deps);
+	await handleQuestTrialsCommand("prepare-eval --eval frontierswe --suite frontierswe-sample@v1", harness.deps);
 
-	assert.equal(harness.currentTrialState.benchmarkFamily, "slopcodebench");
+	assert.equal(harness.currentTrialState.evalFamily, "frontierswe");
 	assert.equal(harness.uiCalls, 1);
-	assert.ok(harness.notes.some((note) => note.includes("Prepared slopcodebench:slopcodebench-sample@1.0")));
+	assert.ok(harness.notes.some((note) => note.includes("Prepared frontierswe:frontierswe-sample@v1")));
 });

@@ -8,11 +8,11 @@ import {
 	type QuestHeadlessExecutionResult,
 	type QuestHeadlessExecutors,
 } from "./headless-runner-core.js";
-import type { QuestBenchmarkProvenance } from "./types.js";
+import type { QuestEvalProvenance } from "./types.js";
 
 export interface QuestInternalHeadlessRunInput extends QuestHeadlessExecutionInput {
 	profileId?: string;
-	benchmark?: Omit<QuestBenchmarkProvenance, "recordedAt" | "model">;
+	evaluation?: Omit<QuestEvalProvenance, "recordedAt" | "model">;
 }
 
 export type QuestInternalHeadlessRunResult = QuestHeadlessExecutionResult;

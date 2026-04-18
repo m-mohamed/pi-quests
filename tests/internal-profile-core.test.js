@@ -6,10 +6,10 @@ import {
 	parseQuestExperimentCandidate,
 } from "../src/internal-profile-core.js";
 
-test("defaultInternalQuestProfile keeps optimizer-specific benchmark defaults", () => {
+test("defaultInternalQuestProfile keeps optimizer-specific eval defaults", () => {
 	const profile = defaultInternalQuestProfile("project-123");
 	assert.match(profile.promptSurfaces.planningPolicy, /eval cohorts/i);
-	assert.match(profile.promptSurfaces.workerPolicy, /benchmark/i);
+	assert.match(profile.promptSurfaces.workerPolicy, /external eval work/i);
 	assert.match(profile.promptSurfaces.proposerPolicy, /search-set mean score/i);
 	assert.equal(profile.toolAllowlist.proposer.includes("grep"), true);
 });

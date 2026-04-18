@@ -595,9 +595,9 @@ function defaultTrialState(cwd: string): QuestTrialState {
 		target: "repo",
 		activeProfileId: `repo-${projectId}`,
 		storageVersion: 3,
-		benchmarkFamily: "terminal-bench",
-		benchmarkDataset: "terminal-bench-sample@2.0",
-		benchmarkRunMode: "sample",
+		evalFamily: "frontierswe",
+		evalDataset: "frontierswe-sample@v1",
+		evalRunMode: "sample",
 		frontierCandidateIds: [],
 		status: "idle",
 		activeRun: undefined,
@@ -615,33 +615,51 @@ export async function loadQuestTrialState(cwd: string, options: { ensure?: boole
 		}
 		return defaults;
 	}
-	try {
-		const raw = await readFile(paths.stateFile, "utf-8");
-		const parsed = JSON.parse(raw) as Partial<QuestTrialState>;
-		const normalized: QuestTrialState = {
-			...defaults,
-			...parsed,
+		try {
+			const raw = await readFile(paths.stateFile, "utf-8");
+			const parsed = JSON.parse(raw) as Partial<QuestTrialState> & {
+				benchmarkFamily?: QuestTrialState["evalFamily"];
+				benchmarkDataset?: string;
+				benchmarkRunMode?: QuestTrialState["evalRunMode"];
+			};
+			const usedLegacyEvalKeys =
+				(parsed.evalFamily === undefined && parsed.benchmarkFamily !== undefined) ||
+				(parsed.evalDataset === undefined && parsed.benchmarkDataset !== undefined) ||
+				(parsed.evalRunMode === undefined && parsed.benchmarkRunMode !== undefined);
+			const migratedEvalFamily = usedLegacyEvalKeys ? defaults.evalFamily : parsed.evalFamily ?? defaults.evalFamily;
+			const migratedEvalDataset = usedLegacyEvalKeys ? defaults.evalDataset : parsed.evalDataset ?? defaults.evalDataset;
+			const migratedEvalRunMode = usedLegacyEvalKeys ? defaults.evalRunMode : parsed.evalRunMode ?? defaults.evalRunMode;
+			const normalized: QuestTrialState = {
+				...defaults,
+				...parsed,
 			projectId: defaults.projectId,
 			activeProfileId: parsed.activeProfileId ?? defaults.activeProfileId,
 			target: parsed.target ?? defaults.target,
-			storageVersion: defaults.storageVersion,
-			benchmarkFamily: parsed.benchmarkFamily ?? defaults.benchmarkFamily,
-			benchmarkDataset: parsed.benchmarkDataset ?? defaults.benchmarkDataset,
-			benchmarkRunMode: parsed.benchmarkRunMode ?? defaults.benchmarkRunMode,
-			frontierCandidateIds: parsed.frontierCandidateIds ?? defaults.frontierCandidateIds,
-			activeRun: parsed.activeRun
-				? {
-						candidateId: parsed.activeRun.candidateId,
-						phase: parsed.activeRun.phase,
+				storageVersion: defaults.storageVersion,
+				evalFamily: migratedEvalFamily,
+				evalDataset: migratedEvalDataset,
+				evalRunMode: migratedEvalRunMode,
+				currentCandidateId: usedLegacyEvalKeys ? undefined : parsed.currentCandidateId,
+				frontierCandidateIds: usedLegacyEvalKeys ? [] : parsed.frontierCandidateIds ?? defaults.frontierCandidateIds,
+				status: usedLegacyEvalKeys ? "idle" : parsed.status ?? defaults.status,
+				activeRun: usedLegacyEvalKeys
+					? undefined
+					: parsed.activeRun
+					? {
+							candidateId: parsed.activeRun.candidateId,
+							phase: parsed.activeRun.phase,
 						pid: typeof parsed.activeRun.pid === "number" ? parsed.activeRun.pid : undefined,
 						split: parsed.activeRun.split === "search" || parsed.activeRun.split === "hold-out" ? parsed.activeRun.split : undefined,
 						startedAt:
 							typeof parsed.activeRun.startedAt === "number" && Number.isFinite(parsed.activeRun.startedAt)
-								? parsed.activeRun.startedAt
-								: defaults.updatedAt,
-					}
-				: undefined,
-		};
+									? parsed.activeRun.startedAt
+									: defaults.updatedAt,
+						}
+					: undefined,
+				lastSummary: usedLegacyEvalKeys
+					? `Reset legacy benchmark trials state to ${defaults.evalFamily}:${defaults.evalDataset}.`
+					: parsed.lastSummary,
+			};
 		if (options.ensure && JSON.stringify(parsed) !== JSON.stringify(normalized)) {
 			await writeFile(paths.stateFile, `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
 		}

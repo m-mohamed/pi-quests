@@ -16,7 +16,7 @@ import {
 import { registerAgentRun, unregisterAgentRun } from "./agent-process-registry.js";
 import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
 import type {
-	QuestBenchmarkProvenance,
+	QuestEvalProvenance,
 	LiveRunSnapshot,
 	ModelChoice,
 	QuestRole,
@@ -42,7 +42,7 @@ export interface RunAgentTaskOptions {
 	milestoneId?: string;
 	systemPrompt?: string;
 	prompt: string;
-	benchmark?: QuestBenchmarkProvenance;
+	evaluation?: QuestEvalProvenance;
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>;
 	onProcessStart?: (pid: number) => void | Promise<void>;
 }

@@ -4,7 +4,7 @@ import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertInternalMode, internalModeEnabled } from "./internal-mode.js";
 import { runQuestHeadless, type QuestHeadlessRunInput } from "./headless-core.js";
-import type { ModelChoice, QuestBenchmarkName, QuestBenchmarkProvenance, QuestBenchmarkRunMode, QuestState } from "./types.js";
+import type { ModelChoice, QuestEvalName, QuestEvalProvenance, QuestEvalRunMode, QuestState } from "./types.js";
 
 export interface ParsedArgs {
 	command: "help" | "run";
@@ -12,7 +12,7 @@ export interface ParsedArgs {
 	input?: QuestHeadlessRunInput;
 	internalInput?: {
 		profileId?: string;
-		benchmark?: Omit<QuestBenchmarkProvenance, "recordedAt" | "model">;
+		evaluation?: Omit<QuestEvalProvenance, "recordedAt" | "model">;
 	};
 }
 
@@ -27,7 +27,7 @@ interface QuestHeadlessCliResult {
 	timeoutReason?: string;
 	failureCategory?: string;
 	artifactPaths: Record<string, string>;
-	benchmark?: QuestBenchmarkProvenance;
+	evaluation?: QuestEvalProvenance;
 }
 
 function currentProgramName(): string {
@@ -54,16 +54,17 @@ Options:
   --no-auto-accept                 Keep the quest at proposal_ready
   --json                           Print machine-readable JSON to stdout
 ${internal ? `  --profile <id>                   Internal profile id
-  --benchmark <local|terminal-bench|slopcodebench>
-  --dataset <name>                 Internal benchmark dataset identifier
-  --task-id <id>                   Internal benchmark task identifier
-  --checkpoint-id <id>             Internal benchmark checkpoint identifier
-  --run-mode <local|sample|full|smoke|custom>` : ""}
+  --eval <local|frontierswe>
+  --suite <name>                   Internal eval suite identifier
+  --task-id <id>                   Internal eval task identifier
+  --checkpoint-id <id>             Internal eval checkpoint identifier
+  --repo <path>                    FrontierSWE checkout for full-corpus discovery
+  --run-mode <local|sample|full|custom>` : ""}
 
 Examples:
   ${programName} run --instruction-file ./task.txt --json
   ${programName} run --instruction "Implement the repo task" --cwd "$(pwd)"
-${internal ? `  ${programName} run --instruction "Solve the task" --benchmark terminal-bench --dataset terminal-bench-sample@2.0 --task-id task-001 --run-mode smoke` : ""}
+${internal ? `  ${programName} run --instruction "Solve the task" --eval frontierswe --suite frontierswe-sample@v1 --task-id task-001 --run-mode sample` : ""}
 
 Notes:
   Human mode prints a compact summary, the key artifact path, and the next command.
@@ -97,11 +98,12 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 	let dryRun = false;
 	let autoAccept = true;
 	let json = false;
-	let benchmarkName: QuestBenchmarkName | undefined;
-	let dataset: string | undefined;
+	let evalName: QuestEvalName | undefined;
+	let suite: string | undefined;
 	let taskId: string | undefined;
 	let checkpointId: string | undefined;
-	let runMode: QuestBenchmarkRunMode = "custom";
+	let repo: string | undefined;
+	let runMode: QuestEvalRunMode = "custom";
 
 	for (let index = 1; index < argv.length; index++) {
 		const arg = argv[index];
@@ -133,11 +135,11 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 			case "--no-auto-accept":
 				autoAccept = false;
 				break;
-			case "--benchmark":
-				benchmarkName = argv[++index] as QuestBenchmarkName;
+			case "--eval":
+				evalName = argv[++index] as QuestEvalName;
 				break;
-			case "--dataset":
-				dataset = argv[++index];
+			case "--suite":
+				suite = argv[++index];
 				break;
 			case "--task-id":
 				taskId = argv[++index];
@@ -145,8 +147,11 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 			case "--checkpoint-id":
 				checkpointId = argv[++index];
 				break;
+			case "--repo":
+				repo = resolve(argv[++index]);
+				break;
 			case "--run-mode":
-				runMode = argv[++index] as QuestBenchmarkRunMode;
+				runMode = argv[++index] as QuestEvalRunMode;
 				break;
 			case "--json":
 				json = true;
@@ -161,11 +166,11 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 
 	if (!instruction && instructionFile) instruction = await readFile(resolve(instructionFile), "utf-8");
 	if (!instruction?.trim()) throw new Error(`Missing instruction.\n\n${usage()}`);
-	if ((profileId || benchmarkName || dataset || taskId || checkpointId) && !internalModeEnabled()) {
-		assertInternalMode("Quest benchmark and profile surfaces");
+	if ((profileId || evalName || suite || taskId || checkpointId || repo) && !internalModeEnabled()) {
+		assertInternalMode("Quest eval and profile surfaces");
 	}
-	if ((benchmarkName || dataset || taskId || checkpointId) && (!benchmarkName || !dataset || !taskId)) {
-		throw new Error("Benchmark runs require --benchmark, --dataset, and --task-id together.");
+	if ((evalName || suite || taskId || checkpointId || repo) && (!evalName || !suite || !taskId)) {
+		throw new Error("Eval runs require --eval, --suite, and --task-id together.");
 	}
 
 	return {
@@ -176,24 +181,24 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 			instruction: instruction.trim(),
 			modelChoice: parseModelChoice(
 				modelSpec,
-				thinkingLevel ?? (benchmarkName ? (runMode === "full" ? "medium" : "low") : undefined),
+				thinkingLevel ?? (evalName ? (runMode === "full" ? "medium" : "low") : undefined),
 			),
 			timeoutMs,
 			dryRun,
 			autoAccept,
 		},
 		internalInput:
-			profileId || benchmarkName
+			profileId || evalName
 				? {
 						profileId,
-						benchmark: benchmarkName
+						evaluation: evalName
 							? {
-									benchmark: benchmarkName,
-									dataset: dataset!,
+									name: evalName,
+									dataset: suite!,
 									taskId: taskId!,
 									checkpointId,
 									runMode,
-									adapterVersion: "quest-bench-v1",
+									adapterVersion: repo ? `frontierswe-repo:${repo}` : "frontierswe-sample-v1",
 								}
 							: undefined,
 					}
@@ -207,7 +212,7 @@ function humanNextSteps(result: QuestHeadlessCliResult): string[] {
 		if (result.artifactPaths.validationState) steps.push(`bat ${result.artifactPaths.validationState}`);
 		return steps;
 	}
-	if (result.status === "completed" && result.benchmark) {
+	if (result.status === "completed" && result.evaluation) {
 		return [`bat ${result.artifactPaths.result}`];
 	}
 	return [];
@@ -267,7 +272,7 @@ async function main() {
 		} else {
 			printHumanSummary(result);
 		}
-		process.exitCode = parsed.internalInput?.benchmark ? 0 : result.status === "blocked" || result.status === "timeout" ? 1 : 0;
+		process.exitCode = parsed.internalInput?.evaluation ? 0 : result.status === "blocked" || result.status === "timeout" ? 1 : 0;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(message);

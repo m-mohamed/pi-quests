@@ -1,15 +1,6 @@
-# Internal Notes
+# Internal Eval Docs
 
-This directory is maintainer-facing.
+- [`reproducibility.md`](./reproducibility.md): maintainer commands for local and FrontierSWE eval runs
+- [`baseline-results.md`](./baseline-results.md): current FrontierSWE eval status and local trials expectations
 
-It exists to improve Quest, not to define the public package surface.
-
-Use these docs for:
-
-- benchmark and eval methodology
-- Harbor and adapter work
-- trace mining and optimization notes
-- frontier candidate analysis
-- internal handoffs
-
-If a document here starts driving the public package story, move that material back into [`../quest-architecture.md`](../quest-architecture.md) or [`../../README.md`](../../README.md) and rewrite it in Quest-first terms.
+These documents are the maintained internal eval references for `pi-quests`.

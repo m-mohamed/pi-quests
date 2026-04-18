@@ -1,66 +1,37 @@
 # Reproducibility
 
-## Package checks
+## Local Quest-Native Evals
 
 ```bash
-npm run check
-node --import tsx scripts/evals.ts --suite offline-core
-node --import tsx scripts/evals-scenario.ts
+npm run internal:eval:local
 ```
 
-## Local headless substrate
+This runs the built-in suites from `src/evals-core.ts`.
+
+## FrontierSWE Sample
 
 ```bash
-npm run internal:benchmark:local
+npm run internal:eval:frontierswe:sample
 ```
 
-This command exercises the standalone local Quest benchmark substrate. It is a development check, not a frontier benchmark family.
+This uses the vendored `frontierswe-sample@v1` task set under [`evals/frontierswe/sample-tasks`](../../evals/frontierswe/sample-tasks).
 
-## Terminal-Bench through Harbor
-
-Inspect the trust gate directly:
+## FrontierSWE Full Corpus
 
 ```bash
-npm run internal:benchmark:tbench:integrity
+npm run internal:eval:frontierswe:full -- --repo /path/to/frontier-swe
 ```
 
-Preflight the local environment first:
+Use a local checkout of the upstream FrontierSWE repository for `frontierswe@public-v1`.
+
+## Quest Headless Internal Eval Mode
 
 ```bash
-npm run internal:benchmark:tbench:preflight
-```
-
-Then run the official sample path:
-
-```bash
-npm run internal:benchmark:tbench:sample
-```
-
-For the full official dataset:
-
-```bash
-npm run internal:benchmark:tbench:full
-```
-
-To preview the Harbor invocation without running it:
-
-```bash
-node --import tsx benchmarks/harbor/run.ts --dataset terminal-bench-sample@2.0 --run-mode sample --dry-run
-```
-
-## SlopCodeBench official runner overlay
-
-Check out the official runner first, then execute one problem through the overlay:
-
-```bash
-npm run internal:benchmark:slop:official -- --repo /tmp/slop-code-bench --problem <problem-id>
-```
-
-## Headless Quest directly
-
-```bash
-quest-headless run \
-  --instruction "Plan and execute a small benchmark task" \
-  --cwd "$(pwd)" \
+PI_QUESTS_INTERNAL=1 node --import tsx src/quest-headless.ts run \
+  --instruction "Finish the eval task" \
+  --eval frontierswe \
+  --suite frontierswe-sample@v1 \
+  --task-id update-api-port \
+  --run-mode sample \
   --json
 ```

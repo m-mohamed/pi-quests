@@ -9,7 +9,7 @@ import {
 } from "./headless-runner-core.js";
 
 export interface QuestHeadlessRunInput extends QuestHeadlessExecutionInput {
-	benchmark?: never;
+	evaluation?: never;
 }
 
 export type QuestHeadlessRunResult = QuestHeadlessExecutionResult;

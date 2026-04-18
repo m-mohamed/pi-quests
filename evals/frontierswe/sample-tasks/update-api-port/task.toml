@@ -1,0 +1,14 @@
+[metadata]
+category = "config"
+difficulty = "easy"
+tags = ["config", "text-edit"]
+
+[environment]
+docker_image = "pi-quests/frontierswe-sample-update-api-port:v1"
+build_timeout_sec = 180
+
+[agent]
+timeout_sec = 300
+
+[verifier]
+timeout_sec = 60

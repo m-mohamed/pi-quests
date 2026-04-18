@@ -1,64 +1,28 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
-const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const ACTIVE_FILES = [
-	"package.json",
-	"README.md",
-	"docs/tutorial.md",
-	"docs/internal/README.md",
-	"docs/internal/benchmark-card.md",
-	"docs/internal/reproducibility.md",
-	"docs/internal/baseline-results.md",
-	"docs/internal/arxiv-paper.md",
-	"docs/internal/harness-engineering-deep-dive.md",
-	"benchmarks/harbor/README.md",
-	"benchmarks/slopcodebench/README.md",
-];
-const BANNED_REFERENCES = [
-	"runQuestTrialsLoop",
-	"executeTrialCandidateAgent",
-	"trace-replays",
-	"terminal-bench-replays",
-	"slopcodebench-replays",
-	".pi/quests/lab",
-	".pi/quests/meta-harness",
-	"benchmark:slop:smoke",
-	"benchmark:slop:local",
-];
+const REPO = "/Users/mohamedmohamed/research/pi-quests";
 
-async function collectTrackedTextFiles(root) {
-	const collected = [];
-	for (const entry of await readdir(root, { withFileTypes: true })) {
-		if (entry.name.startsWith(".")) continue;
-		const next = join(root, entry.name);
-		if (entry.isDirectory()) {
-			collected.push(...(await collectTrackedTextFiles(next)));
-			continue;
-		}
-		if (entry.isFile() && /\.(ts|js|json|md)$/.test(entry.name)) collected.push(next);
+function rgNoMatches(pattern, paths) {
+	try {
+		const output = execFileSync("rg", ["-n", pattern, ...paths], { encoding: "utf-8" });
+		return output.trim();
+	} catch (error) {
+		if (error && typeof error === "object" && "status" in error && error.status === 1) return "";
+		throw error;
 	}
-	return collected;
 }
 
-test("shipped source and active docs are free of replay-era trials references", async () => {
-	const files = [
-		...(await collectTrackedTextFiles(join(REPO_ROOT, "src"))),
-		...(await collectTrackedTextFiles(join(REPO_ROOT, "benchmarks"))),
-		...ACTIVE_FILES.map((file) => join(REPO_ROOT, file)).filter((file) => existsSync(file)),
-	];
-	for (const file of files) {
-		const contents = await readFile(file, "utf-8");
-		for (const banned of BANNED_REFERENCES) {
-			assert.equal(
-				contents.includes(banned),
-				false,
-				`${file} still references banned legacy text: ${banned}`,
-			);
-		}
-	}
+test("source tree no longer imports removed Harbor modules", () => {
+	const matches = rgNoMatches("harbor-integrity|harbor-runtime|benchmark-helpers", [`${REPO}/src`]);
+	assert.equal(matches, "");
+});
+
+test("source tree no longer carries removed benchmark family names", () => {
+	const matches = rgNoMatches(
+		"terminal-bench|slopcodebench|search-benchmark|hold-out-benchmark",
+		[`${REPO}/src`],
+	);
+	assert.equal(matches, "");
 });

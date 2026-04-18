@@ -64,7 +64,7 @@ function shellSingleQuote(value: string): string {
 export function buildQuestShellEnvironment(
 	cwd: string,
 	quest: Pick<QuestState, "id" | "cwd" | "status"> | null,
-	trialState: Pick<QuestTrialState, "status" | "activeProfileId" | "benchmarkFamily" | "benchmarkDataset"> | null,
+	trialState: Pick<QuestTrialState, "status" | "activeProfileId" | "evalFamily" | "evalDataset"> | null,
 ): Record<string, string> {
 	const env: Record<string, string> = {};
 	if (quest && quest.cwd === cwd) {
@@ -76,8 +76,8 @@ export function buildQuestShellEnvironment(
 	if (trialState) {
 		env.PI_QUESTS_TRIAL_STATUS = trialState.status;
 		env.PI_QUESTS_TRIAL_PROFILE_ID = trialState.activeProfileId;
-		if (trialState.benchmarkFamily) env.PI_QUESTS_TRIAL_BENCHMARK = trialState.benchmarkFamily;
-		if (trialState.benchmarkDataset) env.PI_QUESTS_TRIAL_DATASET = trialState.benchmarkDataset;
+		if (trialState.evalFamily) env.PI_QUESTS_TRIAL_EVAL = trialState.evalFamily;
+		if (trialState.evalDataset) env.PI_QUESTS_TRIAL_SUITE = trialState.evalDataset;
 	}
 	return env;
 }

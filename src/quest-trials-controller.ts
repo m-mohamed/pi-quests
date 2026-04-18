@@ -124,13 +124,13 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 
 	const [subcommand, ...rest] = trimmed.split(/\s+/);
 	const remainder = rest.join(" ").trim();
-	const requestedBenchmark = readFlag("--benchmark");
-	if (requestedBenchmark && requestedBenchmark !== "terminal-bench" && requestedBenchmark !== "slopcodebench") {
-		await deps.emitNote("Unsupported benchmark family. Use --benchmark terminal-bench or --benchmark slopcodebench.", "warning");
+	const requestedEval = readFlag("--eval");
+	if (requestedEval && requestedEval !== "local" && requestedEval !== "frontierswe") {
+		await deps.emitNote("Unsupported eval family. Use --eval local or --eval frontierswe.", "warning");
 		return;
 	}
-	const benchmark = requestedBenchmark as "terminal-bench" | "slopcodebench" | undefined;
-	const dataset = readFlag("--dataset") ?? (remainder && !remainder.startsWith("--") ? remainder : undefined);
+	const evaluation = requestedEval as "local" | "frontierswe" | undefined;
+	const suite = readFlag("--suite") ?? (remainder && !remainder.startsWith("--") ? remainder : undefined);
 	const repo = readFlag("--repo");
 
 	switch (subcommand) {
@@ -147,8 +147,8 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 			const iterations = Number(readFlag("--iterations") ?? "1");
 			try {
 				const result = await trials.runTrialOptimization(deps.ctx.cwd, modelChoice, {
-					benchmark,
-					dataset,
+					eval: evaluation,
+					suite,
 					repo,
 					force: hasFlag("--force"),
 					iterations: Number.isFinite(iterations) && iterations > 0 ? iterations : 1,
@@ -190,12 +190,12 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 			return;
 		}
 
-		case "prepare-benchmark": {
-			const prepared = await trials.prepareTrialBenchmark(deps.ctx.cwd, { benchmark, dataset, repo, force: hasFlag("--force") });
+		case "prepare-eval": {
+			const prepared = await trials.prepareTrialEval(deps.ctx.cwd, { eval: evaluation, suite, repo, force: hasFlag("--force") });
 			deps.setCurrentTrialState(prepared.state);
 			await deps.applyQuestUi();
 			await deps.emitNote(
-				`Prepared ${prepared.manifest.family}:${prepared.manifest.dataset}: ${prepared.searchSet.totalItems} search / ${prepared.holdOutSet.totalItems} hold-out items.\nNext: /quest trials baseline${benchmark ? ` --benchmark ${benchmark}` : ""}${dataset ? ` --dataset ${dataset}` : ""}${repo ? ` --repo ${repo}` : ""}`,
+				`Prepared ${prepared.manifest.family}:${prepared.manifest.dataset}: ${prepared.searchSet.totalItems} search / ${prepared.holdOutSet.totalItems} hold-out items.\nNext: /quest trials baseline${evaluation ? ` --eval ${evaluation}` : ""}${suite ? ` --suite ${suite}` : ""}${repo ? ` --repo ${repo}` : ""}`,
 			);
 			return;
 		}
@@ -218,8 +218,8 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 					: createDefaultModelChoice(deps.ctx.model ?? null, deps.pi.getThinkingLevel() as ThinkingLevel);
 			try {
 				const result = await trials.runTrialBaseline(deps.ctx.cwd, modelChoice, {
-					benchmark,
-					dataset,
+					eval: evaluation,
+					suite,
 					repo,
 					force: hasFlag("--force"),
 					onSnapshot: async (snapshotUpdate: LiveRunSnapshot) => {
@@ -256,7 +256,7 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 
 		default: {
 			await deps.emitNote(
-				"Unknown /quest trials subcommand. Use /quest trials status, /quest trials prepare-benchmark, /quest trials analyze-community, /quest trials baseline, /quest trials run, /quest trials stop, or /quest trials profile.",
+				"Unknown /quest trials subcommand. Use /quest trials status, /quest trials prepare-eval, /quest trials analyze-community, /quest trials baseline, /quest trials run, /quest trials stop, or /quest trials profile.",
 				"warning",
 			);
 		}

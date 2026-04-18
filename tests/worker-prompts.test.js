@@ -94,28 +94,29 @@ test("worker and validator prompts explicitly honor AGENTS and loaded skills", (
 	assert.match(plannerSystemPrompt, /validation contract before the feature list/);
 });
 
-test("benchmark worker prompts keep verifier and system-tool surfaces immutable", () => {
+test("eval worker prompts keep verifier-owned surfaces immutable", () => {
 	const quest = sampleQuest();
 	const profile = defaultQuestProfile(quest.projectId);
 	const milestone = quest.plan.milestones[0];
 	const feature = quest.plan.features[0];
-	const benchmark = {
-		benchmark: "terminal-bench",
-		dataset: "terminal-bench-sample@2.0",
+	const evaluation = {
+		name: "frontierswe",
+		dataset: "frontierswe-sample@v1",
 		taskId: "regex-log",
 		runMode: "sample",
-		adapterVersion: "quest-bench-v1",
+		adapterVersion: "frontierswe-sample-v1",
 		recordedAt: Date.now(),
 		model: "openai-codex/gpt-5.4",
 		score: 0,
 		passed: false,
 	};
 
-	const featurePrompt = buildFeaturePrompt(quest, feature, milestone, [], profile, benchmark);
+	const featurePrompt = buildFeaturePrompt(quest, feature, milestone, [], profile, evaluation);
 	const workerSystemPrompt = buildWorkerSystemPrompt(profile, true);
 
-	assert.match(featurePrompt, /Treat verifier scripts, reward files, PATH-critical tools/);
-	assert.match(featurePrompt, /Do not ask for human help, approval, or follow-up on benchmark tasks/);
+	assert.match(featurePrompt, /FrontierSWE tasks run inside a Docker task image/);
+	assert.match(featurePrompt, /verifier-owned files .* immutable/);
+	assert.match(featurePrompt, /Do not ask for human help, approval, or follow-up on eval tasks/);
 	assert.match(featurePrompt, /re-open the exact output paths and verify/);
 	assert.match(featurePrompt, /external verifier decides/);
 	assert.match(featurePrompt, /finalSubmissionReady/);
@@ -125,43 +126,42 @@ test("benchmark worker prompts keep verifier and system-tool surfaces immutable"
 	assert.match(workerSystemPrompt, /Do not request human help or leave provisional output/);
 	assert.match(workerSystemPrompt, /Do not treat your own confidence as the final pass signal/);
 	assert.match(workerSystemPrompt, /re-open the exact outputs and confirm a single final submission is ready/);
-	assert.match(workerSystemPrompt, /After one failed or slow setup path, pivot/);
 });
 
-test("benchmark worker prompts add modality hints for unseen full-benchmark tasks", () => {
+test("eval worker prompts add modality hints for FrontierSWE tasks", () => {
 	const quest = sampleQuest();
 	const profile = defaultQuestProfile(quest.projectId);
 	const milestone = quest.plan.milestones[0];
 	const feature = quest.plan.features[0];
 
 	const codeFromImagePrompt = buildFeaturePrompt(quest, feature, milestone, [], profile, {
-		benchmark: "terminal-bench",
-		dataset: "terminal-bench@2.0",
+		name: "frontierswe",
+		dataset: "frontierswe@public-v1",
 		taskId: "code-from-image",
 		runMode: "full",
-		adapterVersion: "quest-bench-v1",
+		adapterVersion: "frontierswe-public-v1",
 		recordedAt: Date.now(),
 		model: "openai-codex/gpt-5.4",
 		score: 0,
 		passed: false,
 	});
 	const gitPrompt = buildFeaturePrompt(quest, feature, milestone, [], profile, {
-		benchmark: "terminal-bench",
-		dataset: "terminal-bench@2.0",
+		name: "frontierswe",
+		dataset: "frontierswe@public-v1",
 		taskId: "git-multibranch",
 		runMode: "full",
-		adapterVersion: "quest-bench-v1",
+		adapterVersion: "frontierswe-public-v1",
 		recordedAt: Date.now(),
 		model: "openai-codex/gpt-5.4",
 		score: 0,
 		passed: false,
 	});
 	const serverPrompt = buildFeaturePrompt(quest, feature, milestone, [], profile, {
-		benchmark: "terminal-bench",
-		dataset: "terminal-bench@2.0",
+		name: "frontierswe",
+		dataset: "frontierswe@public-v1",
 		taskId: "pypi-server",
 		runMode: "full",
-		adapterVersion: "quest-bench-v1",
+		adapterVersion: "frontierswe-public-v1",
 		recordedAt: Date.now(),
 		model: "openai-codex/gpt-5.4",
 		score: 0,

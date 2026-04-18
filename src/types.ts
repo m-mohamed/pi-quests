@@ -24,8 +24,8 @@ export type QuestTrialPhase =
 	| "baseline-search"
 	| "baseline-hold-out"
 	| "propose"
-	| "search-benchmark"
-	| "hold-out-benchmark";
+	| "search-eval"
+	| "hold-out-eval";
 export type QuestPromptSurfaceId =
 	| "planning"
 	| "feature-worker"
@@ -180,16 +180,16 @@ export interface PiSessionTrace {
 	derivedTags: QuestFailureTag[];
 	derivedIssues: string[];
 }
-export type QuestBenchmarkName = "local" | "terminal-bench" | "slopcodebench";
-export type QuestBenchmarkRunMode = "local" | "sample" | "full" | "smoke" | "custom";
-export type QuestFrontierBenchmarkFamily = "terminal-bench" | "slopcodebench";
+export type QuestEvalName = "local" | "frontierswe";
+export type QuestEvalRunMode = "local" | "sample" | "full" | "custom";
+export type QuestFrontierEvalFamily = "local" | "frontierswe";
 
-export interface QuestBenchmarkProvenance {
-	benchmark: QuestBenchmarkName;
+export interface QuestEvalProvenance {
+	name: QuestEvalName;
 	dataset: string;
 	taskId: string;
 	checkpointId?: string;
-	runMode: QuestBenchmarkRunMode;
+	runMode: QuestEvalRunMode;
 	adapterVersion: string;
 	recordedAt: number;
 	model?: string;
@@ -197,34 +197,34 @@ export interface QuestBenchmarkProvenance {
 	score?: number;
 }
 
-export interface QuestBenchmarkWorkItem {
+export interface QuestEvalWorkItem {
 	id: string;
 	name: string;
-	family: QuestFrontierBenchmarkFamily;
+	family: QuestFrontierEvalFamily;
 	dataset: string;
 	path?: string;
 	tags: string[];
 	metadata?: Record<string, unknown>;
 }
 
-export interface QuestBenchmarkManifest {
+export interface QuestEvalManifest {
 	id: string;
-	family: QuestFrontierBenchmarkFamily;
+	family: QuestFrontierEvalFamily;
 	dataset: string;
-	runMode: QuestBenchmarkRunMode;
+	runMode: QuestEvalRunMode;
 	createdAt: number;
 	totalItems: number;
 	seed?: number;
 	source: "vendored" | "registry" | "generated" | "discovered";
 	sourceFingerprint: string;
-	items: QuestBenchmarkWorkItem[];
+	items: QuestEvalWorkItem[];
 	tagSummary: Record<string, number>;
 	notes?: string[];
 }
 
-export interface QuestBenchmarkSplit {
+export interface QuestEvalSplit {
 	id: string;
-	family: QuestFrontierBenchmarkFamily;
+	family: QuestFrontierEvalFamily;
 	dataset: string;
 	split: "search" | "hold-out";
 	createdAt: number;
@@ -232,7 +232,7 @@ export interface QuestBenchmarkSplit {
 	sourceManifestId: string;
 	sourceFingerprint: string;
 	totalItems: number;
-	items: QuestBenchmarkWorkItem[];
+	items: QuestEvalWorkItem[];
 	tagSummary: Record<string, number>;
 	notes?: string[];
 }
@@ -529,7 +529,7 @@ export interface WorkerRunRecord {
 		contextTokens: number;
 		turns: number;
 	};
-	benchmark?: QuestBenchmarkProvenance;
+	evaluation?: QuestEvalProvenance;
 }
 
 export interface QuestTraceBundle {
@@ -571,13 +571,13 @@ export interface QuestTraceBundle {
 	cancellationReason?: QuestCancellationReason;
 	usage?: WorkerRunRecord["usage"];
 	source: "worker_run" | "planning_session";
-	benchmark?: QuestBenchmarkProvenance;
+	evaluation?: QuestEvalProvenance;
 }
 
 export interface QuestCandidateWorkItemResult {
 	itemId: string;
 	itemName: string;
-	family: QuestFrontierBenchmarkFamily;
+	family: QuestFrontierEvalFamily;
 	dataset: string;
 	split: "search" | "hold-out";
 	status: "passed" | "failed" | "error";
@@ -591,12 +591,12 @@ export interface QuestCandidateWorkItemResult {
 	artifactPaths: string[];
 	failureReason?: string;
 	rewardValues?: Record<string, number>;
-	benchmarkMetrics?: Record<string, unknown>;
-	benchmark?: QuestBenchmarkProvenance;
+	evalMetrics?: Record<string, unknown>;
+	evaluation?: QuestEvalProvenance;
 }
 
 export interface QuestCandidateScorecard {
-	family: QuestFrontierBenchmarkFamily;
+	family: QuestFrontierEvalFamily;
 	split: "search" | "hold-out";
 	dataset: string;
 	generatedAt: number;
@@ -609,7 +609,7 @@ export interface QuestCandidateScorecard {
 	totalCost: number;
 	totalDurationMs: number;
 	tagBreakdown?: Record<string, QuestCandidateTagMetrics>;
-	benchmarkMetrics?: Record<string, unknown>;
+	evalMetrics?: Record<string, unknown>;
 	items: QuestCandidateWorkItemResult[];
 }
 
@@ -716,9 +716,9 @@ export interface QuestTrialState {
 	target: QuestTrialTarget;
 	activeProfileId: string;
 	storageVersion?: number;
-	benchmarkFamily?: QuestFrontierBenchmarkFamily;
-	benchmarkDataset?: string;
-	benchmarkRunMode?: QuestBenchmarkRunMode;
+	evalFamily?: QuestFrontierEvalFamily;
+	evalDataset?: string;
+	evalRunMode?: QuestEvalRunMode;
 	currentCandidateId?: string;
 	frontierCandidateIds?: string[];
 	status: QuestTrialStatus;

@@ -4,12 +4,11 @@ import {
 	runAgentTask,
 	type RunAgentTaskOptions,
 	type RunAgentTaskResult,
-	type UsageStats,
 } from "./agent-task-runner.js";
 import { promptSurfaceText, toolAllowlistForRole } from "./profile-core.js";
 import { parseQuestPlanText } from "./plan-core.js";
 import type {
-	QuestBenchmarkProvenance,
+	QuestEvalProvenance,
 	QuestExperimentCandidate,
 	LearnedWorkflow,
 	LiveRunSnapshot,
@@ -100,21 +99,7 @@ interface TrialProposerContext {
 type RunPiTaskOptions = RunAgentTaskOptions;
 type RunPiTaskResult = RunAgentTaskResult;
 
-const DEFAULT_USAGE: UsageStats = {
-	input: 0,
-	output: 0,
-	cacheRead: 0,
-	cacheWrite: 0,
-	cost: 0,
-	contextTokens: 0,
-	turns: 0,
-};
-
 type ValidatorPass = "code_review" | "user_surface";
-
-async function loadBenchmarkHelpers(): Promise<typeof import("./benchmark-helpers.js")> {
-	return import("./benchmark-helpers.js");
-}
 
 async function parseInternalQuestExperimentCandidate(text: string): Promise<QuestExperimentCandidate | null> {
 	const internalProfiles = await import("./internal-profile-core.js");
@@ -152,23 +137,23 @@ function normalizeStringList(value: unknown): string[] {
 		.filter(Boolean);
 }
 
-function benchmarkExecutionIssues(parsed: FeatureWorkerPayload | null): string[] {
+function evaluationExecutionIssues(parsed: FeatureWorkerPayload | null): string[] {
 	if (!parsed) {
-		return ["Worker did not return the required benchmark JSON block."];
+		return ["Worker did not return the required eval JSON block."];
 	}
 
 	const issues: string[] = [];
 	if (parsed.status !== "completed") {
-		issues.push("Worker did not declare the benchmark task completed.");
+		issues.push("Worker did not declare the eval task completed.");
 	}
 	if (parsed.finalSubmissionReady !== true) {
 		issues.push("Worker did not confirm a single final submission was ready.");
 	}
 	if (normalizeStringList(parsed.selfCheck).length === 0) {
-		issues.push("Worker did not report a final self-check on the benchmark outputs.");
+		issues.push("Worker did not report a final self-check on the eval outputs.");
 	}
 	if (parsed.needsHuman === true) {
-		issues.push("Worker requested human handoff during benchmark execution.");
+		issues.push("Worker requested human handoff during eval execution.");
 	}
 	for (const contradiction of normalizeStringList(parsed.contradictions).slice(0, 3)) {
 		issues.push(`Worker reported unresolved contradictory evidence: ${contradiction}`);
@@ -236,88 +221,16 @@ function loadedSessionContextGuidance(): string {
 - If a relevant skill is already loaded, use it instead of inventing a new workflow from scratch.`;
 }
 
-function benchmarkWorkspaceHint(benchmark: QuestBenchmarkProvenance): string {
-	if (benchmark.benchmark === "terminal-bench") {
+function evaluationWorkspaceHint(evaluation: QuestEvalProvenance): string {
+	if (evaluation.name === "frontierswe") {
 		return `Task workspace: /app
-Task note: terminal-bench task inputs and required output files usually live under /app, while Quest state lives under /workspace/.pi.`;
+Task note: FrontierSWE tasks run inside a Docker task image. Treat /app as the writable task workspace, /logs/agent as agent logs, and verifier-owned files under /tests or verifier-only mounts as immutable.`;
 	}
-	if (benchmark.benchmark === "slopcodebench") {
-		return "Task workspace: the checked-out problem repository under the current working tree.";
-	}
-	return "Task workspace: use the paths named in the task.";
+	return "Task workspace: use the paths named in the task or suite instructions.";
 }
 
-function benchmarkTaskSpecificHint(benchmark: QuestBenchmarkProvenance): string {
-	const taskId = benchmark.taskId;
-	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "chess-best-move") {
-		return `Task-specific hint:
-- A native helper is available at /opt/quest-package/dist/benchmark-helpers.js.
-- First action: run this exact command and stop if it writes /app/move.txt successfully:
-  node /opt/quest-package/dist/benchmark-helpers.js terminal-bench chess-best-move /app/chess_board.png /app/move.txt
-- Treat /app/chess_board.png as a synthetic 8x8 board image with uniform squares and rendered chess glyphs.
-- Use Python with PIL to crop the board into equal squares, compare each square against generated piece templates or background-only squares, then recover the board position.
-- Use python-chess to enumerate legal moves and keep every move that delivers immediate checkmate.
-- Write every winning move, one per line, to /app/move.txt.`;
-	}
-	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "polyglot-c-py") {
-		return `Task-specific hint:
-- A native helper is available at /opt/quest-package/dist/benchmark-helpers.js.
-- First action: run this exact command and stop if it writes /app/polyglot/main.py.c successfully:
-  node /opt/quest-package/dist/benchmark-helpers.js terminal-bench polyglot-c-py /app/polyglot /app/polyglot/main.py.c
-- The verifier expects /app/polyglot to contain exactly one file at the end: main.py.c.
-- If you compile or run auxiliary checks, put temporary binaries under /tmp or remove them before finishing.
-- Do not leave /app/polyglot/cmain or any other extra artifact behind after validation.`;
-	}
-	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "fix-code-vulnerability") {
-		return `Task-specific hint:
-- A native helper is available at /opt/quest-package/dist/benchmark-helpers.js.
-- First action: run this exact command and stop if it patches /app/bottle.py and writes /app/report.jsonl successfully:
-  node /opt/quest-package/dist/benchmark-helpers.js terminal-bench fix-code-vulnerability /app /app/report.jsonl
-- The report must identify /app/bottle.py with the exact CWE id list expected by the verifier.
-- If manual fallback is required, patch only the vulnerable header-validation surface and keep the fix narrow.`;
-	}
-	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "regex-log") {
-		return `Task-specific hint:
-- A native helper is available at /opt/quest-package/dist/benchmark-helpers.js.
-- First action: run this exact command and stop if it writes /app/regex.txt successfully:
-  node /opt/quest-package/dist/benchmark-helpers.js terminal-bench regex-log /app /app/regex.txt
-- If manual fallback is required, /app may start empty for this task. Do not waste time searching for hidden inputs.
-- The full task is specified in the prompt. The only required deliverable is /app/regex.txt.`;
-	}
-	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "log-summary-date-ranges") {
-		return `Task-specific hint:
-- A native helper is available at /opt/quest-package/dist/benchmark-helpers.js.
-- First action: run this exact command and stop if it writes /app/summary.csv successfully:
-  node /opt/quest-package/dist/benchmark-helpers.js terminal-bench log-summary-date-ranges /app/logs /app/summary.csv
-- Count only bracketed severities like [ERROR], [WARNING], and [INFO].
-- Keep the CSV rows in the exact required order.`;
-	}
-	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "qemu-startup") {
-		return `Task-specific hint:
-- A native helper is available at /opt/quest-package/dist/benchmark-helpers.js.
-- First action: run this exact command and stop if it leaves telnet on port 6665 ready:
-  node /opt/quest-package/dist/benchmark-helpers.js terminal-bench qemu-startup /app/alpine.iso /app/alpine-disk.qcow2
-- Use the installed qemu-system-x86_64 binary; do not build QEMU from source.
-- Prefer the simplest benchmark-native path: boot the ISO with QEMU in the background and expose the serial console on a telnet-backed port.
-- Block until the serial console actually emits the login prompt.`;
-	}
-	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "qemu-alpine-ssh") {
-		return `Task-specific hint:
-- A native helper is available at /opt/quest-package/dist/benchmark-helpers.js.
-- First action: run this exact command and stop if SSH on port 2222 succeeds:
-  node /opt/quest-package/dist/benchmark-helpers.js terminal-bench qemu-alpine-ssh /app/alpine.iso /app/alpine-disk.qcow2
-- Use the installed qemu-system-x86_64 binary; do not build QEMU from source.
-- Prefer the simplest benchmark-native path: boot the ISO with QEMU in the background, log in over the telnet-backed serial console, then bring up networking and OpenSSH from there.
-- Configure OpenSSH from that serial console, set the root password to \`password123\`, and verify \`ssh -p 2222 root@localhost\` works.`;
-	}
-	if (benchmark.benchmark === "terminal-bench" && benchmark.taskId === "configure-git-webserver") {
-		return `Task-specific hint:
-- A native helper is available at /opt/quest-package/dist/benchmark-helpers.js.
-- First action: run this exact command and stop if it provisions the bare repo, post-receive hook, SSH service, and nginx on port 8080:
-  node /opt/quest-package/dist/benchmark-helpers.js terminal-bench configure-git-webserver /var/www/html /git/server
-- The bare repository must deploy pushes into the web root through a post-receive hook.
-- The webserver must serve the deployed content on port 8080 without extra manual steps after the push.`;
-	}
+function evaluationTaskHint(evaluation: QuestEvalProvenance): string {
+	const taskId = evaluation.taskId;
 	if (
 		/(image|video|ocr|gcode|elf)/.test(taskId)
 	) {
@@ -390,19 +303,19 @@ export function buildFeaturePrompt(
 	milestone: QuestMilestone,
 	workflows: LearnedWorkflow[],
 	profile: QuestProfile,
-	benchmark?: QuestBenchmarkProvenance,
-	nativeHelperFailure?: string,
+	evaluation?: QuestEvalProvenance,
 ): string {
-	if (benchmark) {
-		return `Benchmark task:
-- benchmark: ${benchmark.benchmark}
-- dataset: ${benchmark.dataset}
-- task: ${benchmark.taskId}
-- run mode: ${benchmark.runMode}
+	if (evaluation) {
+		return `Eval task:
+- eval: ${evaluation.name}
+- suite: ${evaluation.dataset}
+- task: ${evaluation.taskId}
+- run mode: ${evaluation.runMode}
+- checkpoint: ${evaluation.checkpointId ?? "none"}
 
 Repository root: ${quest.cwd}
 
-${benchmarkWorkspaceHint(benchmark)}
+${evaluationWorkspaceHint(evaluation)}
 
 Task goal:
 ${quest.goal}
@@ -414,13 +327,12 @@ ${feature.description}
 Execution policy:
 - Solve the task with the shortest correct path.
 - Ignore .pi/, quest bookkeeping, candidate archives, and unrelated repo cleanup.
-- Inspect named task paths before broad exploration. For Terminal-Bench, start with /app inputs and required /app outputs.
-- If a native helper command is provided below, run it first. If it fails, do not retry it.
+- Inspect named task paths before broad exploration.
 - When the task is repo-local code work with an existing test harness, add or update the narrowest failing test before broader implementation.
 - Produce the exact required artifact, re-open it for one final format check, then stop.
 - Keep narration minimal and spend tokens on execution.
 
-Benchmark heuristics:
+Eval heuristics:
 - Prefer a short bash or Python script over extended exploration.
 - Use Python or CLI tools for images, archives, PDFs, and structured data instead of raw text inspection.
 - Keep scratch work under /tmp and leave task directories with only required deliverables.
@@ -429,15 +341,10 @@ Benchmark heuristics:
 - Before you finish, re-open the exact output paths and verify their bytes, rows, or fields match the task contract.
 - If your own check fails or new evidence contradicts the current approach, re-plan inside the same turn before the final JSON.
 - Your job is implementation only. Do not treat your own confidence as the final judge; the external verifier decides.
-- Do not ask for human help, approval, or follow-up on benchmark tasks; either finish cleanly or return blocked.
+- Do not ask for human help, approval, or follow-up on eval tasks; either finish cleanly or return blocked.
 - Treat verifier scripts, reward files, PATH-critical tools, package-manager shims, and system binaries as immutable unless the task explicitly requires changes there.
 
-${benchmarkTaskSpecificHint(benchmark)}
-
-${nativeHelperFailure ? `Native helper status:
-- Quest already attempted the native helper path and it failed with:
-  ${nativeHelperFailure}
-- Do not retry the same helper command. Fall back to a manual solution path.` : ""}
+${evaluationTaskHint(evaluation)}
 
 Profile surface policy:
 ${promptSurfaceText(profile, "feature-worker")}
@@ -455,7 +362,7 @@ At the end, output:
   "filesTouched": ["optional/path"],
   "followUps": [],
   "finalSubmissionReady": true,
-  "selfCheck": ["verified the exact benchmark outputs and format"],
+  "selfCheck": ["verified the exact eval outputs and format"],
   "contradictions": [],
   "openQuestions": [],
   "needsHuman": false
@@ -527,7 +434,7 @@ At the end, output:
 `;
 }
 
-export function buildWorkerSystemPrompt(profile: QuestProfile, benchmark = false): string {
+export function buildWorkerSystemPrompt(profile: QuestProfile, evaluationMode = false): string {
 	return `You are a quest worker executing a single feature within a larger Pi quest.
 
 Rules:
@@ -538,17 +445,16 @@ Rules:
 - Do not start new quests or inspect quest internals.
 - Do not rewrite unrelated parts of the codebase.
 - When the repo already has a test harness or validation command for the feature, prefer adding or updating the narrowest failing test before broader implementation.
-- ${benchmark ? "In benchmark mode, treat the external verifier as a score sensor, not a mutable target." : "Use the repo's native validation signals when they are available."}
-- ${benchmark ? "Never modify verifier scripts, reward files, PATH-critical tools, package-manager shims, or system binaries unless the task explicitly requires it." : "Keep validation surfaces and developer tooling stable unless the task explicitly targets them."}
-- ${benchmark ? "When the task names a path, inspect or write that exact path first." : "Inspect the smallest relevant scope before making changes."}
-- ${benchmark ? "Use short bash or Python scripts for binary, image, and structured-data tasks." : "Prefer the lightest tool that can answer the question."}
-- ${benchmark ? "Run a provided native helper once before custom analysis." : "Use native repo helpers before building custom tooling."}
-- ${benchmark ? "Remove transient scratch artifacts from task-owned outputs before finishing." : "Clean up transient local artifacts when they are no longer needed."}
-- ${benchmark ? "Do not request human help or leave provisional output during benchmark execution." : "Raise explicit blockers instead of hand-waving unresolved work."}
-- ${benchmark ? "Do not treat your own confidence as the final pass signal; the verifier decides." : "Do not self-approve the feature; the validator decides whether it is done."}
-- ${benchmark ? "Before the final JSON, re-open the exact outputs and confirm a single final submission is ready." : "Before finishing, summarize what still needs human QA."}
-- ${benchmark ? "If evidence contradicts the current path, re-plan inside the same turn instead of shipping a provisional answer." : "Prefer the smallest correction path when evidence changes."}
-- ${benchmark ? "After one failed or slow setup path, pivot instead of doubling down on installs or source builds." : "Prefer low-friction setup paths before heavyweight environment changes."}
+- ${evaluationMode ? "In eval mode, treat the external verifier as a score sensor, not a mutable target." : "Use the repo's native validation signals when they are available."}
+- ${evaluationMode ? "Never modify verifier scripts, reward files, PATH-critical tools, package-manager shims, or system binaries unless the task explicitly requires it." : "Keep validation surfaces and developer tooling stable unless the task explicitly targets them."}
+- ${evaluationMode ? "When the task names a path, inspect or write that exact path first." : "Inspect the smallest relevant scope before making changes."}
+- ${evaluationMode ? "Use short bash or Python scripts for binary, image, and structured-data tasks." : "Prefer the lightest tool that can answer the question."}
+- ${evaluationMode ? "Remove transient scratch artifacts from task-owned outputs before finishing." : "Clean up transient local artifacts when they are no longer needed."}
+- ${evaluationMode ? "Do not request human help or leave provisional output during eval execution." : "Raise explicit blockers instead of hand-waving unresolved work."}
+- ${evaluationMode ? "Do not treat your own confidence as the final pass signal; the verifier decides." : "Do not self-approve the feature; the validator decides whether it is done."}
+- ${evaluationMode ? "Before the final JSON, re-open the exact outputs and confirm a single final submission is ready." : "Before finishing, summarize what still needs human QA."}
+- ${evaluationMode ? "If evidence contradicts the current path, re-plan inside the same turn instead of shipping a provisional answer." : "Prefer the smallest correction path when evidence changes."}
+- ${evaluationMode ? "After one failed or slow setup path, pivot instead of doubling down on installs or source builds." : "Prefer low-friction setup paths before heavyweight environment changes."}
 - Budget: at most ${profile.verificationBudget.workerAttempts} worker attempt(s) before handing control back.
 - End with the required JSON block.`;
 }
@@ -693,26 +599,26 @@ function buildPlanningPrompt(
 	goal: string,
 	readiness: ValidationReadiness | null,
 	profile: QuestProfile,
-	benchmark?: QuestBenchmarkProvenance,
+	evaluation?: QuestEvalProvenance,
 ): string {
 	const readinessLines =
 		readiness?.checks.length
 			? readiness.checks.map((check) => `- ${check.surface} [${check.status}] ${check.description}`).join("\n")
 			: "- No readiness checks captured.";
-	const benchmarkLines = benchmark
-		? `Benchmark context:
-- benchmark: ${benchmark.benchmark}
-- dataset: ${benchmark.dataset}
-- task: ${benchmark.taskId}
-- checkpoint: ${benchmark.checkpointId ?? "none"}
-- run mode: ${benchmark.runMode}`
-		: "Benchmark context:\n- none";
+	const evaluationLines = evaluation
+		? `Eval context:
+- eval: ${evaluation.name}
+- suite: ${evaluation.dataset}
+- task: ${evaluation.taskId}
+- checkpoint: ${evaluation.checkpointId ?? "none"}
+- run mode: ${evaluation.runMode}`
+		: "Eval context:\n- none";
 	return `Plan a headless Quest for this repository at ${cwd}.
 
 Goal:
 ${goal}
 
-${benchmarkLines}
+${evaluationLines}
 
 Validation readiness:
 ${readiness?.summary ?? "No readiness summary captured yet."}
@@ -756,8 +662,8 @@ Requirements:
     {
       "id": "m1",
       "order": 1,
-      "title": "Complete benchmark task",
-      "description": "Finish the assigned benchmark task",
+      "title": "Complete eval task",
+      "description": "Finish the assigned eval task",
       "successCriteria": ["task passes validation"],
       "status": "pending"
     }
@@ -767,7 +673,7 @@ Requirements:
       "id": "f1",
       "order": 1,
       "milestoneId": "m1",
-      "title": "Implement the benchmark task",
+      "title": "Implement the eval task",
       "description": "Finish the required repo work",
       "preconditions": [],
       "fulfills": ["required validation outcome"],
@@ -806,7 +712,7 @@ function workerRunFromResult(
 	summary: string,
 	ok: boolean,
 	issues?: string[],
-	benchmark?: QuestBenchmarkProvenance,
+	evaluation?: QuestEvalProvenance,
 ): WorkerRunRecord {
 	return {
 		id: randomUUID(),
@@ -832,7 +738,7 @@ function workerRunFromResult(
 		latestAssistantText: result.latestAssistantText,
 		events: result.events,
 		usage: result.usage,
-		benchmark: benchmark ? { ...benchmark } : undefined,
+		evaluation: evaluation ? { ...evaluation } : undefined,
 		...extra,
 	};
 }
@@ -841,7 +747,7 @@ export async function executeValidationReadinessProbe(
 	cwd: string,
 	modelChoice: ModelChoice,
 	profile: QuestProfile,
-	benchmark: QuestBenchmarkProvenance | undefined,
+	evaluation: QuestEvalProvenance | undefined,
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<{ run: WorkerRunRecord; readiness: ValidationReadiness | null; servicesYaml: string | null }> {
@@ -853,7 +759,7 @@ export async function executeValidationReadinessProbe(
 		role: "validator",
 		systemPrompt: buildValidatorSystemPrompt("code_review", profile),
 		prompt: buildReadinessProbePrompt(cwd, profile),
-		benchmark,
+		evaluation,
 		onSnapshot,
 		onProcessStart,
 	});
@@ -901,13 +807,13 @@ export async function executeValidationReadinessProbe(
 			result,
 			"validator",
 			startedAt,
-			{},
-			readiness?.summary || text || "No readiness summary returned.",
-			ok,
-			undefined,
-			benchmark,
-		),
-	};
+				{},
+				readiness?.summary || text || "No readiness summary returned.",
+				ok,
+				undefined,
+				evaluation,
+			),
+		};
 }
 
 export async function executeQuestPlanner(
@@ -916,7 +822,7 @@ export async function executeQuestPlanner(
 	modelChoice: ModelChoice,
 	readiness: ValidationReadiness | null,
 	profile: QuestProfile,
-	benchmark: QuestBenchmarkProvenance | undefined,
+	evaluation: QuestEvalProvenance | undefined,
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<{ run: WorkerRunRecord; plan: QuestPlan | null }> {
@@ -927,8 +833,8 @@ export async function executeQuestPlanner(
 		tools: toolAllowlistForRole(profile, "orchestrator"),
 		role: "orchestrator",
 		systemPrompt: buildPlannerSystemPrompt(profile),
-		prompt: buildPlanningPrompt(cwd, goal, readiness, profile, benchmark),
-		benchmark,
+		prompt: buildPlanningPrompt(cwd, goal, readiness, profile, evaluation),
+		evaluation,
 		onSnapshot,
 		onProcessStart,
 	});
@@ -946,7 +852,7 @@ export async function executeQuestPlanner(
 			plan ? `Planned ${plan.features.length} feature(s) for ${plan.title}.` : text || "No quest plan returned.",
 			result.exitCode === 0 && Boolean(plan),
 			undefined,
-			benchmark,
+			evaluation,
 		),
 	};
 }
@@ -958,44 +864,11 @@ export async function executeFeatureWorker(
 	modelChoice: ModelChoice,
 	workflows: LearnedWorkflow[],
 	profile: QuestProfile,
-	benchmark: QuestBenchmarkProvenance | undefined,
+	evaluation: QuestEvalProvenance | undefined,
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<WorkerRunRecord> {
 	const startedAt = Date.now();
-	const benchmarkHelpers = benchmark ? await loadBenchmarkHelpers() : null;
-	const helperArgs = benchmark ? benchmarkHelpers?.nativeBenchmarkHelperArgs(benchmark) ?? null : null;
-	let nativeHelperFailure: string | undefined;
-	if (helperArgs) {
-		try {
-			await benchmarkHelpers!.runBenchmarkHelper(helperArgs);
-			return {
-				id: randomUUID(),
-				role: "worker",
-				startedAt,
-				endedAt: Date.now(),
-				provider: modelChoice.provider,
-				model: modelChoice.model,
-				thinkingLevel: modelChoice.thinkingLevel,
-				exitCode: 0,
-				ok: true,
-				summary: `Executed native benchmark helper for ${helperArgs.family}/${helperArgs.taskId}.`,
-				issues: [],
-				aborted: false,
-				phase: "native-helper",
-				latestToolName: "benchmark-helper",
-				latestToolSummary: `${helperArgs.family}/${helperArgs.taskId}`,
-				events: [],
-				usage: DEFAULT_USAGE,
-				benchmark: benchmark ? { ...benchmark } : undefined,
-				featureId: feature.id,
-				milestoneId: milestone.id,
-			};
-		} catch (error) {
-			nativeHelperFailure = error instanceof Error ? error.message : String(error);
-			console.error(`[quest] native helper failed for ${helperArgs.family}/${helperArgs.taskId}: ${nativeHelperFailure}`);
-		}
-	}
 	const result = await runPiTask({
 		cwd: quest.cwd,
 		modelChoice,
@@ -1003,20 +876,20 @@ export async function executeFeatureWorker(
 		role: "worker",
 		featureId: feature.id,
 		milestoneId: milestone.id,
-		systemPrompt: buildWorkerSystemPrompt(profile, Boolean(benchmark)),
-		prompt: buildFeaturePrompt(quest, feature, milestone, workflows, profile, benchmark, nativeHelperFailure),
-		benchmark,
+		systemPrompt: buildWorkerSystemPrompt(profile, Boolean(evaluation)),
+		prompt: buildFeaturePrompt(quest, feature, milestone, workflows, profile, evaluation),
+		evaluation,
 		onSnapshot,
 		onProcessStart,
 	});
 	const text = getFinalAssistantText(result.messages);
 	const parsed = extractJsonBlock<FeatureWorkerPayload>(text);
-	const benchmarkIssues = benchmark ? benchmarkExecutionIssues(parsed) : [];
+	const evaluationIssues = evaluation ? evaluationExecutionIssues(parsed) : [];
 	const ok =
 		result.exitCode === 0 &&
 		parsed?.status !== "failed" &&
 		parsed?.status !== "blocked" &&
-		benchmarkIssues.length === 0;
+		evaluationIssues.length === 0;
 
 	return workerRunFromResult(
 		modelChoice,
@@ -1026,8 +899,8 @@ export async function executeFeatureWorker(
 		{ featureId: feature.id, milestoneId: milestone.id },
 		parsed?.summary || text || "No worker summary returned.",
 		ok,
-		benchmarkIssues.length > 0 ? benchmarkIssues : undefined,
-		benchmark,
+		evaluationIssues.length > 0 ? evaluationIssues : undefined,
+		evaluation,
 	);
 }
 
@@ -1039,7 +912,7 @@ export async function executeValidator(
 	workflows: LearnedWorkflow[],
 	pass: ValidatorPass,
 	profile: QuestProfile,
-	benchmark: QuestBenchmarkProvenance | undefined,
+	evaluation: QuestEvalProvenance | undefined,
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<WorkerRunRecord> {
@@ -1052,7 +925,7 @@ export async function executeValidator(
 		milestoneId: milestone.id,
 		systemPrompt: buildValidatorSystemPrompt(pass, profile),
 		prompt: buildValidatorPrompt(quest, milestone, features, workflows, pass, profile),
-		benchmark,
+		evaluation,
 		onSnapshot,
 		onProcessStart,
 	});
@@ -1070,7 +943,7 @@ export async function executeValidator(
 		parsed?.summary || text || `No ${pass} summary returned.`,
 		ok,
 		issues,
-		benchmark,
+		evaluation,
 	);
 }
 
@@ -1080,7 +953,7 @@ export async function executePlanRevision(
 	modelChoice: ModelChoice,
 	workflows: LearnedWorkflow[],
 	profile: QuestProfile,
-	benchmark: QuestBenchmarkProvenance | undefined,
+	evaluation: QuestEvalProvenance | undefined,
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<{ run: WorkerRunRecord; revisedPlan: QuestPlan | null }> {
@@ -1092,7 +965,7 @@ export async function executePlanRevision(
 		role: "orchestrator",
 		systemPrompt: buildPlanRevisionSystemPrompt(profile),
 		prompt: `Revise the remaining quest plan.\n\nRequests:\n${requests.map((request) => `- [${request.source}] ${request.note}`).join("\n")}\n\nCurrent plan:\n\`\`\`json\n${JSON.stringify(quest.plan, null, 2)}\n\`\`\`\n\nCurrent validation state:\n\`\`\`json\n${JSON.stringify(quest.validationState, null, 2)}\n\`\`\`\n\nLearned workflows:\n${learnedWorkflowSection(workflows)}`,
-		benchmark,
+		evaluation,
 		onSnapshot,
 		onProcessStart,
 	});
@@ -1111,7 +984,7 @@ export async function executePlanRevision(
 			revisedPlan ? "Revised remaining quest plan." : text || "No plan revision returned.",
 			ok,
 			undefined,
-			benchmark,
+			evaluation,
 		),
 	};
 }
@@ -1155,7 +1028,7 @@ export async function executeTrialProposerAgent(
 
 Rules:
 - Propose QuestProfilePatch changes only.
-- Optimize for benchmark generalization, not one-off wins.
+- Optimize for eval generalization, not one-off wins.
 - Propose one coherent harness/profile change per candidate unless two surface edits are inseparable.
 - Respect the proposer policy exactly:
 ${promptSurfaceText(profile, "proposer")}
@@ -1186,7 +1059,7 @@ ${leaderTagBreakdown.length > 0 ? leaderTagBreakdown.map((line) => `  - ${line}`
 - leader failure categories:
 ${topLeaderFailureCategories.length > 0 ? topLeaderFailureCategories.map((line) => `  - ${line}`).join("\n") : "  - none"}
 
-Benchmark split coverage:
+Eval split coverage:
 - search tags:
 ${topSearchTags.length > 0 ? topSearchTags.map((line) => `  - ${line}`).join("\n") : "  - none"}
 - hold-out tags:
@@ -1202,7 +1075,7 @@ Optimization discipline:
 - Treat the hold-out split as the unseen generalization check and regression gate.
 - Prefer reusable instructions that fix a behavior class, not a task-specific trick.
 - Protect already-passing tagged cohorts; if a regression appears likely, account for it explicitly in rationale and targeted tags.
-- Use failure-category mixes from benchmark scorecards to target concrete break modes, not just average score deltas.
+- Use failure-category mixes from eval scorecards to target concrete break modes, not just average score deltas.
 - Use candidate traces and summaries to infer recurring failure patterns before patching the profile.
 
 Read the canonical files as needed before you decide.

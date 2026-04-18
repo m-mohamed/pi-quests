@@ -149,15 +149,15 @@ test("trials widget model renders the trial panel", () => {
 			projectId: "project-ui",
 			target: "repo",
 			activeProfileId: "repo-project-ui",
-			benchmarkFamily: "terminal-bench",
-			benchmarkDataset: "terminal-bench-sample@2.0",
+			evalFamily: "frontierswe",
+			evalDataset: "frontierswe-sample@v1",
 			currentCandidateId: "001",
 			status: "running",
-			lastSummary: "Candidate 001 archived. Leader 001 is active on terminal-bench-sample@2.0.",
+			lastSummary: "Candidate 001 archived. Leader 001 is active on frontierswe-sample@v1.",
 			updatedAt: Date.now(),
 		},
 		"repo-project-ui",
-		{ role: "trial", phase: "search-benchmark", updatedAt: Date.now(), latestToolName: "quest_trials_set_profile" },
+		{ role: "trial", phase: "search-eval", updatedAt: Date.now(), latestToolName: "quest_trials_set_profile" },
 		"ctx 12% · 24.0k/200k",
 	);
 	const lines = renderTrialsWidgetLines(model);
@@ -168,17 +168,17 @@ test("trials widget model renders the trial panel", () => {
 	assert.match(lines[1], /ctx 12%/);
 	assert.match(lines[2], /Candidate 001 archived/);
 	assert.deepEqual(renderTrialsActionLines(), [
-		"Actions /quest trials status  |  /quest trials prepare-benchmark  |  /quest trials analyze-community  |  /quest trials baseline  |  /quest trials run",
+		"Actions /quest trials status  |  /quest trials prepare-eval  |  /quest trials analyze-community  |  /quest trials baseline  |  /quest trials run",
 	]);
 });
 
-test("trials control items expose summary, benchmark, candidate, and live run details", () => {
+test("trials control items expose summary, eval, candidate, and live run details", () => {
 	const state = {
 		projectId: "project-ui",
 		target: "repo",
 		activeProfileId: "repo-project-ui",
-		benchmarkFamily: "terminal-bench",
-		benchmarkDataset: "terminal-bench-sample@2.0",
+		evalFamily: "frontierswe",
+		evalDataset: "frontierswe-sample@v1",
 		currentCandidateId: "001",
 		frontierCandidateIds: ["001", "002"],
 		status: "running",
@@ -188,15 +188,15 @@ test("trials control items expose summary, benchmark, candidate, and live run de
 
 	const items = buildTrialsControlItems(state, "repo-project-ui", {
 		role: "trial",
-		phase: "search-benchmark",
+		phase: "search-eval",
 		updatedAt: Date.now(),
 		latestToolName: "quest_trials_set_profile",
-		latestMessage: "Benchmark prep complete.",
+		latestMessage: "Eval prep complete.",
 	});
 
-	assert.deepEqual(items.map((item) => item.value), ["summary", "benchmark", "candidate", "live-run"]);
+	assert.deepEqual(items.map((item) => item.value), ["summary", "eval", "candidate", "live-run"]);
 	assert.match(items[0].detailMarkdown, /# Quest Trials/);
-	assert.match(items[1].detailMarkdown, /# Benchmark/);
+	assert.match(items[1].detailMarkdown, /# Eval/);
 	assert.match(items[2].detailMarkdown, /Frontier ids: 001, 002/);
 	assert.match(items[3].detailMarkdown, /# Live Trials Run/);
 });
@@ -207,11 +207,11 @@ test("trials widget factory renders a single native widget with actions", () => 
 			projectId: "project-ui",
 			target: "repo",
 			activeProfileId: "repo-project-ui",
-			benchmarkFamily: "terminal-bench",
-			benchmarkDataset: "terminal-bench-sample@2.0",
+			evalFamily: "frontierswe",
+			evalDataset: "frontierswe-sample@v1",
 			currentCandidateId: "001",
 			status: "running",
-			lastSummary: "Candidate 001 archived. Leader 001 is active on terminal-bench-sample@2.0.",
+			lastSummary: "Candidate 001 archived. Leader 001 is active on frontierswe-sample@v1.",
 			updatedAt: Date.now(),
 		},
 		"repo-project-ui",

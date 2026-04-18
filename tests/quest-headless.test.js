@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseArgs, usage } from "../src/quest-headless.js";
 
-test("quest-headless keeps high thinking for non-benchmark runs by default", async () => {
+test("quest-headless keeps high thinking for non-eval runs by default", async () => {
 	const parsed = await parseArgs(["run", "--instruction", "Solve the repo task"]);
 	assert.equal(parsed.command, "run");
 	assert.equal(parsed.input?.modelChoice.provider, "zai");
@@ -10,19 +10,19 @@ test("quest-headless keeps high thinking for non-benchmark runs by default", asy
 	assert.equal(parsed.input?.modelChoice.thinkingLevel, "high");
 });
 
-test("quest-headless keeps benchmark flags behind internal mode", async () => {
+test("quest-headless keeps eval flags behind internal mode", async () => {
 	await assert.rejects(
 		() =>
 			parseArgs([
 				"run",
 				"--instruction",
-				"Solve the benchmark task",
-				"--benchmark",
-				"terminal-bench",
-				"--dataset",
-				"terminal-bench-sample@2.0",
+				"Solve the eval task",
+				"--eval",
+				"frontierswe",
+				"--suite",
+				"frontierswe-sample@v1",
 				"--task-id",
-				"chess-best-move",
+				"update-api-port",
 			]),
 		/internal|maintainer-only/i,
 	);
@@ -30,37 +30,47 @@ test("quest-headless keeps benchmark flags behind internal mode", async () => {
 	const previous = process.env.PI_QUESTS_INTERNAL;
 	process.env.PI_QUESTS_INTERNAL = "1";
 	try {
-		const benchmark = await parseArgs([
+		const sample = await parseArgs([
 			"run",
 			"--instruction",
-			"Solve the benchmark task",
-			"--benchmark",
-			"terminal-bench",
-			"--dataset",
-			"terminal-bench-sample@2.0",
+			"Solve the eval task",
+			"--eval",
+			"frontierswe",
+			"--suite",
+			"frontierswe-sample@v1",
 			"--task-id",
-			"chess-best-move",
+			"update-api-port",
+			"--run-mode",
+			"sample",
 		]);
-		assert.equal(benchmark.input?.modelChoice.thinkingLevel, "low");
+		assert.equal(sample.input?.modelChoice.thinkingLevel, "low");
+		assert.equal(sample.internalInput?.evaluation?.name, "frontierswe");
 
-		const overridden = await parseArgs([
+		const full = await parseArgs([
 			"run",
 			"--instruction",
-			"Solve the benchmark task",
-			"--benchmark",
-			"terminal-bench",
-			"--dataset",
-			"terminal-bench-sample@2.0",
+			"Solve the eval task",
+			"--eval",
+			"frontierswe",
+			"--suite",
+			"frontierswe@public-v1",
 			"--task-id",
-			"chess-best-move",
-			"--thinking",
-			"low",
+			"update-api-port",
+			"--run-mode",
+			"full",
 		]);
-		assert.equal(overridden.input?.modelChoice.thinkingLevel, "low");
+		assert.equal(full.input?.modelChoice.thinkingLevel, "medium");
 	} finally {
 		if (previous === undefined) delete process.env.PI_QUESTS_INTERNAL;
 		else process.env.PI_QUESTS_INTERNAL = previous;
 	}
+});
+
+test("quest-headless rejects the removed benchmark flag", async () => {
+	await assert.rejects(
+		() => parseArgs(["run", "--instruction", "legacy", "--benchmark", "terminal-bench"]),
+		/Unknown argument: --benchmark/,
+	);
 });
 
 test("usage adapts to the invoked binary name", () => {

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { cp, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
@@ -72,6 +72,43 @@ interface QuestHeadlessEnvelope {
 			score?: number;
 		};
 	};
+}
+
+function credentialEnvVarsForModel(modelChoice: ModelChoice): string[] {
+	switch (modelChoice.provider) {
+		case "google":
+			return ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
+		case "openai":
+		case "openai-codex":
+			return ["OPENAI_API_KEY"];
+		case "zai":
+			return ["ZAI_API_KEY"];
+		default:
+			return [];
+	}
+}
+
+async function credentialEnvEntriesForModel(modelChoice: ModelChoice): Promise<Array<{ name: string; value: string }>> {
+	const names = credentialEnvVarsForModel(modelChoice);
+	const entries: Array<{ name: string; value: string }> = [];
+	for (const name of names) {
+		const value = process.env[name]?.trim();
+		if (value) entries.push({ name, value });
+	}
+	if (entries.length > 0) return entries;
+	if (modelChoice.provider !== "zai") return entries;
+	const authFile = join(homedir(), ".pi", "agent", "auth.json");
+	if (!existsSync(authFile)) return entries;
+	try {
+		const auth = JSON.parse(await readFile(authFile, "utf-8")) as {
+			zai?: { key?: string };
+		};
+		const key = auth.zai?.key?.trim();
+		if (key) entries.push({ name: "ZAI_API_KEY", value: key });
+	} catch {
+		// fall through with no injected credential
+	}
+	return entries;
 }
 
 function jsonWithNewline(value: unknown): string {
@@ -336,6 +373,7 @@ async function runAgentPhase(input: {
 	workspaceDir: string;
 	logDir: string;
 	profileId: string;
+	modelChoice: ModelChoice;
 	dataset: string;
 	runMode: QuestEvalRunMode;
 	bundle: Awaited<ReturnType<typeof materializeQuestBundle>>;
@@ -362,10 +400,15 @@ async function runAgentPhase(input: {
 	if (input.bundle.authDir) {
 		args.push("-v", `${input.bundle.authDir}:/root/.pi/agent:ro`);
 	}
+	for (const entry of await credentialEnvEntriesForModel(input.modelChoice)) {
+		args.push("-e", `${entry.name}=${entry.value}`);
+	}
 	const headlessCommand = [
 		"/opt/quest-node/bin/node /opt/quest-package/dist/quest-headless.js run",
 		"--instruction-file /opt/frontierswe/instruction.md",
 		"--cwd /app",
+		`--model ${input.modelChoice.provider}/${input.modelChoice.model}`,
+		`--thinking ${input.modelChoice.thinkingLevel}`,
 		`--profile ${input.profileId}`,
 		"--eval frontierswe",
 		`--suite ${input.dataset}`,
@@ -484,26 +527,29 @@ export async function runFrontiersweSplit(options: {
 			await mkdir(trialDir, { recursive: true });
 			await copyWorkspaceFromImage(task, agentWorkspace);
 			const startedAt = Date.now();
-			const agent = await runAgentPhase({
-				task,
-				workspaceDir: agentWorkspace,
-				logDir: join(trialDir, "agent"),
-				profileId: options.profileId,
-				dataset: options.split.dataset,
-				runMode: options.split.dataset === FRONTIERSWE_SAMPLE_DATASET ? "sample" : "full",
-				bundle,
+				const agent = await runAgentPhase({
+					task,
+					workspaceDir: agentWorkspace,
+					logDir: join(trialDir, "agent"),
+					profileId: options.profileId,
+					modelChoice: options.modelChoice,
+					dataset: options.split.dataset,
+					runMode: options.split.dataset === FRONTIERSWE_SAMPLE_DATASET ? "sample" : "full",
+					bundle,
 				onProcessStart: options.onProcessStart,
 			});
 			const verifierWorkspace = join(trialDir, "verifier-workspace");
 			await cp(agentWorkspace, verifierWorkspace, { recursive: true });
-			const verifier = await runVerifierPhase({
-				task,
-				workspaceDir: verifierWorkspace,
-				logDir: join(trialDir, "verifier"),
-				onProcessStart: options.onProcessStart,
-			});
-			const reward = await readReward(join(trialDir, "verifier"));
-			const durationMs = Date.now() - startedAt;
+				const verifier = await runVerifierPhase({
+					task,
+					workspaceDir: verifierWorkspace,
+					logDir: join(trialDir, "verifier"),
+					onProcessStart: options.onProcessStart,
+				});
+				const reward = task.hasRewardScript
+					? await readReward(join(trialDir, "verifier"))
+					: { score: verifier.exitCode === 0 ? 1 : 0, maxScore: 1 };
+				const durationMs = Date.now() - startedAt;
 			const failureText = [agent.parsed?.data?.summary ?? "", agent.parsed?.data?.timeoutReason ?? "", verifier.stderr].join(" ").trim();
 			const score = reward.score;
 			const status =
@@ -512,7 +558,7 @@ export async function runFrontiersweSplit(options: {
 						? "passed"
 						: "failed"
 					: "error";
-			results.push({
+				results.push({
 				itemId: item.id,
 				itemName: item.name,
 				family: options.split.family,
@@ -535,7 +581,7 @@ export async function runFrontiersweSplit(options: {
 					join(trialDir, "verifier", "reward.json"),
 					join(trialDir, "verifier", "reward.txt"),
 				].filter((file) => existsSync(file)),
-				failureReason: failureText || undefined,
+					failureReason: status === "passed" ? undefined : failureText || undefined,
 				rewardValues: { reward: score },
 				evalMetrics: {
 					dockerImage: task.dockerImage,

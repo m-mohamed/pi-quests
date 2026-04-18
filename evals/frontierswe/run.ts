@@ -1,4 +1,4 @@
-import { defaultEvalModel, parseModelChoice } from "../shared.js";
+import { credentialsAvailableForModel, defaultEvalModel, parseModelChoice } from "../shared.js";
 import { defaultFrontiersweDataset, discoverFrontiersweManifest, resolveFrontiersweRunMode, runFrontiersweSplit } from "../../src/frontierswe-evals.js";
 import type { QuestEvalWorkItem } from "../../src/types.js";
 
@@ -31,6 +31,10 @@ async function main(argv: string[]): Promise<void> {
 	const thinking = thinkingIndex >= 0 ? argv[thinkingIndex + 1] : dataset.includes("sample") ? "low" : "medium";
 	const profileId = profileIndex >= 0 ? argv[profileIndex + 1] : "repo-active";
 	if (!dataset || !model) throw new Error(usage());
+	const credentials = credentialsAvailableForModel(model);
+	if (!credentials.ok) {
+		throw new Error(credentials.detail);
+	}
 	const runMode = resolveFrontiersweRunMode(dataset);
 	const manifest = await discoverFrontiersweManifest({ dataset, runMode, repo });
 	const items = filterItems(manifest.items, taskId, limit);

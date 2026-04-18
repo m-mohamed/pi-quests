@@ -17,6 +17,15 @@ function providerFor(modelSpec: string): string {
 	return splitAt > 0 ? modelSpec.slice(0, splitAt) : modelSpec;
 }
 
+function readPiAuth(): Record<string, any> | null {
+	try {
+		const authPath = join(homedir(), ".pi", "agent", "auth.json");
+		return JSON.parse(readFileSync(authPath, "utf-8")) as Record<string, any>;
+	} catch {
+		return null;
+	}
+}
+
 function readPiDefaultModel(): string | undefined {
 	try {
 		const settingsPath = join(homedir(), ".pi", "agent", "settings.json");
@@ -56,8 +65,9 @@ export function requiredEnvVarsForModel(modelSpec: string): string[] {
 		case "openai":
 			return ["OPENAI_API_KEY"];
 		case "zai":
+			return ["ZAI_API_KEY"];
 		case "openai-codex":
-			return [];
+			return ["OPENAI_API_KEY"];
 		default:
 			return [];
 	}
@@ -65,13 +75,28 @@ export function requiredEnvVarsForModel(modelSpec: string): string[] {
 
 export function credentialsAvailableForModel(modelSpec: string): { ok: boolean; detail: string } {
 	const envCandidates = requiredEnvVarsForModel(modelSpec);
-	if (envCandidates.length === 0) {
-		return { ok: true, detail: `No explicit credential gate required for ${modelSpec}` };
-	}
 	const available = envCandidates.find((name) => process.env[name]?.trim());
-	return available
-		? { ok: true, detail: `Credentials available for ${modelSpec} via ${available}` }
-		: { ok: false, detail: `Missing one of: ${envCandidates.join(", ")}` };
+	if (available) {
+		return { ok: true, detail: `Credentials available for ${modelSpec} via ${available}` };
+	}
+	const auth = readPiAuth();
+	switch (providerFor(modelSpec)) {
+		case "zai":
+			if (auth?.["zai"]?.key) {
+				return { ok: true, detail: `Credentials available for ${modelSpec} via ~/.pi/agent/auth.json` };
+			}
+			return { ok: false, detail: `Missing ZAI credentials for ${modelSpec}. Set ZAI_API_KEY or sign in with Pi.` };
+		case "openai-codex":
+			if (auth?.["openai-codex"]?.access) {
+				return { ok: true, detail: `Credentials available for ${modelSpec} via ~/.pi/agent/auth.json` };
+			}
+			return { ok: false, detail: `Missing OpenAI Codex credentials for ${modelSpec}. Set OPENAI_API_KEY or sign in with Pi.` };
+		case "google":
+		case "openai":
+			return { ok: false, detail: `Missing one of: ${envCandidates.join(", ")}` };
+		default:
+			return { ok: true, detail: `No explicit credential gate required for ${modelSpec}` };
+	}
 }
 
 export async function materializeWorkspaceCopy(sourceDir: string, prefix: string): Promise<MaterializedWorkspace> {

@@ -1,6 +1,6 @@
 import { assertInternalMode } from "./internal-mode.js";
 import { defaultInternalQuestProfile } from "./internal-profile-core.js";
-import { loadQuestProfile, loadQuestTrialState } from "./state-core.js";
+import { loadQuestProfile, loadQuestOptimizerState } from "./state-core.js";
 import {
 	DEFAULT_HEADLESS_EXECUTORS,
 	runQuestHeadlessExecution,
@@ -27,12 +27,12 @@ export async function runInternalQuestHeadless(
 		input,
 		{
 			resolveProfile: async ({ cwd }) => {
-				const trialState = await loadQuestTrialState(cwd, { ensure: true });
+				const optimizerState = await loadQuestOptimizerState(cwd, { ensure: true });
 				return (
-					(await loadQuestProfile(cwd, input.profileId ?? trialState.activeProfileId, {
+					(await loadQuestProfile(cwd, input.profileId ?? optimizerState.activeProfileId, {
 						ensure: true,
-						target: trialState.target,
-					})) ?? defaultInternalQuestProfile(trialState.projectId, trialState.target)
+						target: optimizerState.target,
+					})) ?? defaultInternalQuestProfile(optimizerState.projectId, optimizerState.target)
 				);
 			},
 		},

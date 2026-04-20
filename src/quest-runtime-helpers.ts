@@ -15,7 +15,7 @@ import type {
 	QuestProfile,
 	QuestRole,
 	QuestState,
-	QuestTrialState,
+	QuestOptimizerState,
 	ThinkingLevel,
 	ValidationAssertion,
 } from "./types.js";
@@ -47,7 +47,7 @@ export function currentOrDefaultModel(quest: QuestState, role: QuestRole): Model
 export function activeProfileFor(
 	cwd: string,
 	profile: QuestProfile | null,
-	target: QuestTrialState["target"] = "repo",
+	target: QuestOptimizerState["target"] = "repo",
 ): QuestProfile {
 	return profile ?? defaultQuestProfile(projectIdFor(cwd), target);
 }

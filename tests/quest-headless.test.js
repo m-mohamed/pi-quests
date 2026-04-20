@@ -66,10 +66,10 @@ test("quest-headless keeps eval flags behind internal mode", async () => {
 	}
 });
 
-test("quest-headless rejects the removed benchmark flag", async () => {
+test("quest-headless rejects unknown flags", async () => {
 	await assert.rejects(
-		() => parseArgs(["run", "--instruction", "legacy", "--benchmark", "terminal-bench"]),
-		/Unknown argument: --benchmark/,
+		() => parseArgs(["run", "--instruction", "legacy", "--unknown-flag"]),
+		/Unknown argument: --unknown-flag/,
 	);
 });
 
@@ -77,5 +77,5 @@ test("usage adapts to the invoked binary name", () => {
 	const help = usage("quest-headless");
 	assert.match(help, /^Usage:\n  quest-headless run/m);
 	assert.doesNotMatch(help, /mission/i);
-	assert.doesNotMatch(help, /--benchmark/);
+	assert.match(help, /--json\s+Print machine-readable JSON to stdout/);
 });

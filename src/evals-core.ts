@@ -408,8 +408,8 @@ const evalCases: EvalCaseDefinition[] = [
 			const quest = sampleQuest();
 			const profile = defaultQuestProfile(quest.projectId);
 			const passed =
-				profile.promptSurfaces.proposerPolicy.includes(".pi/quests/trials/candidates/") &&
-				profile.promptSurfaces.proposerPolicy.includes(".pi/quests/trials/community-stats.json") &&
+				profile.promptSurfaces.proposerPolicy.includes(".pi/quests/evals/candidates/") &&
+				profile.promptSurfaces.proposerPolicy.includes(".pi/quests/evals/community-stats.json") &&
 				Array.isArray(profile.toolAllowlist.proposer) &&
 				profile.toolAllowlist.proposer.includes("read") &&
 				profile.toolAllowlist.proposer.includes("grep") &&
@@ -420,8 +420,8 @@ const evalCases: EvalCaseDefinition[] = [
 				"Default Quest profile stays frontier-native",
 				passed,
 				passed
-					? "Default profile points the proposer at canonical Trials artifacts and keeps it read-only."
-					: "Default profile lost canonical Trials proposer policy or read-only tool constraints.",
+					? "Default profile points the proposer at canonical eval optimizer artifacts and keeps it read-only."
+					: "Default profile lost canonical eval optimizer proposer policy or read-only tool constraints.",
 				{
 					proposerTools: profile.toolAllowlist.proposer,
 					proposerPolicy: profile.promptSurfaces.proposerPolicy,

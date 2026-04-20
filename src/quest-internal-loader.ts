@@ -1,20 +1,20 @@
 import { internalModeEnabled } from "./internal-mode.js";
 import { defaultQuestProfile } from "./profile-core.js";
-import { loadQuestProfile, loadQuestTrialState, projectIdFor } from "./state-core.js";
-import type { QuestProfile, QuestTrialState } from "./types.js";
+import { loadQuestProfile, loadQuestOptimizerState, projectIdFor } from "./state-core.js";
+import type { QuestProfile, QuestOptimizerState } from "./types.js";
 
-export type FrontierTrialsModule = typeof import("./frontier-trials.js");
-export type FrontierTrialStatus = Awaited<ReturnType<FrontierTrialsModule["collectFrontierTrialStatus"]>>;
+export type FrontierOptimizerModule = typeof import("./frontier-optimizer.js");
+export type FrontierOptimizerStatus = Awaited<ReturnType<FrontierOptimizerModule["collectFrontierOptimizerStatus"]>>;
 export type InternalUiModule = typeof import("./internal-ui.js");
 
-let frontierTrialsModulePromise: Promise<FrontierTrialsModule> | null = null;
+let frontierOptimizerModulePromise: Promise<FrontierOptimizerModule> | null = null;
 let internalUiModulePromise: Promise<InternalUiModule> | null = null;
 
-export async function loadFrontierTrials(): Promise<FrontierTrialsModule> {
-	frontierTrialsModulePromise ??= import("./frontier-trials.js").catch((error) => {
+export async function loadFrontierOptimizer(): Promise<FrontierOptimizerModule> {
+	frontierOptimizerModulePromise ??= import("./frontier-optimizer.js").catch((error) => {
 		throw new Error(`Internal Quest optimizer surfaces require the repo checkout. ${error instanceof Error ? error.message : String(error)}`);
 	});
-	return frontierTrialsModulePromise;
+	return frontierOptimizerModulePromise;
 }
 
 export async function loadInternalUi(): Promise<InternalUiModule> {
@@ -26,19 +26,19 @@ export async function loadInternalUi(): Promise<InternalUiModule> {
 
 export async function loadRuntimeProfile(
 	cwd: string,
-	options?: { ensure?: boolean; profileId?: string; target?: QuestTrialState["target"] },
-): Promise<{ trialState: QuestTrialState | null; profile: QuestProfile }> {
+	options?: { ensure?: boolean; profileId?: string; target?: QuestOptimizerState["target"] },
+): Promise<{ optimizerState: QuestOptimizerState | null; profile: QuestProfile }> {
 	if (!internalModeEnabled()) {
 		return {
-			trialState: null,
+			optimizerState: null,
 			profile: defaultQuestProfile(projectIdFor(cwd), options?.target ?? "repo"),
 		};
 	}
-	const trialState = await loadQuestTrialState(cwd, options?.ensure ? { ensure: true } : undefined);
+	const optimizerState = await loadQuestOptimizerState(cwd, options?.ensure ? { ensure: true } : undefined);
 	const profile =
-		(await loadQuestProfile(cwd, options?.profileId ?? trialState.activeProfileId, {
+		(await loadQuestProfile(cwd, options?.profileId ?? optimizerState.activeProfileId, {
 			ensure: options?.ensure,
-			target: options?.target ?? trialState.target,
-		})) ?? defaultQuestProfile(trialState.projectId, options?.target ?? trialState.target);
-	return { trialState, profile };
+			target: options?.target ?? optimizerState.target,
+		})) ?? defaultQuestProfile(optimizerState.projectId, options?.target ?? optimizerState.target);
+	return { optimizerState, profile };
 }

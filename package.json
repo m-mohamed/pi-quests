@@ -50,9 +50,9 @@
     "prepublishOnly": "npm run check"
   },
   "peerDependencies": {
-    "@mariozechner/pi-ai": "^0.66.1",
-    "@mariozechner/pi-coding-agent": "^0.66.1",
-    "@mariozechner/pi-tui": "^0.66.1",
+    "@mariozechner/pi-ai": "^0.68.0",
+    "@mariozechner/pi-coding-agent": "^0.68.0",
+    "@mariozechner/pi-tui": "^0.68.0",
     "@sinclair/typebox": "^0.34.49"
   },
   "dependencies": {
@@ -60,9 +60,9 @@
     "tsx": "^4.20.3"
   },
   "devDependencies": {
-    "@mariozechner/pi-ai": "^0.66.1",
-    "@mariozechner/pi-coding-agent": "^0.66.1",
-    "@mariozechner/pi-tui": "^0.66.1",
+    "@mariozechner/pi-ai": "^0.68.0",
+    "@mariozechner/pi-coding-agent": "^0.68.0",
+    "@mariozechner/pi-tui": "^0.68.0",
     "@sinclair/typebox": "^0.34.49",
     "@types/node": "^24.3.0",
     "typescript": "^5.7.3"

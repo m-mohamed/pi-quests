@@ -3,7 +3,7 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
 export type QuestStatus = "planning" | "proposal_ready" | "running" | "paused" | "blocked" | "completed" | "aborted";
 export type FeatureStatus = "pending" | "running" | "completed" | "blocked" | "skipped";
 export type MilestoneStatus = "pending" | "running" | "completed" | "blocked";
-export type QuestRole = "orchestrator" | "worker" | "validator" | "trial" | "proposer";
+export type QuestRole = "orchestrator" | "worker" | "validator" | "optimizer" | "proposer";
 export type HumanQaStatus = "pending" | "approved";
 export type ShipReadiness = "not_ready" | "validated_waiting_for_human_qa" | "human_qa_complete";
 export type ValidationSurfaceStatus = "supported" | "limited" | "unsupported";
@@ -18,9 +18,9 @@ export type ValidationMethod =
 export type ValidationCriticality = "critical" | "important" | "informational";
 export type ValidationAssertionStatus = "pending" | "passed" | "failed" | "limited";
 export type ActiveRunKind = "feature" | "validator" | "replan" | "readiness";
-export type QuestTrialTarget = "repo" | "quest-core";
-export type QuestTrialStatus = "idle" | "running" | "stopped" | "blocked";
-export type QuestTrialPhase =
+export type QuestOptimizerTarget = "repo" | "quest-core";
+export type QuestOptimizerStatus = "idle" | "running" | "stopped" | "blocked";
+export type QuestOptimizerPhase =
 	| "baseline-search"
 	| "baseline-hold-out"
 	| "propose"
@@ -294,7 +294,7 @@ export interface QuestTraceGradingThresholds {
 export interface QuestProfile {
 	id: string;
 	projectId: string;
-	target: QuestTrialTarget;
+	target: QuestOptimizerTarget;
 	title: string;
 	updatedAt: number;
 	promptSurfaces: QuestPromptSurfaces;
@@ -586,7 +586,7 @@ export interface QuestCandidateWorkItemResult {
 	durationMs: number;
 	totalCost: number;
 	modelChoice: string;
-	trialDir?: string;
+	evalDir?: string;
 	questOutputFile?: string;
 	artifactPaths: string[];
 	failureReason?: string;
@@ -703,17 +703,17 @@ export interface QuestExperimentCandidate {
 	promptSurfaceIds: QuestPromptSurfaceId[];
 }
 
-export interface QuestTrialActiveRun {
+export interface QuestOptimizerActiveRun {
 	candidateId: string;
-	phase: QuestTrialPhase;
+	phase: QuestOptimizerPhase;
 	pid?: number;
 	split?: "search" | "hold-out";
 	startedAt: number;
 }
 
-export interface QuestTrialState {
+export interface QuestOptimizerState {
 	projectId: string;
-	target: QuestTrialTarget;
+	target: QuestOptimizerTarget;
 	activeProfileId: string;
 	storageVersion?: number;
 	evalFamily?: QuestFrontierEvalFamily;
@@ -721,8 +721,8 @@ export interface QuestTrialState {
 	evalRunMode?: QuestEvalRunMode;
 	currentCandidateId?: string;
 	frontierCandidateIds?: string[];
-	status: QuestTrialStatus;
-	activeRun?: QuestTrialActiveRun;
+	status: QuestOptimizerStatus;
+	activeRun?: QuestOptimizerActiveRun;
 	lastSummary?: string;
 	updatedAt: number;
 }
@@ -799,7 +799,7 @@ export interface QuestStoragePaths {
 	runsDir: string;
 }
 
-export interface QuestTrialPaths {
+export interface QuestOptimizerPaths {
 	rootDir: string;
 	stateFile: string;
 	currentDir: string;

@@ -7,8 +7,8 @@ import type {
 	LearnedWorkflow,
 	ModelChoice,
 	QuestTelemetryPaths,
-	QuestTrialPaths,
-	QuestTrialState,
+	QuestOptimizerPaths,
+	QuestOptimizerState,
 	QuestConfig,
 	QuestEventRecord,
 	QuestProfile,
@@ -37,18 +37,18 @@ const SHARED_SKILLS_DIR = "shared-skills";
 const SHARED_WORKFLOWS_FILE = "index.json";
 const TELEMETRY_DIR = "telemetry";
 const TELEMETRY_TRACES_DIR = "traces";
-const TRIALS_DIR = "trials";
-const TRIALS_STATE_FILE = "state.json";
-const TRIALS_CURRENT_DIR = "current";
-const TRIALS_CURRENT_PROFILE_FILE = "profile.json";
-const TRIALS_CANDIDATES_DIR = "candidates";
-const TRIALS_SEARCH_SET_FILE = "search-set.json";
-const TRIALS_HOLD_OUT_SET_FILE = "hold-out-set.json";
-const TRIALS_FRONTIER_FILE = "frontier.json";
-const TRIALS_COMMUNITY_STATS_FILE = "community-stats.json";
-const TRIALS_COMMUNITY_TRACES_DIR = "community-traces";
-const TRIALS_PROFILES_DIR = "profiles";
-const LEGACY_TRIAL_DIRS = ["datasets", "experiments", "baselines", "reports"] as const;
+const EVALS_DIR = "evals";
+const EVALS_STATE_FILE = "state.json";
+const EVALS_CURRENT_DIR = "current";
+const EVALS_CURRENT_PROFILE_FILE = "profile.json";
+const EVALS_CANDIDATES_DIR = "candidates";
+const EVALS_SEARCH_SET_FILE = "search-set.json";
+const EVALS_HOLD_OUT_SET_FILE = "hold-out-set.json";
+const EVALS_FRONTIER_FILE = "frontier.json";
+const EVALS_COMMUNITY_STATS_FILE = "community-stats.json";
+const EVALS_COMMUNITY_TRACES_DIR = "community-traces";
+const EVALS_PROFILES_DIR = "profiles";
+const STALE_OPTIMIZER_DIRS = ["datasets", "experiments", "baselines", "reports"] as const;
 const PRUNE_LOG_AGE_MS = 1000 * 60 * 60 * 24 * 14;
 const TERMINAL_STATUSES = new Set<QuestStatus>(["completed", "aborted"]);
 
@@ -149,21 +149,21 @@ export function getQuestPaths(cwd: string, questId: string): QuestStoragePaths {
 	};
 }
 
-export function getQuestTrialPaths(cwd: string): QuestTrialPaths {
+export function getQuestOptimizerPaths(cwd: string): QuestOptimizerPaths {
 	const questsRootDir = join(cwd, QUESTS_ROOT_DIR);
-	const rootDir = join(questsRootDir, TRIALS_DIR);
+	const rootDir = join(questsRootDir, EVALS_DIR);
 	return {
 		rootDir,
-		stateFile: join(rootDir, TRIALS_STATE_FILE),
-		currentDir: join(rootDir, TRIALS_CURRENT_DIR),
-		currentProfileFile: join(rootDir, TRIALS_CURRENT_DIR, TRIALS_CURRENT_PROFILE_FILE),
-		candidatesDir: join(rootDir, TRIALS_CANDIDATES_DIR),
-		searchSetFile: join(rootDir, TRIALS_SEARCH_SET_FILE),
-		holdOutSetFile: join(rootDir, TRIALS_HOLD_OUT_SET_FILE),
-		frontierFile: join(rootDir, TRIALS_FRONTIER_FILE),
-		communityStatsFile: join(rootDir, TRIALS_COMMUNITY_STATS_FILE),
-		communityTracesDir: join(rootDir, TRIALS_COMMUNITY_TRACES_DIR),
-		profilesDir: join(rootDir, TRIALS_PROFILES_DIR),
+		stateFile: join(rootDir, EVALS_STATE_FILE),
+		currentDir: join(rootDir, EVALS_CURRENT_DIR),
+		currentProfileFile: join(rootDir, EVALS_CURRENT_DIR, EVALS_CURRENT_PROFILE_FILE),
+		candidatesDir: join(rootDir, EVALS_CANDIDATES_DIR),
+		searchSetFile: join(rootDir, EVALS_SEARCH_SET_FILE),
+		holdOutSetFile: join(rootDir, EVALS_HOLD_OUT_SET_FILE),
+		frontierFile: join(rootDir, EVALS_FRONTIER_FILE),
+		communityStatsFile: join(rootDir, EVALS_COMMUNITY_STATS_FILE),
+		communityTracesDir: join(rootDir, EVALS_COMMUNITY_TRACES_DIR),
+		profilesDir: join(rootDir, EVALS_PROFILES_DIR),
 	};
 }
 
@@ -268,14 +268,14 @@ async function ensureRoot(cwd: string): Promise<QuestStoragePaths> {
 	return paths;
 }
 
-async function ensureTrialRoot(cwd: string): Promise<QuestTrialPaths> {
-	const paths = getQuestTrialPaths(cwd);
+async function ensureOptimizerRoot(cwd: string): Promise<QuestOptimizerPaths> {
+	const paths = getQuestOptimizerPaths(cwd);
 	await mkdir(paths.rootDir, { recursive: true });
 	await mkdir(paths.currentDir, { recursive: true });
 	await mkdir(paths.candidatesDir, { recursive: true });
 	await mkdir(paths.communityTracesDir, { recursive: true });
 	await mkdir(paths.profilesDir, { recursive: true });
-	for (const legacyDir of LEGACY_TRIAL_DIRS) {
+	for (const legacyDir of STALE_OPTIMIZER_DIRS) {
 		await rm(join(paths.rootDir, legacyDir), { recursive: true, force: true });
 	}
 	return paths;
@@ -580,7 +580,7 @@ export async function saveLearnedWorkflows(cwd: string, workflows: LearnedWorkfl
 	await writeSharedWorkflowSkills(paths, workflows);
 }
 
-function profileFile(paths: QuestTrialPaths, profileId: string): string {
+function profileFile(paths: QuestOptimizerPaths, profileId: string): string {
 	return join(paths.profilesDir, `${profileId}.json`);
 }
 
@@ -588,13 +588,19 @@ function traceFile(paths: QuestTelemetryPaths, traceId: string, endedAt: number)
 	return join(paths.tracesDir, `${endedAt}-${traceId}.json`);
 }
 
-function defaultTrialState(cwd: string): QuestTrialState {
+const OPTIMIZER_STORAGE_VERSION = 4;
+
+function unsupportedOptimizerStateError(): Error {
+	return new Error("Unsupported Quest eval state. Delete .pi/quests/evals/ and rerun `/quest evals prepare`.");
+}
+
+function defaultOptimizerState(cwd: string): QuestOptimizerState {
 	const projectId = projectIdFor(cwd);
 	return {
 		projectId,
 		target: "repo",
 		activeProfileId: `repo-${projectId}`,
-		storageVersion: 3,
+		storageVersion: OPTIMIZER_STORAGE_VERSION,
 		evalFamily: "frontierswe",
 		evalDataset: "frontierswe-sample@v1",
 		evalRunMode: "sample",
@@ -605,80 +611,69 @@ function defaultTrialState(cwd: string): QuestTrialState {
 	};
 }
 
-export async function loadQuestTrialState(cwd: string, options: { ensure?: boolean } = {}): Promise<QuestTrialState> {
-	const defaults = defaultTrialState(cwd);
-	const paths = getQuestTrialPaths(cwd);
-	if (options.ensure) await ensureTrialRoot(cwd);
+export async function loadQuestOptimizerState(cwd: string, options: { ensure?: boolean } = {}): Promise<QuestOptimizerState> {
+	const defaults = defaultOptimizerState(cwd);
+	const paths = getQuestOptimizerPaths(cwd);
+	if (options.ensure) await ensureOptimizerRoot(cwd);
 	if (!existsSync(paths.stateFile)) {
 		if (options.ensure) {
-			await writeFile(paths.stateFile, `${JSON.stringify(defaults, null, 2)}\n`, "utf-8");
+			await writeAtomicFile(paths.stateFile, `${JSON.stringify(defaults, null, 2)}\n`);
 		}
 		return defaults;
 	}
-		try {
-			const raw = await readFile(paths.stateFile, "utf-8");
-			const parsed = JSON.parse(raw) as Partial<QuestTrialState> & {
-				benchmarkFamily?: QuestTrialState["evalFamily"];
-				benchmarkDataset?: string;
-				benchmarkRunMode?: QuestTrialState["evalRunMode"];
-			};
-			const usedLegacyEvalKeys =
-				(parsed.evalFamily === undefined && parsed.benchmarkFamily !== undefined) ||
-				(parsed.evalDataset === undefined && parsed.benchmarkDataset !== undefined) ||
-				(parsed.evalRunMode === undefined && parsed.benchmarkRunMode !== undefined);
-			const migratedEvalFamily = usedLegacyEvalKeys ? defaults.evalFamily : parsed.evalFamily ?? defaults.evalFamily;
-			const migratedEvalDataset = usedLegacyEvalKeys ? defaults.evalDataset : parsed.evalDataset ?? defaults.evalDataset;
-			const migratedEvalRunMode = usedLegacyEvalKeys ? defaults.evalRunMode : parsed.evalRunMode ?? defaults.evalRunMode;
-			const normalized: QuestTrialState = {
-				...defaults,
-				...parsed,
+	try {
+		const raw = await readFile(paths.stateFile, "utf-8");
+		const parsed = JSON.parse(raw) as Partial<QuestOptimizerState> & Record<string, unknown>;
+		if (parsed.storageVersion !== OPTIMIZER_STORAGE_VERSION) {
+			throw unsupportedOptimizerStateError();
+		}
+		return {
+			...defaults,
+			...parsed,
 			projectId: defaults.projectId,
-			activeProfileId: parsed.activeProfileId ?? defaults.activeProfileId,
-			target: parsed.target ?? defaults.target,
-				storageVersion: defaults.storageVersion,
-				evalFamily: migratedEvalFamily,
-				evalDataset: migratedEvalDataset,
-				evalRunMode: migratedEvalRunMode,
-				currentCandidateId: usedLegacyEvalKeys ? undefined : parsed.currentCandidateId,
-				frontierCandidateIds: usedLegacyEvalKeys ? [] : parsed.frontierCandidateIds ?? defaults.frontierCandidateIds,
-				status: usedLegacyEvalKeys ? "idle" : parsed.status ?? defaults.status,
-				activeRun: usedLegacyEvalKeys
-					? undefined
-					: parsed.activeRun
-					? {
-							candidateId: parsed.activeRun.candidateId,
-							phase: parsed.activeRun.phase,
+			activeProfileId: typeof parsed.activeProfileId === "string" && parsed.activeProfileId.trim() ? parsed.activeProfileId : defaults.activeProfileId,
+			target: parsed.target === "quest-core" ? "quest-core" : defaults.target,
+			storageVersion: OPTIMIZER_STORAGE_VERSION,
+			evalFamily: parsed.evalFamily ?? defaults.evalFamily,
+			evalDataset: typeof parsed.evalDataset === "string" && parsed.evalDataset.trim() ? parsed.evalDataset : defaults.evalDataset,
+			evalRunMode: parsed.evalRunMode ?? defaults.evalRunMode,
+			currentCandidateId: typeof parsed.currentCandidateId === "string" && parsed.currentCandidateId.trim() ? parsed.currentCandidateId : undefined,
+			frontierCandidateIds: Array.isArray(parsed.frontierCandidateIds) ? parsed.frontierCandidateIds.map(String) : defaults.frontierCandidateIds,
+			status: parsed.status ?? defaults.status,
+			activeRun: parsed.activeRun
+				? {
+						candidateId: String(parsed.activeRun.candidateId),
+						phase: parsed.activeRun.phase,
 						pid: typeof parsed.activeRun.pid === "number" ? parsed.activeRun.pid : undefined,
 						split: parsed.activeRun.split === "search" || parsed.activeRun.split === "hold-out" ? parsed.activeRun.split : undefined,
 						startedAt:
 							typeof parsed.activeRun.startedAt === "number" && Number.isFinite(parsed.activeRun.startedAt)
-									? parsed.activeRun.startedAt
-									: defaults.updatedAt,
-						}
-					: undefined,
-				lastSummary: usedLegacyEvalKeys ? `Reset legacy trials state to ${defaults.evalFamily}:${defaults.evalDataset}.` : parsed.lastSummary,
-			};
-		if (options.ensure && JSON.stringify(parsed) !== JSON.stringify(normalized)) {
-			await writeFile(paths.stateFile, `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
-		}
-		return normalized;
+								? parsed.activeRun.startedAt
+								: defaults.updatedAt,
+					}
+				: undefined,
+			lastSummary: typeof parsed.lastSummary === "string" ? parsed.lastSummary : undefined,
+			updatedAt: typeof parsed.updatedAt === "number" && Number.isFinite(parsed.updatedAt) ? parsed.updatedAt : defaults.updatedAt,
+		};
 	} catch {
+		if (existsSync(paths.stateFile)) throw unsupportedOptimizerStateError();
 		return defaults;
 	}
 }
 
-export async function saveQuestTrialState(cwd: string, state: QuestTrialState): Promise<void> {
-	const paths = await ensureTrialRoot(cwd);
+export async function saveQuestOptimizerState(cwd: string, state: QuestOptimizerState): Promise<void> {
+	const paths = await ensureOptimizerRoot(cwd);
 	state.updatedAt = Date.now();
-	await writeFile(paths.stateFile, `${JSON.stringify(state, null, 2)}\n`, "utf-8");
+	state.storageVersion = OPTIMIZER_STORAGE_VERSION;
+	await writeAtomicFile(paths.stateFile, `${JSON.stringify(state, null, 2)}\n`);
 }
 
 export async function loadQuestProfile(
 	cwd: string,
 	profileId?: string,
-	options: { ensure?: boolean; target?: QuestTrialState["target"] } = {},
+	options: { ensure?: boolean; target?: QuestOptimizerState["target"] } = {},
 ): Promise<QuestProfile> {
-	const state = await loadQuestTrialState(cwd, { ensure: options.ensure });
+	const state = await loadQuestOptimizerState(cwd, { ensure: options.ensure });
 	const resolvedProfileId = profileId ?? state.activeProfileId;
 	const resolvedTarget = options.target ?? state.target;
 	const internalProfiles = await loadInternalProfileCore();
@@ -686,14 +681,14 @@ export async function loadQuestProfile(
 		? internalProfiles.defaultInternalQuestProfile(projectIdFor(cwd), resolvedTarget)
 		: defaultQuestProfile(projectIdFor(cwd), resolvedTarget);
 	defaults.id = resolvedProfileId;
-	const paths = getQuestTrialPaths(cwd);
+	const paths = getQuestOptimizerPaths(cwd);
 	const file = resolvedProfileId === state.activeProfileId ? paths.currentProfileFile : profileFile(paths, resolvedProfileId);
 	if (!existsSync(file)) {
 		if (options.ensure) {
-			await ensureTrialRoot(cwd);
-			await writeFile(file, `${JSON.stringify(defaults, null, 2)}\n`, "utf-8");
+			await ensureOptimizerRoot(cwd);
+			await writeAtomicFile(file, `${JSON.stringify(defaults, null, 2)}\n`);
 			if (file === paths.currentProfileFile) {
-				await writeFile(profileFile(paths, defaults.id), `${JSON.stringify(defaults, null, 2)}\n`, "utf-8");
+				await writeAtomicFile(profileFile(paths, defaults.id), `${JSON.stringify(defaults, null, 2)}\n`);
 			}
 		}
 		return defaults;
@@ -709,22 +704,22 @@ export async function loadQuestProfile(
 }
 
 export async function saveQuestProfile(cwd: string, profile: QuestProfile): Promise<void> {
-	const paths = await ensureTrialRoot(cwd);
+	const paths = await ensureOptimizerRoot(cwd);
 	const internalProfiles = await loadInternalProfileCore();
 	const normalized = internalProfiles
 		? internalProfiles.normalizeInternalQuestProfile(profile, projectIdFor(cwd), profile.target)
 		: normalizeQuestProfile(profile, projectIdFor(cwd), profile.target);
 	normalized.updatedAt = Date.now();
-	await writeFile(profileFile(paths, normalized.id), `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
-	await writeFile(paths.currentProfileFile, `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
-	const state = await loadQuestTrialState(cwd, { ensure: true });
+	await writeAtomicFile(profileFile(paths, normalized.id), `${JSON.stringify(normalized, null, 2)}\n`);
+	await writeAtomicFile(paths.currentProfileFile, `${JSON.stringify(normalized, null, 2)}\n`);
+	const state = await loadQuestOptimizerState(cwd, { ensure: true });
 	state.activeProfileId = normalized.id;
 	state.target = normalized.target;
-	await saveQuestTrialState(cwd, state);
+	await saveQuestOptimizerState(cwd, state);
 }
 
 export async function listQuestProfiles(cwd: string): Promise<QuestProfile[]> {
-	const paths = getQuestTrialPaths(cwd);
+	const paths = getQuestOptimizerPaths(cwd);
 	if (!existsSync(paths.profilesDir)) return [];
 	const internalProfiles = await loadInternalProfileCore();
 	const entries = await readdir(paths.profilesDir);

@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { getQuestPaths, loadQuestProfile, loadQuestTrialState, saveQuest, saveQuestProfile } from "./state-core.js";
+import { getQuestPaths, loadQuestProfile, loadQuestOptimizerState, saveQuest, saveQuestProfile } from "./state-core.js";
 import type { QuestProfile, QuestState, ValidationSurfaceStatus } from "./types.js";
 
 interface QuestToolRegistrationDeps {
@@ -347,10 +347,10 @@ export function registerQuestTools(pi: ExtensionAPI, deps: QuestToolRegistration
 	if (!deps.internalModeEnabled) return;
 
 	pi.registerTool({
-		name: "quest_trials_set_profile",
-		label: "quest_trials_set_profile",
-		description: "Persist the active Trials profile and its editable surfaces.",
-		promptSnippet: "Persist a Trials profile surface update",
+		name: "quest_optimizer_set_profile",
+		label: "quest_optimizer_set_profile",
+		description: "Persist the active eval optimizer profile and its editable surfaces.",
+		promptSnippet: "Persist an eval optimizer profile surface update",
 		parameters: Type.Object({
 			profileId: Type.Optional(Type.String()),
 			target: Type.Optional(Type.Union([Type.Literal("repo"), Type.Literal("quest-core")])),
@@ -388,10 +388,10 @@ export function registerQuestTools(pi: ExtensionAPI, deps: QuestToolRegistration
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const trialState = await loadQuestTrialState(ctx.cwd, { ensure: true });
-			const profile = await loadQuestProfile(ctx.cwd, params.profileId ?? trialState.activeProfileId, {
+			const optimizerState = await loadQuestOptimizerState(ctx.cwd, { ensure: true });
+			const profile = await loadQuestProfile(ctx.cwd, params.profileId ?? optimizerState.activeProfileId, {
 				ensure: true,
-				target: params.target ?? trialState.target,
+				target: params.target ?? optimizerState.target,
 			});
 			const { applyQuestProfilePatch } = await import("./internal-profile-core.js");
 			const next = applyQuestProfilePatch(profile, {
@@ -406,7 +406,7 @@ export function registerQuestTools(pi: ExtensionAPI, deps: QuestToolRegistration
 			await saveQuestProfile(ctx.cwd, next);
 			deps.setCurrentProfile(next);
 			return {
-				content: [{ type: "text", text: `Updated Trials profile ${next.id}.` }],
+				content: [{ type: "text", text: `Updated eval profile ${next.id}.` }],
 				details: { profileId: next.id, target: next.target },
 			};
 		},

@@ -50,7 +50,7 @@ import {
 	syncQuestConfig,
 	synthesizeAssertionsForQuestPlan,
 } from "./quest-runtime-helpers.js";
-import { handleQuestTrialsCommand as runQuestTrialsCommand, openQuestTrialsControl as showQuestTrialsControl } from "./quest-trials-controller.js";
+import { handleQuestEvalsCommand as runQuestEvalsCommand, openQuestEvalsControl as showQuestEvalsControl } from "./quest-evals-controller.js";
 import { applyQuestUi as renderQuestUi } from "./quest-ui-controller.js";
 import { registerQuestTools } from "./quest-tools.js";
 import { describeActiveRun, markQuestAborted, prepareQuestForResume, terminateQuestProcess } from "./runtime-core.js";
@@ -63,10 +63,10 @@ import {
 	listProjectQuests,
 	loadActiveQuest,
 	loadLearnedWorkflows,
-	loadQuestTrialState,
+	loadQuestOptimizerState,
 	loadQuest,
 	pruneQuestStorage,
-	saveQuestTrialState,
+	saveQuestOptimizerState,
 	saveQuestProfile,
 	saveLearnedWorkflows,
 	saveQuest,
@@ -82,7 +82,7 @@ import type {
 	LiveRunSnapshot,
 	ModelChoice,
 	QuestFeature,
-	QuestTrialState,
+	QuestOptimizerState,
 	QuestMilestone,
 	QuestProfile,
 	QuestRole,
@@ -120,15 +120,15 @@ export default function questExtension(pi: ExtensionAPI) {
 	let currentQuest: QuestState | null = null;
 	let currentWorkflows: LearnedWorkflow[] = [];
 	let currentProfile: QuestProfile | null = null;
-	let currentTrialState: QuestTrialState | null = null;
+	let currentOptimizerState: QuestOptimizerState | null = null;
 	let liveRun: LiveRunSnapshot | null = null;
-	let trialLiveRun: LiveRunSnapshot | null = null;
+	let optimizerLiveRun: LiveRunSnapshot | null = null;
 	let lastContextUsage: ContextUsage | null = null;
 	let planningEvents: WorkerEventRecord[] = [];
 	let planningStartedAt = 0;
 	let questModeEnabled = false;
 	let planningTurnActive = false;
-	let activeTrialPid: number | undefined;
+	let activeOptimizerPid: number | undefined;
 	let pendingQuestControlOpen = false;
 
 	function persistQuestMode() {
@@ -141,9 +141,9 @@ export default function questExtension(pi: ExtensionAPI) {
 			widgetKey: WIDGET_KEY,
 			questModeEnabled,
 			lastContextUsage,
-			currentTrialState,
+			currentOptimizerState,
 			liveRun,
-			trialLiveRun,
+			optimizerLiveRun,
 			loadInternalUi,
 		});
 	}
@@ -171,7 +171,7 @@ export default function questExtension(pi: ExtensionAPI) {
 		currentQuest = await loadActiveQuest(ctx.cwd);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
 		const runtimeProfile = await loadRuntimeProfile(ctx.cwd);
-		currentTrialState = runtimeProfile.trialState;
+		currentOptimizerState = runtimeProfile.optimizerState;
 		currentProfile = runtimeProfile.profile;
 		if (!currentQuest || currentQuest.status !== "planning") {
 			liveRun = null;
@@ -191,7 +191,7 @@ export default function questExtension(pi: ExtensionAPI) {
 		currentQuest = await loadActiveQuest(ctx.cwd);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
 		const runtimeProfile = await loadRuntimeProfile(ctx.cwd);
-		currentTrialState = runtimeProfile.trialState;
+		currentOptimizerState = runtimeProfile.optimizerState;
 		currentProfile = runtimeProfile.profile;
 		if (!currentQuest) {
 			await emitNote(pi, ctx, "No active quest in this repo. Use `/quest new <goal>` first.", "warning");
@@ -205,7 +205,7 @@ export default function questExtension(pi: ExtensionAPI) {
 		currentQuest = await createQuest(ctx.cwd, goal, modelChoice);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
 		const runtimeProfile = await loadRuntimeProfile(ctx.cwd, { ensure: internalModeEnabled() });
-		currentTrialState = runtimeProfile.trialState;
+		currentOptimizerState = runtimeProfile.optimizerState;
 		currentProfile = runtimeProfile.profile;
 		if (internalModeEnabled()) await saveQuestProfile(ctx.cwd, currentProfile);
 		await pruneQuestStorage(ctx.cwd);
@@ -319,26 +319,26 @@ export default function questExtension(pi: ExtensionAPI) {
 		await emitNote(pi, ctx, `Active quest set to "${selectedQuest.title}".`);
 	}
 
-	async function openQuestTrialsControl(ctx: ExtensionContext) {
-		await showQuestTrialsControl({
+	async function openQuestEvalsControl(ctx: ExtensionContext) {
+		await showQuestEvalsControl({
 			pi,
 			ctx,
 			getCurrentQuest: () => currentQuest,
-			getCurrentTrialState: () => currentTrialState,
+			getCurrentOptimizerState: () => currentOptimizerState,
 			getCurrentProfile: () => currentProfile,
-			getTrialLiveRun: () => trialLiveRun,
-			getActiveTrialPid: () => activeTrialPid,
-			setCurrentTrialState: (state) => {
-				currentTrialState = state;
+			getOptimizerLiveRun: () => optimizerLiveRun,
+			getActiveOptimizerPid: () => activeOptimizerPid,
+			setCurrentOptimizerState: (state) => {
+				currentOptimizerState = state;
 			},
 			setCurrentProfile: (profile) => {
 				currentProfile = profile;
 			},
-			setTrialLiveRun: (snapshot) => {
-				trialLiveRun = snapshot;
+			setOptimizerLiveRun: (snapshot) => {
+				optimizerLiveRun = snapshot;
 			},
-			setActiveTrialPid: (pid) => {
-				activeTrialPid = pid;
+			setActiveOptimizerPid: (pid) => {
+				activeOptimizerPid = pid;
 			},
 			emitNote: async (content, level = "info") => emitNote(pi, ctx, content, level),
 			applyQuestUi: async () => applyQuestUi(ctx, currentQuest),
@@ -346,26 +346,26 @@ export default function questExtension(pi: ExtensionAPI) {
 		});
 	}
 
-	async function handleQuestTrialsCommand(args: string, ctx: ExtensionContext) {
-		await runQuestTrialsCommand(args, {
+	async function handleQuestEvalsCommand(args: string, ctx: ExtensionContext) {
+		await runQuestEvalsCommand(args, {
 			pi,
 			ctx,
 			getCurrentQuest: () => currentQuest,
-			getCurrentTrialState: () => currentTrialState,
+			getCurrentOptimizerState: () => currentOptimizerState,
 			getCurrentProfile: () => currentProfile,
-			getTrialLiveRun: () => trialLiveRun,
-			getActiveTrialPid: () => activeTrialPid,
-			setCurrentTrialState: (state) => {
-				currentTrialState = state;
+			getOptimizerLiveRun: () => optimizerLiveRun,
+			getActiveOptimizerPid: () => activeOptimizerPid,
+			setCurrentOptimizerState: (state) => {
+				currentOptimizerState = state;
 			},
 			setCurrentProfile: (profile) => {
 				currentProfile = profile;
 			},
-			setTrialLiveRun: (snapshot) => {
-				trialLiveRun = snapshot;
+			setOptimizerLiveRun: (snapshot) => {
+				optimizerLiveRun = snapshot;
 			},
-			setActiveTrialPid: (pid) => {
-				activeTrialPid = pid;
+			setActiveOptimizerPid: (pid) => {
+				activeOptimizerPid = pid;
 			},
 			emitNote: async (content, level = "info") => emitNote(pi, ctx, content, level),
 			applyQuestUi: async () => applyQuestUi(ctx, currentQuest),
@@ -443,7 +443,7 @@ export default function questExtension(pi: ExtensionAPI) {
 			requests,
 			currentOrDefaultModel(quest, "orchestrator"),
 			currentWorkflows,
-			activeProfileFor(quest.cwd, currentProfile, currentTrialState?.target),
+			activeProfileFor(quest.cwd, currentProfile, currentOptimizerState?.target),
 			undefined,
 			async (snapshot) => {
 				liveRun = snapshot;
@@ -461,7 +461,7 @@ export default function questExtension(pi: ExtensionAPI) {
 			},
 		);
 		await writeWorkerRun(quest.cwd, quest.id, run);
-		await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, run, activeProfileFor(quest.cwd, currentProfile, currentTrialState?.target)));
+		await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, run, activeProfileFor(quest.cwd, currentProfile, currentOptimizerState?.target)));
 		quest.recentRuns = trimRecentRuns([run, ...quest.recentRuns]);
 		liveRun = null;
 		await persistLearnedWorkflows(run);
@@ -521,7 +521,7 @@ export default function questExtension(pi: ExtensionAPI) {
 			currentOrDefaultModel(quest, "validator"),
 			currentWorkflows,
 			pass,
-			activeProfileFor(quest.cwd, currentProfile, currentTrialState?.target),
+			activeProfileFor(quest.cwd, currentProfile, currentOptimizerState?.target),
 			undefined,
 			async (snapshot) => {
 				liveRun = snapshot;
@@ -540,7 +540,7 @@ export default function questExtension(pi: ExtensionAPI) {
 		);
 		liveRun = null;
 		await writeWorkerRun(quest.cwd, quest.id, validator);
-		await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, validator, activeProfileFor(quest.cwd, currentProfile, currentTrialState?.target)));
+		await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, validator, activeProfileFor(quest.cwd, currentProfile, currentOptimizerState?.target)));
 		quest.recentRuns = trimRecentRuns([validator, ...quest.recentRuns]);
 		await persistLearnedWorkflows(validator);
 		quest.activeRun = undefined;
@@ -595,7 +595,7 @@ export default function questExtension(pi: ExtensionAPI) {
 					milestone,
 					currentOrDefaultModel(quest, "worker"),
 					currentWorkflows,
-					activeProfileFor(quest.cwd, currentProfile, currentTrialState?.target),
+					activeProfileFor(quest.cwd, currentProfile, currentOptimizerState?.target),
 					undefined,
 					async (snapshot) => {
 						liveRun = snapshot;
@@ -614,7 +614,7 @@ export default function questExtension(pi: ExtensionAPI) {
 				);
 				liveRun = null;
 				await writeWorkerRun(quest.cwd, quest.id, run);
-				await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, run, activeProfileFor(quest.cwd, currentProfile, currentTrialState?.target)));
+				await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, run, activeProfileFor(quest.cwd, currentProfile, currentOptimizerState?.target)));
 				quest.recentRuns = trimRecentRuns([run, ...quest.recentRuns]);
 				await persistLearnedWorkflows(run);
 				quest.activeRun = undefined;
@@ -727,12 +727,12 @@ export default function questExtension(pi: ExtensionAPI) {
 		const remainder = rest.join(" ").trim();
 
 		switch (subcommand) {
-			case "trials": {
+			case "evals": {
 				if (!internalModeEnabled()) {
-					await emitNote(pi, ctx, "Quest Trials is maintainer-only and not part of the public package surface.", "warning");
+					await emitNote(pi, ctx, "Quest evals are maintainer-only and not part of the public package surface.", "warning");
 					return;
 				}
-				await handleQuestTrialsCommand(remainder, ctx);
+				await handleQuestEvalsCommand(remainder, ctx);
 				return;
 			}
 
@@ -959,9 +959,9 @@ export default function questExtension(pi: ExtensionAPI) {
 
 	if (internalModeEnabled()) {
 		pi.registerShortcut(Key.ctrlAlt("t"), {
-			description: "Open Quest Trials",
+			description: "Open Quest Evals",
 			handler: async (ctx) => {
-				await openQuestTrialsControl(ctx);
+				await openQuestEvalsControl(ctx);
 			},
 		});
 	}
@@ -994,8 +994,8 @@ export default function questExtension(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (isToolCallEventType("bash", event)) {
 			const quest = currentQuest ?? (await loadActiveQuest(ctx.cwd));
-			const trialState = currentTrialState ?? (internalModeEnabled() ? await loadQuestTrialState(ctx.cwd, { ensure: true }) : null);
-			const env = buildQuestShellEnvironment(ctx.cwd, quest, trialState);
+			const optimizerState = currentOptimizerState ?? (internalModeEnabled() ? await loadQuestOptimizerState(ctx.cwd, { ensure: true }) : null);
+			const env = buildQuestShellEnvironment(ctx.cwd, quest, optimizerState);
 			if (Object.keys(env).length > 0) {
 				event.input.command = prefixQuestShellCommand(event.input.command, env);
 			}
@@ -1068,7 +1068,7 @@ export default function questExtension(pi: ExtensionAPI) {
 		return {
 			message: {
 				customType: "pi-quest-planning",
-				content: planningInstructions(currentQuest, currentWorkflows, activeProfileFor(ctx.cwd, currentProfile, currentTrialState?.target)),
+				content: planningInstructions(currentQuest, currentWorkflows, activeProfileFor(ctx.cwd, currentProfile, currentOptimizerState?.target)),
 				display: false,
 			},
 		};
@@ -1104,7 +1104,7 @@ export default function questExtension(pi: ExtensionAPI) {
 		if (text && currentQuest.status === "planning") {
 			await markPlanReadyFromText(ctx, currentQuest, text);
 		}
-		const planningProfile = activeProfileFor(ctx.cwd, currentProfile, currentTrialState?.target);
+		const planningProfile = activeProfileFor(ctx.cwd, currentProfile, currentOptimizerState?.target);
 		await writeQuestTraceBundle(
 			ctx.cwd,
 			traceBundleFromPlanningSession(

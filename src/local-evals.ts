@@ -99,7 +99,7 @@ export async function runLocalEvalSplit(
 	const results: QuestCandidateWorkItemResult[] = [];
 	for (const item of split.items) {
 		const suite = item.id as EvalSuiteId;
-		const suiteDir = join(cwd, ".pi", "quests", "trials", "candidates", candidateId, "evals", split.split, item.id);
+		const suiteDir = join(cwd, ".pi", "quests", "evals", "candidates", candidateId, "evals", split.split, item.id);
 		await mkdir(suiteDir, { recursive: true });
 		const startedAt = Date.now();
 		const suiteResult = await runEvalSuite(suite);

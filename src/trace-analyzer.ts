@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { deriveIssuesFromTags } from "./profile-core.js";
-import { getQuestTrialPaths } from "./state-core.js";
+import { getQuestOptimizerPaths } from "./state-core.js";
 import { compact } from "./utils.js";
 import type {
 	CommunitySourceStats,
@@ -461,13 +461,13 @@ export async function analyzeCommunityTraces(rootDir: string): Promise<Community
 }
 
 export async function writeCommunityStats(cwd: string, stats: CommunityStats): Promise<string> {
-	const paths = getQuestTrialPaths(cwd);
+	const paths = getQuestOptimizerPaths(cwd);
 	await writeFile(paths.communityStatsFile, `${JSON.stringify(stats, null, 2)}\n`, "utf-8");
 	return paths.communityStatsFile;
 }
 
 export async function loadCommunityStats(cwd: string): Promise<CommunityStats | null> {
-	const paths = getQuestTrialPaths(cwd);
+	const paths = getQuestOptimizerPaths(cwd);
 	if (!existsSync(paths.communityStatsFile)) return null;
 	try {
 		const raw = await readFile(paths.communityStatsFile, "utf-8");

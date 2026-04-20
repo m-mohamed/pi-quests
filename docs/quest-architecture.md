@@ -71,7 +71,7 @@ That is the point of the system: fresh agents can read the artifact they need fo
 Quest skill directories are also auto-discovered as Pi skill paths on startup and `/reload`, so reusable guidance written during a quest can feed later quest work without extra package wiring.
 
 The control surface should stay Pi-native as well: use Pi commands, Pi widgets, Pi shortcuts, Pi working-message labels, Pi TUI components, and the injected Pi keybinding manager first, then keep Quest-specific code for orchestration semantics only.
-Use the chain-safe runtime hooks the same way: `before_provider_request` for context-pressure visibility, `tool_result` for output-shape guidance, and `tool_call` mutation for quest-aware shell environment injection. Keep the always-on Quest and Trials status surfaces as single native widget components rather than separate text/action sidecars. Do not grab first-hit-wins shell hooks unless Quest truly needs to own them.
+Use the chain-safe runtime hooks the same way: `before_provider_request` for context-pressure visibility, `tool_result` for output-shape guidance, and `tool_call` mutation for quest-aware shell environment injection. Keep the always-on Quest and eval optimizer status surfaces as single native widget components rather than separate text/action sidecars. Do not grab first-hit-wins shell hooks unless Quest truly needs to own them.
 
 ## Product Boundary
 

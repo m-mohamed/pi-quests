@@ -16,7 +16,7 @@ function sampleQuest(cwd = "/tmp/pi-quests-trials") {
 		id: "quest-trials",
 		projectId: "quest-trials-project",
 		cwd,
-		title: "Trials",
+		title: "Optimizer",
 		goal: "Improve Quest with evals and traces.",
 		status: "proposal_ready",
         config: {
@@ -33,7 +33,7 @@ function sampleQuest(cwd = "/tmp/pi-quests-trials") {
 			validator: DEFAULT_MODEL,
 		},
 		plan: {
-			title: "Trials",
+			title: "Optimizer",
 			summary: "Improve Quest with evals and traces.",
 			risks: [],
 			environment: [],
@@ -87,7 +87,7 @@ test("defaultQuestProfile stays Quest-native and eval-neutral", () => {
 	assert.equal(profile.contextPolicy.spillLongOutputsToReports, true);
 	assert.match(profile.promptSurfaces.planningPolicy, /clarifying questions/i);
 	assert.match(profile.promptSurfaces.workerPolicy, /Confirm prerequisites/i);
-	assert.doesNotMatch(profile.promptSurfaces.workerPolicy, /terminal-bench|slopcodebench|harbor/i);
+	assert.match(profile.promptSurfaces.workerPolicy, /narrowest failing proof/i);
 	assert.doesNotMatch(profile.promptSurfaces.proposerPolicy, /search-set mean score|behavioral tag cohorts|hold-out/i);
 	assert.equal(profile.verificationBudget.workerAttempts, 1);
 	assert.equal(profile.toolAllowlist.proposer.includes("grep"), true);

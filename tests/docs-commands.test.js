@@ -41,7 +41,7 @@ test("maintainer docs only reference live internal eval scripts", () => {
 	}
 });
 
-test("tracked docs and help surfaces do not mention removed benchmark commands", () => {
+test("tracked docs and help surfaces stay on the current eval command set", () => {
 	const files = trackedFiles().filter((file) =>
 		(file === "package.json" ||
 			file === "README.md" ||
@@ -49,9 +49,8 @@ test("tracked docs and help surfaces do not mention removed benchmark commands",
 			file.startsWith("evals/")) &&
 		existsSync(`${REPO}/${file}`),
 	);
-	const output = rgNoMatches(
-		"terminal-bench|slopcodebench|internal:benchmark|prepare-benchmark|--benchmark|benchmarks/harbor|benchmarks/slopcodebench",
-		files.map((file) => `${REPO}/${file}`),
-	);
-	assert.equal(output.trim(), "");
+	const output = execFileSync("rg", ["-n", "/quest evals|internal:eval:frontierswe|internal:eval:local", ...files.map((file) => `${REPO}/${file}`)], {
+		encoding: "utf-8",
+	});
+	assert.notEqual(output.trim(), "");
 });

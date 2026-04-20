@@ -6,9 +6,9 @@ import { applyQuestProfilePatch } from "./internal-profile-core.js";
 import { discoverFrontiersweManifest, runFrontiersweSplit, defaultFrontiersweDataset, resolveFrontiersweRunMode } from "./frontierswe-evals.js";
 import { discoverLocalEvalManifest, runLocalEvalSplit, defaultLocalEvalDataset, resolveLocalEvalRunMode } from "./local-evals.js";
 import { processExists } from "./runtime-core.js";
-import { getQuestTrialPaths, loadQuestProfile, loadQuestTrialState, saveQuestProfile, saveQuestTrialState } from "./state-core.js";
+import { getQuestOptimizerPaths, loadQuestProfile, loadQuestOptimizerState, saveQuestProfile, saveQuestOptimizerState } from "./state-core.js";
 import { analyzeCommunityTraces, loadCommunityStats, writeCommunityStats } from "./trace-analyzer.js";
-import { executeTrialProposerAgent } from "./workers.js";
+import { executeOptimizerProposerAgent } from "./workers.js";
 import type {
 	CommunityStats,
 	LiveRunSnapshot,
@@ -26,7 +26,7 @@ import type {
 	QuestProfile,
 	QuestProfilePatch,
 	QuestPromptSurfaceId,
-	QuestTrialPhase,
+	QuestOptimizerPhase,
 } from "./types.js";
 
 const DEFAULT_SAMPLE_SEED = 42;
@@ -60,15 +60,15 @@ type RunEvalSetFn = (
 	options?: { repo?: string; onProcessStart?: (pid: number) => void | Promise<void> },
 ) => Promise<QuestCandidateScorecard>;
 
-interface FrontierTrialDependencies {
+interface FrontierOptimizerDependencies {
 	analyzeCommunity?: typeof analyzeCommunityTraces;
-	proposeCandidate?: typeof executeTrialProposerAgent;
+	proposeCandidate?: typeof executeOptimizerProposerAgent;
 	runEvalSet?: RunEvalSetFn;
 	now?: () => number;
 }
 
-export interface FrontierTrialStatus {
-	state: Awaited<ReturnType<typeof loadQuestTrialState>>;
+export interface FrontierOptimizerStatus {
+	state: Awaited<ReturnType<typeof loadQuestOptimizerState>>;
 	profile: QuestProfile;
 	searchSet: QuestEvalSplit | null;
 	holdOutSet: QuestEvalSplit | null;
@@ -110,7 +110,7 @@ function jsonWithNewline(value: unknown): string {
 	return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-function now(deps?: FrontierTrialDependencies): number {
+function now(deps?: FrontierOptimizerDependencies): number {
 	return deps?.now?.() ?? Date.now();
 }
 
@@ -123,7 +123,7 @@ function formatCandidateId(value: number): string {
 }
 
 function candidateDir(cwd: string, candidateId: string): string {
-	return join(getQuestTrialPaths(cwd).candidatesDir, candidateId);
+	return join(getQuestOptimizerPaths(cwd).candidatesDir, candidateId);
 }
 
 function candidateProfileFile(cwd: string, candidateId: string): string {
@@ -272,7 +272,7 @@ function normalizeEvalFamily(value: unknown): QuestFrontierEvalFamily | null {
 }
 
 function normalizeWorkItem(raw: any, fallback: { family: QuestFrontierEvalFamily; dataset: string }): QuestEvalWorkItem {
-	const family = normalizeEvalFamily(raw?.family ?? raw?.eval ?? fallback.family) ?? fallback.family;
+	const family = normalizeEvalFamily(raw?.family ?? fallback.family) ?? fallback.family;
 	const dataset = typeof raw?.dataset === "string" && raw.dataset.trim() ? raw.dataset : fallback.dataset;
 	return {
 		id: String(raw?.id ?? raw?.name ?? ""),
@@ -287,7 +287,7 @@ function normalizeWorkItem(raw: any, fallback: { family: QuestFrontierEvalFamily
 
 function normalizeStoredSplit(raw: any): QuestEvalSplit | null {
 	if (!raw || typeof raw !== "object") return null;
-	const family = normalizeEvalFamily(raw.family ?? raw.eval ?? raw.benchmark);
+	const family = normalizeEvalFamily(raw.family);
 	if (!family) return null;
 	const dataset = typeof raw.dataset === "string" && raw.dataset.trim() ? raw.dataset : defaultDatasetForFamily(family);
 	const rawItems = Array.isArray(raw.items) ? raw.items : null;
@@ -314,6 +314,7 @@ function normalizeStoredSplit(raw: any): QuestEvalSplit | null {
 
 async function loadSplit(file: string): Promise<QuestEvalSplit | null> {
 	const raw = await readJsonFile<any>(file);
+	if (raw && typeof raw === "object" && !("family" in raw)) throw unsupportedStoredSplitError();
 	return normalizeStoredSplit(raw);
 }
 
@@ -335,11 +336,11 @@ async function saveCandidateScorecard(cwd: string, candidateId: string, scorecar
 }
 
 async function loadFrontierState(cwd: string): Promise<QuestFrontierState | null> {
-	return readJsonFile<QuestFrontierState>(getQuestTrialPaths(cwd).frontierFile);
+	return readJsonFile<QuestFrontierState>(getQuestOptimizerPaths(cwd).frontierFile);
 }
 
 async function saveFrontierState(cwd: string, frontier: QuestFrontierState): Promise<void> {
-	await writeJsonFile(getQuestTrialPaths(cwd).frontierFile, frontier);
+	await writeJsonFile(getQuestOptimizerPaths(cwd).frontierFile, frontier);
 }
 
 function initialFrontier(): QuestFrontierState {
@@ -412,7 +413,7 @@ function candidateDominates(left: QuestCandidateSummary, right: QuestCandidateSu
 }
 
 async function loadAllCandidateSummaries(cwd: string): Promise<QuestCandidateSummary[]> {
-	const paths = getQuestTrialPaths(cwd);
+	const paths = getQuestOptimizerPaths(cwd);
 	if (!existsSync(paths.candidatesDir)) return [];
 	const entries = await readdir(paths.candidatesDir, { withFileTypes: true });
 	const summaries = await Promise.all(
@@ -513,7 +514,7 @@ async function promoteLeaderProfile(cwd: string, leader: QuestCandidateSummary |
 }
 
 async function nextCandidateId(cwd: string): Promise<string> {
-	const dir = getQuestTrialPaths(cwd).candidatesDir;
+	const dir = getQuestOptimizerPaths(cwd).candidatesDir;
 	await mkdir(dir, { recursive: true });
 	const entries = await readdir(dir, { withFileTypes: true });
 	const maxValue = entries
@@ -522,10 +523,10 @@ async function nextCandidateId(cwd: string): Promise<string> {
 	return formatCandidateId(maxValue + 1);
 }
 
-function setActiveTrialPhase(
-	state: Awaited<ReturnType<typeof loadQuestTrialState>>,
+function setActiveOptimizerPhase(
+	state: Awaited<ReturnType<typeof loadQuestOptimizerState>>,
 	candidateId: string,
-	phase: QuestTrialPhase,
+	phase: QuestOptimizerPhase,
 	summary: string,
 ): void {
 	state.status = "running";
@@ -540,13 +541,13 @@ function setActiveTrialPhase(
 
 async function persistActiveRunPid(
 	cwd: string,
-	state: Awaited<ReturnType<typeof loadQuestTrialState>>,
+	state: Awaited<ReturnType<typeof loadQuestOptimizerState>>,
 	pid: number,
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<void> {
 	if (!state.activeRun) return;
 	state.activeRun.pid = pid;
-	await saveQuestTrialState(cwd, state);
+	await saveQuestOptimizerState(cwd, state);
 	if (onProcessStart) await onProcessStart(pid);
 }
 
@@ -567,12 +568,12 @@ async function materializeIncompleteCandidate(
 	return summary;
 }
 
-async function ensureCommunityStats(cwd: string, deps: FrontierTrialDependencies = {}, force = false): Promise<CommunityStats> {
+async function ensureCommunityStats(cwd: string, deps: FrontierOptimizerDependencies = {}, force = false): Promise<CommunityStats> {
 	if (!force) {
 		const existing = await loadCommunityStats(cwd);
 		if (existing) return existing;
 	}
-	const paths = getQuestTrialPaths(cwd);
+	const paths = getQuestOptimizerPaths(cwd);
 	await mkdir(paths.communityTracesDir, { recursive: true });
 	const stats = await (deps.analyzeCommunity ?? analyzeCommunityTraces)(paths.communityTracesDir);
 	await writeCommunityStats(cwd, stats);
@@ -610,21 +611,21 @@ function splitMatchesManifest(split: QuestEvalSplit | null, manifest: QuestEvalM
 async function ensurePreparedEval(
 	cwd: string,
 	options: PrepareEvalOptions = {},
-	deps: FrontierTrialDependencies = {},
+	deps: FrontierOptimizerDependencies = {},
 ): Promise<{
-	state: Awaited<ReturnType<typeof loadQuestTrialState>>;
+	state: Awaited<ReturnType<typeof loadQuestOptimizerState>>;
 	searchSet: QuestEvalSplit;
 	holdOutSet: QuestEvalSplit;
 	manifest: QuestEvalManifest;
 }> {
-	const state = await loadQuestTrialState(cwd, { ensure: true });
+	const state = await loadQuestOptimizerState(cwd, { ensure: true });
 	const family = options.eval ?? state.evalFamily ?? "frontierswe";
 	const adapter = EVAL_ADAPTERS[family];
 	const dataset = options.suite ?? (state.evalFamily === family ? state.evalDataset : undefined) ?? adapter.defaultDataset;
 	const runMode = adapter.resolveRunMode(dataset, options.runMode);
 	const manifest = await adapter.discoverManifest({ dataset, runMode, repo: options.repo, now: now(deps) });
-	const searchSet = await loadSplit(getQuestTrialPaths(cwd).searchSetFile);
-	const holdOutSet = await loadSplit(getQuestTrialPaths(cwd).holdOutSetFile);
+	const searchSet = await loadSplit(getQuestOptimizerPaths(cwd).searchSetFile);
+	const holdOutSet = await loadSplit(getQuestOptimizerPaths(cwd).holdOutSetFile);
 	if (
 		!options.force &&
 		splitMatchesManifest(searchSet, manifest) &&
@@ -633,7 +634,7 @@ async function ensurePreparedEval(
 		state.evalFamily = family;
 		state.evalDataset = dataset;
 		state.evalRunMode = runMode;
-		await saveQuestTrialState(cwd, state);
+		await saveQuestOptimizerState(cwd, state);
 		return {
 			state,
 			searchSet: searchSet!,
@@ -641,20 +642,20 @@ async function ensurePreparedEval(
 			manifest,
 		};
 	}
-	return prepareTrialEval(cwd, { ...options, eval: family, suite: dataset, runMode }, deps);
+	return prepareOptimizerEval(cwd, { ...options, eval: family, suite: dataset, runMode }, deps);
 }
 
-export async function prepareTrialEval(
+export async function prepareOptimizerEval(
 	cwd: string,
 	options: PrepareEvalOptions = {},
-	deps: FrontierTrialDependencies = {},
+	deps: FrontierOptimizerDependencies = {},
 ): Promise<{
-	state: Awaited<ReturnType<typeof loadQuestTrialState>>;
+	state: Awaited<ReturnType<typeof loadQuestOptimizerState>>;
 	searchSet: QuestEvalSplit;
 	holdOutSet: QuestEvalSplit;
 	manifest: QuestEvalManifest;
 }> {
-	const state = await loadQuestTrialState(cwd, { ensure: true });
+	const state = await loadQuestOptimizerState(cwd, { ensure: true });
 	const family = options.eval ?? state.evalFamily ?? "frontierswe";
 	const adapter = EVAL_ADAPTERS[family];
 	const dataset = options.suite ?? (state.evalFamily === family ? state.evalDataset : undefined) ?? adapter.defaultDataset;
@@ -691,22 +692,22 @@ export async function prepareTrialEval(
 		tagSummary: summarizeTags(splitItems.holdOut),
 		notes: [`Prepared from ${manifest.source} manifest ${manifest.id}.`],
 	};
-	await writeSplit(getQuestTrialPaths(cwd).searchSetFile, searchSet);
-	await writeSplit(getQuestTrialPaths(cwd).holdOutSetFile, holdOutSet);
+	await writeSplit(getQuestOptimizerPaths(cwd).searchSetFile, searchSet);
+	await writeSplit(getQuestOptimizerPaths(cwd).holdOutSetFile, holdOutSet);
 	state.evalFamily = family;
 	state.evalDataset = dataset;
 	state.evalRunMode = runMode;
 	state.currentCandidateId = undefined;
 	state.frontierCandidateIds = [];
 	state.lastSummary = `Prepared ${family}:${dataset} with ${searchSet.totalItems} search and ${holdOutSet.totalItems} hold-out items.`;
-	await saveQuestTrialState(cwd, state);
+	await saveQuestOptimizerState(cwd, state);
 	return { state, searchSet, holdOutSet, manifest };
 }
 
-async function recoverStaleRunningTrialState(
+async function recoverStaleRunningOptimizerState(
 	cwd: string,
-	state: Awaited<ReturnType<typeof loadQuestTrialState>>,
-): Promise<{ state: Awaited<ReturnType<typeof loadQuestTrialState>>; frontier: QuestFrontierState | null; leader: QuestCandidateSummary | null }> {
+	state: Awaited<ReturnType<typeof loadQuestOptimizerState>>,
+): Promise<{ state: Awaited<ReturnType<typeof loadQuestOptimizerState>>; frontier: QuestFrontierState | null; leader: QuestCandidateSummary | null }> {
 	if (state.status !== "running") {
 		return { state, frontier: await loadFrontierState(cwd), leader: null };
 	}
@@ -755,17 +756,17 @@ async function recoverStaleRunningTrialState(
 	state.currentCandidateId = recomputed.leader?.candidateId;
 	state.frontierCandidateIds = recomputed.frontier.frontierCandidateIds;
 	state.lastSummary = candidateId ? `Recovered stale running state for candidate ${candidateId}.` : "Recovered stale running state.";
-	await saveQuestTrialState(cwd, state);
+	await saveQuestOptimizerState(cwd, state);
 	return { state, frontier: recomputed.frontier, leader: recomputed.leader };
 }
 
-export async function collectFrontierTrialStatus(cwd: string): Promise<FrontierTrialStatus> {
-	const loadedState = await loadQuestTrialState(cwd, { ensure: true });
-	const recovered = await recoverStaleRunningTrialState(cwd, loadedState);
+export async function collectFrontierOptimizerStatus(cwd: string): Promise<FrontierOptimizerStatus> {
+	const loadedState = await loadQuestOptimizerState(cwd, { ensure: true });
+	const recovered = await recoverStaleRunningOptimizerState(cwd, loadedState);
 	const state = recovered.state;
 	const profile = await loadQuestProfile(cwd, state.activeProfileId, { ensure: true, target: state.target });
-	const searchSet = await loadSplit(getQuestTrialPaths(cwd).searchSetFile);
-	const holdOutSet = await loadSplit(getQuestTrialPaths(cwd).holdOutSetFile);
+	const searchSet = await loadSplit(getQuestOptimizerPaths(cwd).searchSetFile);
+	const holdOutSet = await loadSplit(getQuestOptimizerPaths(cwd).holdOutSetFile);
 	const frontier = recovered.frontier ?? (await loadFrontierState(cwd));
 	const communityStats = await loadCommunityStats(cwd);
 	const leader = recovered.leader ?? (frontier?.leaderCandidateId ? await loadCandidateSummary(cwd, frontier.leaderCandidateId) : null);
@@ -779,19 +780,19 @@ export async function collectFrontierTrialStatus(cwd: string): Promise<FrontierT
 		if (state.currentCandidateId !== expectedLeaderId || frontierChanged) {
 			state.currentCandidateId = expectedLeaderId;
 			state.frontierCandidateIds = expectedFrontierIds;
-			await saveQuestTrialState(cwd, state);
+			await saveQuestOptimizerState(cwd, state);
 		}
 	}
 	return { state, profile, searchSet, holdOutSet, frontier, communityStats, leader };
 }
 
-export async function runTrialBaseline(
+export async function runOptimizerBaseline(
 	cwd: string,
 	modelChoice: ModelChoice,
 	options: BaselineOptions = {},
-	deps: FrontierTrialDependencies = {},
+	deps: FrontierOptimizerDependencies = {},
 ): Promise<{
-	state: Awaited<ReturnType<typeof loadQuestTrialState>>;
+	state: Awaited<ReturnType<typeof loadQuestOptimizerState>>;
 	profile: QuestProfile;
 	summary: string;
 	candidate: QuestCandidateSummary;
@@ -827,17 +828,17 @@ export async function runTrialBaseline(
 	let searchScore: QuestCandidateScorecard | undefined;
 	let holdOutScore: QuestCandidateScorecard | undefined;
 	try {
-		setActiveTrialPhase(state, "000", "baseline-search", `Running baseline candidate 000 on ${searchSet.family}:${searchSet.dataset}.`);
-		await saveQuestTrialState(cwd, state);
-		if (options.onSnapshot) await options.onSnapshot({ role: "trial", phase: "baseline-search", updatedAt: Date.now() });
+		setActiveOptimizerPhase(state, "000", "baseline-search", `Running baseline candidate 000 on ${searchSet.family}:${searchSet.dataset}.`);
+		await saveQuestOptimizerState(cwd, state);
+		if (options.onSnapshot) await options.onSnapshot({ role: "optimizer", phase: "baseline-search", updatedAt: Date.now() });
 		searchScore = await runSet(cwd, modelChoice, profile.id, searchSet, "000", {
 			repo: options.repo,
 			onProcessStart: async (pid) => persistActiveRunPid(cwd, state, pid, options.onProcessStart),
 		});
 		await saveCandidateScorecard(cwd, "000", searchScore);
-		setActiveTrialPhase(state, "000", "baseline-hold-out", `Running hold-out for baseline candidate 000 on ${holdOutSet.family}:${holdOutSet.dataset}.`);
-		await saveQuestTrialState(cwd, state);
-		if (options.onSnapshot) await options.onSnapshot({ role: "trial", phase: "baseline-hold-out", updatedAt: Date.now() });
+		setActiveOptimizerPhase(state, "000", "baseline-hold-out", `Running hold-out for baseline candidate 000 on ${holdOutSet.family}:${holdOutSet.dataset}.`);
+		await saveQuestOptimizerState(cwd, state);
+		if (options.onSnapshot) await options.onSnapshot({ role: "optimizer", phase: "baseline-hold-out", updatedAt: Date.now() });
 		holdOutScore = await runSet(cwd, modelChoice, profile.id, holdOutSet, "000", {
 			repo: options.repo,
 			onProcessStart: async (pid) => persistActiveRunPid(cwd, state, pid, options.onProcessStart),
@@ -850,7 +851,7 @@ export async function runTrialBaseline(
 		state.frontierCandidateIds = recomputed.frontier.frontierCandidateIds;
 		state.status = "idle";
 		state.lastSummary = `Baseline archived as candidate 000: ${searchScore.passed}/${searchScore.itemCount} search, ${holdOutScore.passed}/${holdOutScore.itemCount} hold-out.`;
-		await saveQuestTrialState(cwd, state);
+		await saveQuestOptimizerState(cwd, state);
 		return { state, profile, summary: state.lastSummary, candidate };
 	} catch (error) {
 		if (error instanceof EvalRunInterruptedError) {
@@ -882,7 +883,7 @@ export async function runTrialBaseline(
 			state.frontierCandidateIds = recomputed.frontier.frontierCandidateIds;
 			state.status = "stopped";
 			state.lastSummary = partial.summary;
-			await saveQuestTrialState(cwd, state);
+			await saveQuestOptimizerState(cwd, state);
 			return { state, profile, summary: state.lastSummary, candidate: partial };
 		}
 		const failed = await materializeIncompleteCandidate(
@@ -913,22 +914,22 @@ export async function runTrialBaseline(
 		state.frontierCandidateIds = recomputed.frontier.frontierCandidateIds;
 		state.status = "blocked";
 		state.lastSummary = failed.summary;
-		await saveQuestTrialState(cwd, state);
+		await saveQuestOptimizerState(cwd, state);
 		throw error;
 	} finally {
 		state.activeRun = undefined;
 		if (state.status === "running") state.status = "idle";
-		await saveQuestTrialState(cwd, state);
+		await saveQuestOptimizerState(cwd, state);
 	}
 }
 
-export async function runTrialOptimization(
+export async function runOptimizerOptimization(
 	cwd: string,
 	modelChoice: ModelChoice,
 	options: RunOptions = {},
-	deps: FrontierTrialDependencies = {},
+	deps: FrontierOptimizerDependencies = {},
 ): Promise<{
-	state: Awaited<ReturnType<typeof loadQuestTrialState>>;
+	state: Awaited<ReturnType<typeof loadQuestOptimizerState>>;
 	profile: QuestProfile;
 	summary: string;
 	frontier: QuestFrontierState;
@@ -937,18 +938,18 @@ export async function runTrialOptimization(
 	const iterations = Math.max(1, options.iterations ?? 1);
 	const prepared = await ensurePreparedEval(cwd, options, deps);
 	await ensureCommunityStats(cwd, deps);
-	const baseline = await runTrialBaseline(cwd, modelChoice, options, deps);
+	const baseline = await runOptimizerBaseline(cwd, modelChoice, options, deps);
 	if (baseline.state.status !== "idle") {
 		const frontier = (await loadFrontierState(cwd)) ?? initialFrontier();
 		const leader = frontier.leaderCandidateId ? await loadCandidateSummary(cwd, frontier.leaderCandidateId) : null;
 		return { state: baseline.state, profile: baseline.profile, summary: baseline.summary, frontier, leader };
 	}
 
-	let state = await loadQuestTrialState(cwd, { ensure: true });
+	let state = await loadQuestOptimizerState(cwd, { ensure: true });
 	let frontier = (await loadFrontierState(cwd)) ?? initialFrontier();
 	let leader = frontier.leaderCandidateId ? await loadCandidateSummary(cwd, frontier.leaderCandidateId) : null;
 	let currentProfile = await loadQuestProfile(cwd, state.activeProfileId, { ensure: true, target: state.target });
-	const propose = deps.proposeCandidate ?? executeTrialProposerAgent;
+	const propose = deps.proposeCandidate ?? executeOptimizerProposerAgent;
 	const runSet = deps.runEvalSet ?? ((cwdArg, modelArg, profileId, split, candidateId, runOptions) =>
 		EVAL_ADAPTERS[split.family].runSplit({
 			cwd: cwdArg,
@@ -962,18 +963,18 @@ export async function runTrialOptimization(
 
 	for (let iteration = 0; iteration < iterations; iteration += 1) {
 		const candidateId = await nextCandidateId(cwd);
-		const searchSet = (await loadSplit(getQuestTrialPaths(cwd).searchSetFile)) ?? prepared.searchSet;
-		const holdOutSet = (await loadSplit(getQuestTrialPaths(cwd).holdOutSetFile)) ?? prepared.holdOutSet;
+		const searchSet = (await loadSplit(getQuestOptimizerPaths(cwd).searchSetFile)) ?? prepared.searchSet;
+		const holdOutSet = (await loadSplit(getQuestOptimizerPaths(cwd).holdOutSetFile)) ?? prepared.holdOutSet;
 		const communityStats = await loadCommunityStats(cwd);
-		if (!communityStats) throw new Error("Community stats are required for frontier optimization. Run /quest trials analyze-community first.");
+		if (!communityStats) throw new Error("Community stats are required for frontier optimization. Run /quest evals analyze-community first.");
 
-		let proposal: Awaited<ReturnType<typeof executeTrialProposerAgent>> | undefined;
+		let proposal: Awaited<ReturnType<typeof executeOptimizerProposerAgent>> | undefined;
 		let nextProfile: QuestProfile | undefined;
 		let searchScore: QuestCandidateScorecard | undefined;
 		let holdOutScore: QuestCandidateScorecard | undefined;
 		try {
-			setActiveTrialPhase(state, candidateId, "propose", `Proposer is generating candidate ${candidateId} for ${searchSet.family}:${searchSet.dataset}.`);
-			await saveQuestTrialState(cwd, state);
+			setActiveOptimizerPhase(state, candidateId, "propose", `Proposer is generating candidate ${candidateId} for ${searchSet.family}:${searchSet.dataset}.`);
+			await saveQuestOptimizerState(cwd, state);
 			if (options.onSnapshot) await options.onSnapshot({ role: "proposer", phase: "propose", updatedAt: Date.now() });
 			proposal = await propose(
 				cwd,
@@ -981,11 +982,11 @@ export async function runTrialOptimization(
 				currentProfile,
 				state.target,
 				{
-					communityStatsPath: getQuestTrialPaths(cwd).communityStatsFile,
-					frontierStatePath: getQuestTrialPaths(cwd).frontierFile,
-					candidatesDir: getQuestTrialPaths(cwd).candidatesDir,
-					searchSetPath: getQuestTrialPaths(cwd).searchSetFile,
-					holdOutSetPath: getQuestTrialPaths(cwd).holdOutSetFile,
+					communityStatsPath: getQuestOptimizerPaths(cwd).communityStatsFile,
+					frontierStatePath: getQuestOptimizerPaths(cwd).frontierFile,
+					candidatesDir: getQuestOptimizerPaths(cwd).candidatesDir,
+					searchSetPath: getQuestOptimizerPaths(cwd).searchSetFile,
+					holdOutSetPath: getQuestOptimizerPaths(cwd).holdOutSetFile,
 					searchTagSummary: searchSet.tagSummary,
 					holdOutTagSummary: holdOutSet.tagSummary,
 					communityStats,
@@ -1016,17 +1017,17 @@ export async function runTrialOptimization(
 			nextProfile.id = `${state.target}-${state.projectId}-candidate-${candidateId}`;
 			nextProfile.updatedAt = Date.now();
 			await initializeCandidateArtifacts(cwd, candidateId, nextProfile, proposal.candidate.patch);
-			setActiveTrialPhase(state, candidateId, "search-eval", `Running search split for candidate ${candidateId} on ${searchSet.family}:${searchSet.dataset}.`);
-			await saveQuestTrialState(cwd, state);
-			if (options.onSnapshot) await options.onSnapshot({ role: "trial", phase: "search-eval", updatedAt: Date.now() });
+			setActiveOptimizerPhase(state, candidateId, "search-eval", `Running search split for candidate ${candidateId} on ${searchSet.family}:${searchSet.dataset}.`);
+			await saveQuestOptimizerState(cwd, state);
+			if (options.onSnapshot) await options.onSnapshot({ role: "optimizer", phase: "search-eval", updatedAt: Date.now() });
 			searchScore = await runSet(cwd, modelChoice, nextProfile.id, searchSet, candidateId, {
 				repo: options.repo,
 				onProcessStart: async (pid) => persistActiveRunPid(cwd, state, pid, options.onProcessStart),
 			});
 			await saveCandidateScorecard(cwd, candidateId, searchScore);
-			setActiveTrialPhase(state, candidateId, "hold-out-eval", `Running hold-out split for candidate ${candidateId} on ${holdOutSet.family}:${holdOutSet.dataset}.`);
-			await saveQuestTrialState(cwd, state);
-			if (options.onSnapshot) await options.onSnapshot({ role: "trial", phase: "hold-out-eval", updatedAt: Date.now() });
+			setActiveOptimizerPhase(state, candidateId, "hold-out-eval", `Running hold-out split for candidate ${candidateId} on ${holdOutSet.family}:${holdOutSet.dataset}.`);
+			await saveQuestOptimizerState(cwd, state);
+			if (options.onSnapshot) await options.onSnapshot({ role: "optimizer", phase: "hold-out-eval", updatedAt: Date.now() });
 			holdOutScore = await runSet(cwd, modelChoice, nextProfile.id, holdOutSet, candidateId, {
 				repo: options.repo,
 				onProcessStart: async (pid) => persistActiveRunPid(cwd, state, pid, options.onProcessStart),
@@ -1037,7 +1038,7 @@ export async function runTrialOptimization(
 				summary = { ...summary, status: "rejected", failureReason: "Hold-out score regressed relative to the current leader." };
 				await saveCandidateSummary(cwd, candidateId, summary);
 				state.lastSummary = `Candidate ${candidateId} rejected: hold-out score regressed.`;
-				await saveQuestTrialState(cwd, state);
+				await saveQuestOptimizerState(cwd, state);
 				continue;
 			}
 			await saveCandidateSummary(cwd, candidateId, summary);
@@ -1051,7 +1052,7 @@ export async function runTrialOptimization(
 			state.lastSummary = leader
 				? `Candidate ${candidateId} archived. Leader ${leader.candidateId}: mean=${leader.searchScore?.meanScore.toFixed(3) ?? "0.000"} cost=${leader.searchScore?.totalCost.toFixed(3) ?? "0.000"} duration=${leader.searchScore?.totalDurationMs ?? 0}ms.`
 				: `Candidate ${candidateId} archived.`;
-			await saveQuestTrialState(cwd, state);
+			await saveQuestOptimizerState(cwd, state);
 		} catch (error) {
 			if (error instanceof EvalRunInterruptedError) {
 				const partial = await materializeIncompleteCandidate(
@@ -1085,7 +1086,7 @@ export async function runTrialOptimization(
 				state.frontierCandidateIds = frontier.frontierCandidateIds;
 				state.status = "stopped";
 				state.lastSummary = partial.summary;
-				await saveQuestTrialState(cwd, state);
+				await saveQuestOptimizerState(cwd, state);
 				break;
 			}
 			const failed = await materializeIncompleteCandidate(
@@ -1119,18 +1120,18 @@ export async function runTrialOptimization(
 			state.frontierCandidateIds = frontier.frontierCandidateIds;
 			state.status = "blocked";
 			state.lastSummary = failed.summary;
-			await saveQuestTrialState(cwd, state);
+			await saveQuestOptimizerState(cwd, state);
 			throw error;
 		} finally {
 			state.activeRun = undefined;
-			await saveQuestTrialState(cwd, state);
+			await saveQuestOptimizerState(cwd, state);
 		}
 	}
 
 	if (state.status === "running") state.status = "idle";
 	state.currentCandidateId = leader?.candidateId;
 	state.frontierCandidateIds = frontier.frontierCandidateIds;
-	await saveQuestTrialState(cwd, state);
+	await saveQuestOptimizerState(cwd, state);
 	return {
 		state,
 		profile: currentProfile,
@@ -1140,11 +1141,11 @@ export async function runTrialOptimization(
 	};
 }
 
-export async function analyzeTrialCommunity(cwd: string, force = false, deps: FrontierTrialDependencies = {}): Promise<CommunityStats> {
+export async function analyzeOptimizerCommunity(cwd: string, force = false, deps: FrontierOptimizerDependencies = {}): Promise<CommunityStats> {
 	return ensureCommunityStats(cwd, deps, force);
 }
 
-export function summarizeTrialStatus(status: FrontierTrialStatus): string {
+export function summarizeOptimizerStatus(status: FrontierOptimizerStatus): string {
 	const family = status.state.evalFamily ?? "frontierswe";
 	const dataset = status.state.evalDataset ?? defaultDatasetForFamily(family);
 	const runMode = status.state.evalRunMode ?? EVAL_ADAPTERS[family].resolveRunMode(dataset);
@@ -1160,7 +1161,7 @@ export function summarizeTrialStatus(status: FrontierTrialStatus): string {
 		? `leader ${status.leader.candidateId} mean=${status.leader.searchScore.meanScore.toFixed(3)} cost=${status.leader.searchScore.totalCost.toFixed(3)} duration=${status.leader.searchScore.totalDurationMs}ms${leaderFailureCategories ? ` failures=${leaderFailureCategories}` : ""}`
 		: "no frontier leader";
 	return [
-		`Trials status: ${status.state.status}`,
+		`Evals status: ${status.state.status}`,
 		`Eval: ${family}`,
 		`Suite: ${dataset} (${runMode})`,
 		`Profile: ${status.profile.id}`,
@@ -1168,4 +1169,7 @@ export function summarizeTrialStatus(status: FrontierTrialStatus): string {
 		`Community: ${communitySummary}`,
 		`Frontier: ${status.frontier?.frontierCandidateIds.length ?? 0} candidate(s), ${leaderSummary}`,
 	].join("\n");
+}
+function unsupportedStoredSplitError(): Error {
+	return new Error("Unsupported Quest eval split. Delete .pi/quests/evals/ and rerun `/quest evals prepare`.");
 }

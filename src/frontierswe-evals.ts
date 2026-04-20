@@ -521,16 +521,16 @@ export async function runFrontiersweSplit(options: {
 			}
 			const task = await loadTaskDefinition(item.path);
 			await ensureDockerImage(task);
-			const trialDir = join(options.cwd, ".pi", "quests", "trials", "candidates", options.candidateId, "evals", options.split.split, item.id);
-			const agentWorkspace = join(trialDir, "agent-workspace");
-			await rm(trialDir, { recursive: true, force: true });
-			await mkdir(trialDir, { recursive: true });
+			const evalDir = join(options.cwd, ".pi", "quests", "evals", "candidates", options.candidateId, "evals", options.split.split, item.id);
+			const agentWorkspace = join(evalDir, "agent-workspace");
+			await rm(evalDir, { recursive: true, force: true });
+			await mkdir(evalDir, { recursive: true });
 			await copyWorkspaceFromImage(task, agentWorkspace);
 			const startedAt = Date.now();
 				const agent = await runAgentPhase({
 					task,
 					workspaceDir: agentWorkspace,
-					logDir: join(trialDir, "agent"),
+					logDir: join(evalDir, "agent"),
 					profileId: options.profileId,
 					modelChoice: options.modelChoice,
 					dataset: options.split.dataset,
@@ -538,16 +538,16 @@ export async function runFrontiersweSplit(options: {
 					bundle,
 				onProcessStart: options.onProcessStart,
 			});
-			const verifierWorkspace = join(trialDir, "verifier-workspace");
+			const verifierWorkspace = join(evalDir, "verifier-workspace");
 			await cp(agentWorkspace, verifierWorkspace, { recursive: true });
 				const verifier = await runVerifierPhase({
 					task,
 					workspaceDir: verifierWorkspace,
-					logDir: join(trialDir, "verifier"),
+					logDir: join(evalDir, "verifier"),
 					onProcessStart: options.onProcessStart,
 				});
 				const reward = task.hasRewardScript
-					? await readReward(join(trialDir, "verifier"))
+					? await readReward(join(evalDir, "verifier"))
 					: { score: verifier.exitCode === 0 ? 1 : 0, maxScore: 1 };
 				const durationMs = Date.now() - startedAt;
 			const failureText = [agent.parsed?.data?.summary ?? "", agent.parsed?.data?.timeoutReason ?? "", verifier.stderr].join(" ").trim();
@@ -570,16 +570,16 @@ export async function runFrontiersweSplit(options: {
 				durationMs,
 				totalCost: 0,
 				modelChoice: `${options.modelChoice.provider}/${options.modelChoice.model}:${options.modelChoice.thinkingLevel}`,
-				trialDir,
+				evalDir,
 				questOutputFile: agent.outputFile,
 				artifactPaths: [
 					agent.outputFile,
-					join(trialDir, "agent", "quest-headless.stdout"),
-					join(trialDir, "agent", "quest-headless.stderr"),
-					join(trialDir, "verifier", "test.stdout"),
-					join(trialDir, "verifier", "test.stderr"),
-					join(trialDir, "verifier", "reward.json"),
-					join(trialDir, "verifier", "reward.txt"),
+					join(evalDir, "agent", "quest-headless.stdout"),
+					join(evalDir, "agent", "quest-headless.stderr"),
+					join(evalDir, "verifier", "test.stdout"),
+					join(evalDir, "verifier", "test.stderr"),
+					join(evalDir, "verifier", "reward.json"),
+					join(evalDir, "verifier", "reward.txt"),
 				].filter((file) => existsSync(file)),
 					failureReason: status === "passed" ? undefined : failureText || undefined,
 				rewardValues: { reward: score },

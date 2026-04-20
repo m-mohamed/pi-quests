@@ -1,66 +1,66 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { type ControlPanelAction, type ControlPanelOutcome, openControlPanel } from "./control-panel.js";
-import { loadFrontierTrials, loadInternalUi } from "./quest-internal-loader.js";
+import { loadFrontierOptimizer, loadInternalUi } from "./quest-internal-loader.js";
 import { createDefaultModelChoice, currentOrDefaultModel } from "./quest-runtime-helpers.js";
-import { summarizeTrials } from "./quest-ui-controller.js";
+import { summarizeEvals } from "./quest-ui-controller.js";
 import { terminateQuestProcess } from "./runtime-core.js";
-import { loadQuestTrialState, saveQuestTrialState } from "./state-core.js";
-import type { LiveRunSnapshot, QuestProfile, QuestState, QuestTrialState, ThinkingLevel } from "./types.js";
+import { loadQuestOptimizerState, saveQuestOptimizerState } from "./state-core.js";
+import type { LiveRunSnapshot, QuestProfile, QuestState, QuestOptimizerState, ThinkingLevel } from "./types.js";
 
-interface MutableTrialsState {
+interface MutableOptimizerState {
 	getCurrentQuest: () => QuestState | null;
-	getCurrentTrialState: () => QuestTrialState | null;
+	getCurrentOptimizerState: () => QuestOptimizerState | null;
 	getCurrentProfile: () => QuestProfile | null;
-	getTrialLiveRun: () => LiveRunSnapshot | null;
-	getActiveTrialPid: () => number | undefined;
-	setCurrentTrialState: (state: QuestTrialState) => void;
+	getOptimizerLiveRun: () => LiveRunSnapshot | null;
+	getActiveOptimizerPid: () => number | undefined;
+	setCurrentOptimizerState: (state: QuestOptimizerState) => void;
 	setCurrentProfile: (profile: QuestProfile) => void;
-	setTrialLiveRun: (snapshot: LiveRunSnapshot | null) => void;
-	setActiveTrialPid: (pid: number | undefined) => void;
+	setOptimizerLiveRun: (snapshot: LiveRunSnapshot | null) => void;
+	setActiveOptimizerPid: (pid: number | undefined) => void;
 }
 
-interface QuestTrialsControllerDeps extends MutableTrialsState {
+interface QuestEvalsControllerDeps extends MutableOptimizerState {
 	pi: ExtensionAPI;
 	ctx: ExtensionContext;
 	emitNote: (content: string, level?: "info" | "warning" | "error") => Promise<void>;
 	applyQuestUi: () => Promise<void>;
 	internalModeEnabled: boolean;
-	loadFrontierTrials?: typeof loadFrontierTrials;
+	loadFrontierOptimizer?: typeof loadFrontierOptimizer;
 	loadInternalUi?: typeof loadInternalUi;
 }
 
-function syncTrialStatus(state: MutableTrialsState, trialState: QuestTrialState, profile: QuestProfile): void {
-	state.setCurrentTrialState(trialState);
+function syncOptimizerStatus(state: MutableOptimizerState, optimizerState: QuestOptimizerState, profile: QuestProfile): void {
+	state.setCurrentOptimizerState(optimizerState);
 	state.setCurrentProfile(profile);
-	if (trialState.status !== "running") {
-		state.setActiveTrialPid(undefined);
-		state.setTrialLiveRun(null);
+	if (optimizerState.status !== "running") {
+		state.setActiveOptimizerPid(undefined);
+		state.setOptimizerLiveRun(null);
 	}
 }
 
-export async function openQuestTrialsControl(deps: QuestTrialsControllerDeps): Promise<void> {
+export async function openQuestEvalsControl(deps: QuestEvalsControllerDeps): Promise<void> {
 	if (!deps.internalModeEnabled) {
-		await deps.emitNote("Quest Trials is maintainer-only and not part of the public package surface.", "warning");
+		await deps.emitNote("Quest evals are maintainer-only and not part of the public package surface.", "warning");
 		return;
 	}
-	let trials;
+	let optimizer;
 	try {
-		trials = await (deps.loadFrontierTrials ?? loadFrontierTrials)();
+		optimizer = await (deps.loadFrontierOptimizer ?? loadFrontierOptimizer)();
 	} catch (error) {
 		await deps.emitNote(error instanceof Error ? error.message : String(error), "warning");
 		return;
 	}
-	const status = await trials.collectFrontierTrialStatus(deps.ctx.cwd);
-	syncTrialStatus(deps, status.state, status.profile);
+	const status = await optimizer.collectFrontierOptimizerStatus(deps.ctx.cwd);
+	syncOptimizerStatus(deps, status.state, status.profile);
 	if (!deps.ctx.hasUI || !deps.ctx.ui.custom) {
-		await deps.emitNote(summarizeTrials(trials.summarizeTrialStatus(status), deps.getTrialLiveRun()));
+		await deps.emitNote(summarizeEvals(optimizer.summarizeOptimizerStatus(status), deps.getOptimizerLiveRun()));
 		return;
 	}
 
 	let selectedValue: string | null = null;
 	while (true) {
-		const nextStatus = await trials.collectFrontierTrialStatus(deps.ctx.cwd);
-		syncTrialStatus(deps, nextStatus.state, nextStatus.profile);
+		const nextStatus = await optimizer.collectFrontierOptimizerStatus(deps.ctx.cwd);
+		syncOptimizerStatus(deps, nextStatus.state, nextStatus.profile);
 		let internalUi;
 		try {
 			internalUi = await (deps.loadInternalUi ?? loadInternalUi)();
@@ -82,27 +82,27 @@ export async function openQuestTrialsControl(deps: QuestTrialsControllerDeps): P
 						{ key: "g", label: "refresh", result: "refresh" },
 					];
 		const outcome: ControlPanelOutcome<"baseline" | "run" | "stop" | "profile" | "refresh"> | null = await openControlPanel(deps.ctx, {
-			title: "Quest Trials",
+			title: "Quest Evals",
 			subtitle: `${nextStatus.state.status} · ${nextStatus.profile.id}`,
-			items: internalUi.buildTrialsControlItems(nextStatus.state, nextStatus.profile.id, deps.getTrialLiveRun()),
+			items: internalUi.buildEvalsControlItems(nextStatus.state, nextStatus.profile.id, deps.getOptimizerLiveRun()),
 			selectedValue,
 			actions,
 		});
 		if (!outcome || outcome.action === "close") return;
 		selectedValue = outcome.selectedValue;
 		if (outcome.action === "refresh") continue;
-		await handleQuestTrialsCommand(outcome.action, deps);
+		await handleQuestEvalsCommand(outcome.action, deps);
 	}
 }
 
-export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsControllerDeps): Promise<void> {
+export async function handleQuestEvalsCommand(args: string, deps: QuestEvalsControllerDeps): Promise<void> {
 	if (!deps.internalModeEnabled) {
-		await deps.emitNote("Quest Trials is maintainer-only and not part of the public package surface.", "warning");
+		await deps.emitNote("Quest evals are maintainer-only and not part of the public package surface.", "warning");
 		return;
 	}
-	let trials;
+	let optimizer;
 	try {
-		trials = await (deps.loadFrontierTrials ?? loadFrontierTrials)();
+		optimizer = await (deps.loadFrontierOptimizer ?? loadFrontierOptimizer)();
 	} catch (error) {
 		await deps.emitNote(error instanceof Error ? error.message : String(error), "warning");
 		return;
@@ -114,11 +114,11 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 		return index >= 0 ? parts[index + 1] : undefined;
 	};
 	const hasFlag = (flag: string): boolean => trimmed.split(/\s+/).includes(flag);
-	const status = await trials.collectFrontierTrialStatus(deps.ctx.cwd);
-	syncTrialStatus(deps, status.state, status.profile);
+	const status = await optimizer.collectFrontierOptimizerStatus(deps.ctx.cwd);
+	syncOptimizerStatus(deps, status.state, status.profile);
 
 	if (!trimmed) {
-		await deps.emitNote(trials.summarizeTrialStatus(status));
+		await deps.emitNote(optimizer.summarizeOptimizerStatus(status));
 		return;
 	}
 
@@ -135,8 +135,8 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 
 	switch (subcommand) {
 		case "run": {
-			if (deps.getCurrentTrialState()?.status === "running") {
-				await deps.emitNote("Trials are already running.", "warning");
+			if (deps.getCurrentOptimizerState()?.status === "running") {
+				await deps.emitNote("Evals are already running.", "warning");
 				return;
 			}
 			const currentQuest = deps.getCurrentQuest();
@@ -146,69 +146,69 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 					: createDefaultModelChoice(deps.ctx.model ?? null, deps.pi.getThinkingLevel() as ThinkingLevel);
 			const iterations = Number(readFlag("--iterations") ?? "1");
 			try {
-				const result = await trials.runTrialOptimization(deps.ctx.cwd, modelChoice, {
+				const result = await optimizer.runOptimizerOptimization(deps.ctx.cwd, modelChoice, {
 					eval: evaluation,
 					suite,
 					repo,
 					force: hasFlag("--force"),
 					iterations: Number.isFinite(iterations) && iterations > 0 ? iterations : 1,
 					onSnapshot: async (snapshotUpdate: LiveRunSnapshot) => {
-						deps.setTrialLiveRun(snapshotUpdate);
+						deps.setOptimizerLiveRun(snapshotUpdate);
 						await deps.applyQuestUi();
 					},
 					onProcessStart: async (pid: number) => {
-						deps.setActiveTrialPid(pid);
+						deps.setActiveOptimizerPid(pid);
 					},
 				});
-				syncTrialStatus(deps, result.state, result.profile);
+				syncOptimizerStatus(deps, result.state, result.profile);
 				await deps.emitNote(result.summary);
 				return;
 			} finally {
-				deps.setActiveTrialPid(undefined);
-				deps.setTrialLiveRun(null);
-				const nextStatus = await trials.collectFrontierTrialStatus(deps.ctx.cwd);
-				syncTrialStatus(deps, nextStatus.state, nextStatus.profile);
+				deps.setActiveOptimizerPid(undefined);
+				deps.setOptimizerLiveRun(null);
+				const nextStatus = await optimizer.collectFrontierOptimizerStatus(deps.ctx.cwd);
+				syncOptimizerStatus(deps, nextStatus.state, nextStatus.profile);
 				await deps.applyQuestUi();
 			}
 		}
 
 		case "stop": {
-			const persistedState = await loadQuestTrialState(deps.ctx.cwd, { ensure: true });
-			const activePid = persistedState.activeRun?.pid ?? deps.getActiveTrialPid();
+			const persistedState = await loadQuestOptimizerState(deps.ctx.cwd, { ensure: true });
+			const activePid = persistedState.activeRun?.pid ?? deps.getActiveOptimizerPid();
 			if (typeof activePid === "number") {
 				await terminateQuestProcess(activePid);
 			}
-			deps.setActiveTrialPid(undefined);
-			deps.setTrialLiveRun(null);
+			deps.setActiveOptimizerPid(undefined);
+			deps.setOptimizerLiveRun(null);
 			persistedState.activeRun = undefined;
 			persistedState.status = "stopped";
-			persistedState.lastSummary = "Trials stopped by operator.";
-			await saveQuestTrialState(deps.ctx.cwd, persistedState);
-			deps.setCurrentTrialState(persistedState);
+			persistedState.lastSummary = "Evals stopped by operator.";
+			await saveQuestOptimizerState(deps.ctx.cwd, persistedState);
+			deps.setCurrentOptimizerState(persistedState);
 			await deps.applyQuestUi();
-			await deps.emitNote("Trials stopped.", "warning");
+			await deps.emitNote("Evals stopped.", "warning");
 			return;
 		}
 
-		case "prepare-eval": {
-			const prepared = await trials.prepareTrialEval(deps.ctx.cwd, { eval: evaluation, suite, repo, force: hasFlag("--force") });
-			deps.setCurrentTrialState(prepared.state);
+		case "prepare": {
+			const prepared = await optimizer.prepareOptimizerEval(deps.ctx.cwd, { eval: evaluation, suite, repo, force: hasFlag("--force") });
+			deps.setCurrentOptimizerState(prepared.state);
 			await deps.applyQuestUi();
 			await deps.emitNote(
-				`Prepared ${prepared.manifest.family}:${prepared.manifest.dataset}: ${prepared.searchSet.totalItems} search / ${prepared.holdOutSet.totalItems} hold-out items.\nNext: /quest trials baseline${evaluation ? ` --eval ${evaluation}` : ""}${suite ? ` --suite ${suite}` : ""}${repo ? ` --repo ${repo}` : ""}`,
+				`Prepared ${prepared.manifest.family}:${prepared.manifest.dataset}: ${prepared.searchSet.totalItems} search / ${prepared.holdOutSet.totalItems} hold-out items.\nNext: /quest evals baseline${evaluation ? ` --eval ${evaluation}` : ""}${suite ? ` --suite ${suite}` : ""}${repo ? ` --repo ${repo}` : ""}`,
 			);
 			return;
 		}
 
 		case "analyze-community": {
-			const stats = await trials.analyzeTrialCommunity(deps.ctx.cwd, hasFlag("--force"));
+			const stats = await optimizer.analyzeOptimizerCommunity(deps.ctx.cwd, hasFlag("--force"));
 			await deps.emitNote(`Analyzed community traces: ${stats.parsedSessions}/${stats.totalSessions} valid Pi sessions across ${Object.keys(stats.sources).length} source(s).`);
 			return;
 		}
 
 		case "baseline": {
-			if (deps.getCurrentTrialState()?.status === "running") {
-				await deps.emitNote("Trials are already running.", "warning");
+			if (deps.getCurrentOptimizerState()?.status === "running") {
+				await deps.emitNote("Evals are already running.", "warning");
 				return;
 			}
 			const currentQuest = deps.getCurrentQuest();
@@ -217,46 +217,46 @@ export async function handleQuestTrialsCommand(args: string, deps: QuestTrialsCo
 					? currentOrDefaultModel(currentQuest, "orchestrator")
 					: createDefaultModelChoice(deps.ctx.model ?? null, deps.pi.getThinkingLevel() as ThinkingLevel);
 			try {
-				const result = await trials.runTrialBaseline(deps.ctx.cwd, modelChoice, {
+				const result = await optimizer.runOptimizerBaseline(deps.ctx.cwd, modelChoice, {
 					eval: evaluation,
 					suite,
 					repo,
 					force: hasFlag("--force"),
 					onSnapshot: async (snapshotUpdate: LiveRunSnapshot) => {
-						deps.setTrialLiveRun(snapshotUpdate);
+						deps.setOptimizerLiveRun(snapshotUpdate);
 						await deps.applyQuestUi();
 					},
 					onProcessStart: async (pid: number) => {
-						deps.setActiveTrialPid(pid);
+						deps.setActiveOptimizerPid(pid);
 					},
 				});
-				syncTrialStatus(deps, result.state, result.profile);
+				syncOptimizerStatus(deps, result.state, result.profile);
 				await deps.emitNote(result.summary);
 				return;
 			} finally {
-				deps.setActiveTrialPid(undefined);
-				deps.setTrialLiveRun(null);
-				const nextStatus = await trials.collectFrontierTrialStatus(deps.ctx.cwd);
-				syncTrialStatus(deps, nextStatus.state, nextStatus.profile);
+				deps.setActiveOptimizerPid(undefined);
+				deps.setOptimizerLiveRun(null);
+				const nextStatus = await optimizer.collectFrontierOptimizerStatus(deps.ctx.cwd);
+				syncOptimizerStatus(deps, nextStatus.state, nextStatus.profile);
 				await deps.applyQuestUi();
 			}
 		}
 
 		case "status": {
-			await deps.emitNote(trials.summarizeTrialStatus(await trials.collectFrontierTrialStatus(deps.ctx.cwd)));
+			await deps.emitNote(optimizer.summarizeOptimizerStatus(await optimizer.collectFrontierOptimizerStatus(deps.ctx.cwd)));
 			return;
 		}
 
 		case "profile": {
 			await deps.emitNote(
-				`Trials profile ${status.profile.id}\n- target: ${status.profile.target}\n- adopted changes: ${status.profile.adoptedChanges.length}\n- same-model bias: ${status.profile.modelPolicy.preferSameModelFamily}\n- spill-to-reports: ${status.profile.contextPolicy.spillLongOutputsToReports}\n- frontier size: ${status.frontier?.frontierCandidateIds.length ?? 0}`,
+				`Eval profile ${status.profile.id}\n- target: ${status.profile.target}\n- adopted changes: ${status.profile.adoptedChanges.length}\n- same-model bias: ${status.profile.modelPolicy.preferSameModelFamily}\n- spill-to-reports: ${status.profile.contextPolicy.spillLongOutputsToReports}\n- frontier size: ${status.frontier?.frontierCandidateIds.length ?? 0}`,
 			);
 			return;
 		}
 
 		default: {
 			await deps.emitNote(
-				"Unknown /quest trials subcommand. Use /quest trials status, /quest trials prepare-eval, /quest trials analyze-community, /quest trials baseline, /quest trials run, /quest trials stop, or /quest trials profile.",
+				"Unknown /quest evals subcommand. Use /quest evals status, /quest evals prepare, /quest evals analyze-community, /quest evals baseline, /quest evals run, /quest evals stop, or /quest evals profile.",
 				"warning",
 			);
 		}

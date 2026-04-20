@@ -63,7 +63,7 @@ interface ValidationReadinessPayload {
 	}>;
 }
 
-interface TrialProposerContext {
+interface OptimizerProposerContext {
 	communityStatsPath: string;
 	frontierStatePath: string;
 	candidatesDir: string;
@@ -989,12 +989,12 @@ export async function executePlanRevision(
 	};
 }
 
-export async function executeTrialProposerAgent(
+export async function executeOptimizerProposerAgent(
 	cwd: string,
 	modelChoice: ModelChoice,
 	profile: QuestProfile,
 	target: QuestProfile["target"],
-	context: TrialProposerContext,
+	context: OptimizerProposerContext,
 	onSnapshot?: (snapshot: LiveRunSnapshot) => void | Promise<void>,
 	onProcessStart?: (pid: number) => void | Promise<void>,
 ): Promise<{ run: WorkerRunRecord; candidate: QuestExperimentCandidate | null }> {
@@ -1032,11 +1032,11 @@ Rules:
 - Propose one coherent harness/profile change per candidate unless two surface edits are inseparable.
 - Respect the proposer policy exactly:
 ${promptSurfaceText(profile, "proposer")}
-- Use the canonical trials filesystem paths provided in the prompt.
+- Use the canonical eval optimizer filesystem paths provided in the prompt.
 - End with a JSON object only.`,
 		prompt: `Target: ${target}
 
-Canonical trials paths:
+Canonical eval optimizer paths:
 - frontier state: ${context.frontierStatePath}
 - candidates dir: ${context.candidatesDir}
 - community stats: ${context.communityStatsPath}

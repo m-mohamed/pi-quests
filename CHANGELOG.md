@@ -4,27 +4,20 @@
 
 ### Added
 
-- Added Trials as a first-class evals-and-traces improvement subsystem around the normal `/quest` runtime.
-- Added repo-local trial artifacts under `.pi/quests/trials/` for profiles, datasets, traces, experiments, baselines, and reports.
-- Added `/quest trials`, `/quest trials run`, `/quest trials stop`, `/quest trials replay`, `/quest trials target`, and `/quest trials profile`.
-- Added structured Trials tools for bounded profile updates, trace replay capture, experiment recording, score updates, and candidate application.
-- Added `quest-headless` plus benchmark provenance on traces and replay cases for Terminal-Bench and SlopCodeBench flows.
-- Added `benchmarks/harbor/` and `benchmarks/slopcodebench/` integration workspaces, plus benchmark methodology and reproducibility docs.
-- Added helper benchmark scripts for local substrate smoke, Harbor sample/full runs, and SlopCodeBench checkpoint smoke.
-- Added a Quest-native planning workspace with capability docs plus roadmap changes for public-release preparation and benchmark-baseline improvement.
-- Added a verified benchmark baseline document and a release checklist for tagging or announcing new Quest baselines.
+- Added a maintainer-only eval optimizer rooted at `.pi/quests/evals/` for candidate search, frontier tracking, and community-trace analysis.
+- Added a Pi-native Docker FrontierSWE adapter with a vendored sample suite and external full-corpus discovery.
+- Added eval provenance on internal headless runs and candidate artifacts.
 
 ### Changed
 
-- Tightened the standalone package metadata for public npm publishing.
-- Documented local, git, npm, and project-local Pi installation flows.
-- Added a package/gallery preview image and a public quickstart path.
-- Aligned maintainer eval/smoke harnesses with the current `/quest` command surface and repo-local `.pi/quests` storage model.
+- Moved the maintainer surface to `/quest evals` and completed the break from old benchmark-era state and naming.
+- Aligned the package, docs, and Docker eval runtime with the current Pi `0.68.0` package line.
+- Reframed FrontierSWE as a downstream long-horizon eval target rather than a public product surface.
 
 ### Fixed
 
-- Added release-gating CI around `npm run check`.
-- Added offline-core and benchmark-adapter coverage for Lab profile defaults, benchmark trace tagging, replay dataset materialization, and repo-local Lab state persistence.
+- Hardened eval optimizer state handling so unsupported pre-cutover state fails loudly instead of being silently normalized.
+- Tightened maintainer docs and tests around the eval-only command surface and current package/runtime expectations.
 
 ## 0.8.0
 

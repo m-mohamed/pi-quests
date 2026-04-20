@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
-test("public docs stay Quest-first and do not expose maintainer-only trials details", async () => {
+test("public docs stay Quest-first and do not expose maintainer-only eval optimizer details", async () => {
 	const readme = await readFile(join(REPO_ROOT, "README.md"), "utf-8");
 	const tutorial = await readFile(join(REPO_ROOT, "docs", "tutorial.md"), "utf-8");
 	const architecture = await readFile(join(REPO_ROOT, "docs", "quest-architecture.md"), "utf-8");
@@ -14,10 +14,9 @@ test("public docs stay Quest-first and do not expose maintainer-only trials deta
 
 	for (const banned of [
 		"ctrl+alt+t",
-		"internal-trials environment variables",
-		"/quest trials",
-		"frontier Trials",
-		"benchmark:slop",
+		"internal optimizer environment variables",
+		"/quest evals",
+		"frontier optimizer",
 	]) {
 		assert.equal(publicText.includes(banned), false, `public docs still mention internal surface: ${banned}`);
 	}

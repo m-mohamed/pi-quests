@@ -4,7 +4,7 @@
 
 `@m-mohamed/pi-quests` is a Pi-native package for long-running autonomous
 coding. Pi stays upstream as the primitive runtime. Quest adds proposal-first,
-validation-first orchestration. Trials adds evals-and-traces optimization.
+validation-first orchestration. The eval optimizer adds bounded profile iteration.
 
 ## North Star
 
@@ -16,7 +16,7 @@ high-signal evals instead of ad hoc prompt tweaks.
 
 - Pi core remains upstream and unchanged.
 - Quest runtime owns orchestration, not model implementation.
-- Trials may tune bounded profile surfaces, but must not auto-publish,
+- The eval optimizer may tune bounded profile surfaces, but must not auto-publish,
   auto-tag, auto-release, auto-commit, or mutate arbitrary runtime code during
   task execution.
 - Reproducible eval claims must come from supported runner paths.
@@ -27,7 +27,7 @@ high-signal evals instead of ad hoc prompt tweaks.
 - Package gate is green via `npm run check`.
 - Native Docker FrontierSWE sample runs complete end to end.
 - Legacy external harness integration code is removed from the live runtime.
-- Canonical community-trace counts live in `.pi/quests/trials/community-stats.json`.
+- Canonical community-trace counts live in `.pi/quests/evals/community-stats.json`.
 - Canonical eval status and baseline interpretation live in `docs/internal/baseline-results.md`.
 
 ## Working Agreement

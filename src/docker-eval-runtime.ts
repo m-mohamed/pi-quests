@@ -6,7 +6,7 @@ import { execSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const DEFAULT_BUNDLED_PI_VERSION = "0.66.1";
+const DEFAULT_BUNDLED_PI_VERSION = "0.68.0";
 const BUNDLED_NODE_VERSION = "22.17.1";
 const LINUX_NODE_ARCHES = ["x64", "arm64"] as const;
 const NODE_ARCH_ENV = "PI_QUESTS_DOCKER_EVAL_NODE_ARCHES";

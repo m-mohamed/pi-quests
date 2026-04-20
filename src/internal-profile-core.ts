@@ -9,7 +9,7 @@ import type {
 	QuestProfile,
 	QuestProfilePatch,
 	QuestPromptSurfaceId,
-	QuestTrialTarget,
+	QuestOptimizerTarget,
 } from "./types.js";
 
 function mergePromptSurfaces(profile: QuestProfile): QuestProfile["promptSurfaces"] {
@@ -19,7 +19,7 @@ function mergePromptSurfaces(profile: QuestProfile): QuestProfile["promptSurface
 		workerPolicy: `${profile.promptSurfaces.workerPolicy}\n- For external eval work, classify unseen tasks quickly by modality: config, scripts, docs, type/build, service boot, data, or repo hygiene.\n- Re-open declared verifier targets before finishing and confirm the repository state actually satisfies the task instruction.\n- After eval-facing changes, prefer the cheapest real sample task that exercises the edited surface before broader suite runs.`,
 		readinessPolicy: `${profile.promptSurfaces.readinessPolicy}\n- Prefer real cheap probes over static guesses when an eval-facing path changed.`,
 		proposerPolicy:
-			"- Read candidate profiles, summaries, and eval artifacts from .pi/quests/trials/candidates/.\n- Read community trace statistics from .pi/quests/trials/community-stats.json.\n- Treat tagged eval splits and mined community traces as the optimization data.\n- Optimize for search-set mean score first, then lower cost, then lower duration.\n- Use hold-out results only as a regression gate and generalization check, not as an overfitting target.\n- Use eval failure-category mixes to target concrete break modes, not just pass-rate deltas.\n- Prefer changes that improve weak behavioral tag cohorts, not one-off task ids.\n- Propose one coherent profile change per candidate unless two surface edits are inseparable.\n- Protect already-passing cohorts; use new regressions as next-iteration input instead of accepting silent backslides.\n- Propose a QuestProfilePatch only on profile-owned surfaces.\n- Output valid JSON only: summary, rationale, generalizationNote, targetedTags, targetedCaseIds, promptSurfaceIds, patch.\n- Do not execute code and do not mutate files.",
+			"- Read candidate profiles, summaries, and eval artifacts from .pi/quests/evals/candidates/.\n- Read community trace statistics from .pi/quests/evals/community-stats.json.\n- Treat tagged eval splits and mined community traces as the optimization data.\n- Optimize for search-set mean score first, then lower cost, then lower duration.\n- Use hold-out results only as a regression gate and generalization check, not as an overfitting target.\n- Use eval failure-category mixes to target concrete break modes, not just pass-rate deltas.\n- Prefer changes that improve weak behavioral tag cohorts, not one-off task ids.\n- Propose one coherent profile change per candidate unless two surface edits are inseparable.\n- Protect already-passing cohorts; use new regressions as next-iteration input instead of accepting silent backslides.\n- Propose a QuestProfilePatch only on profile-owned surfaces.\n- Output valid JSON only: summary, rationale, generalizationNote, targetedTags, targetedCaseIds, promptSurfaceIds, patch.\n- Do not execute code and do not mutate files.",
 	};
 }
 
@@ -30,14 +30,14 @@ function withInternalDefaults(profile: QuestProfile): QuestProfile {
 	};
 }
 
-export function defaultInternalQuestProfile(projectId: string, target: QuestTrialTarget = "repo"): QuestProfile {
+export function defaultInternalQuestProfile(projectId: string, target: QuestOptimizerTarget = "repo"): QuestProfile {
 	return withInternalDefaults(defaultQuestProfile(projectId, target));
 }
 
 export function normalizeInternalQuestProfile(
 	profile: Partial<QuestProfile> | null | undefined,
 	projectId: string,
-	target: QuestTrialTarget = "repo",
+	target: QuestOptimizerTarget = "repo",
 ): QuestProfile {
 	return withInternalDefaults(normalizeQuestProfile(profile, projectId, target));
 }

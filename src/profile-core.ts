@@ -3,7 +3,7 @@ import type {
 	QuestFailureTag,
 	ModelChoice,
 	QuestEvalProvenance,
-	QuestTrialTarget,
+	QuestOptimizerTarget,
 	QuestProfile,
 	QuestPromptSurfaceId,
 	QuestRole,
@@ -42,7 +42,7 @@ function basePromptSurfaces() {
 	};
 }
 
-export function defaultQuestProfile(projectId: string, target: QuestTrialTarget = "repo"): QuestProfile {
+export function defaultQuestProfile(projectId: string, target: QuestOptimizerTarget = "repo"): QuestProfile {
 	return {
 		id: `${target}-${projectId}`,
 		projectId,
@@ -86,7 +86,7 @@ export function defaultQuestProfile(projectId: string, target: QuestTrialTarget 
 export function normalizeQuestProfile(
 	profile: Partial<QuestProfile> | null | undefined,
 	projectId: string,
-	target: QuestTrialTarget = "repo",
+	target: QuestOptimizerTarget = "repo",
 ): QuestProfile {
 	const base = defaultQuestProfile(projectId, target);
 	if (!profile) return base;
@@ -126,7 +126,7 @@ export function toolAllowlistForRole(profile: QuestProfile, role: QuestRole): st
 		case "validator":
 			return profile.toolAllowlist.validator;
 		case "proposer":
-		case "trial":
+		case "optimizer":
 			return profile.toolAllowlist.proposer;
 	}
 }

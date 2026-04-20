@@ -6,14 +6,14 @@ Define how the `proposer` role reads frontier artifacts and proposes bounded pro
 
 ## Requirements
 
-### Requirement: Read canonical Trials artifacts
+### Requirement: Read canonical optimizer artifacts
 
-The proposer SHALL have read access to the full frontier history under `.pi/quests/trials/`.
+The proposer SHALL have read access to the full frontier history under `.pi/quests/evals/`.
 
 #### Scenario: Query optimization state
 
 - GIVEN the proposer starts
-- WHEN it reads the Trials filesystem
+- WHEN it reads the optimizer filesystem
 - THEN it can inspect:
   - `community-stats.json`
   - `search-set.json`
@@ -49,7 +49,7 @@ The proposer SHALL modify only profile-owned surfaces.
 
 ### Requirement: Read-only execution
 
-The proposer SHALL remain read-only with respect to the repository and Trials artifacts.
+The proposer SHALL remain read-only with respect to the repository and optimizer artifacts.
 
 #### Scenario: Tool constraints
 

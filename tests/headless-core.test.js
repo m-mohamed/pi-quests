@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { runQuestHeadless } from "../src/headless-core.js";
-import { getQuestTelemetryPaths, getQuestTrialPaths, listQuestTraceBundles, loadQuest } from "../src/state-core.js";
+import { getQuestTelemetryPaths, getQuestOptimizerPaths, listQuestTraceBundles, loadQuest } from "../src/state-core.js";
 
 const DEFAULT_MODEL = {
 	provider: "openai-codex",
@@ -119,7 +119,7 @@ test("runQuestHeadless executes the public quest validation loop", async () => {
 		assert.ok(traces.some((trace) => trace.role === "worker"));
 		assert.ok(traces.some((trace) => trace.role === "validator"));
 		assert.equal(existsSync(getQuestTelemetryPaths(repoDir).tracesDir), true);
-		assert.equal(existsSync(join(getQuestTrialPaths(repoDir).rootDir, "traces")), false);
+		assert.equal(existsSync(join(getQuestOptimizerPaths(repoDir).rootDir, "traces")), false);
 	} finally {
 		await rm(repoDir, { recursive: true, force: true });
 	}

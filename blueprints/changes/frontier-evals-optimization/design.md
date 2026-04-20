@@ -2,23 +2,22 @@
 
 ## Summary
 
-Quest now implements the optimization loop as a Pi-native frontier system rooted in `.pi/quests/trials/`.
+Quest now implements the optimization loop as a Pi-native frontier system rooted in `.pi/quests/evals/`.
 The design keeps raw Pi session JSONL as the source of truth, uses native local and FrontierSWE evals for objective scoring, and promotes only non-dominated candidates that also pass hold-out validation.
 
-## Decision 1: Canonical root is `.pi/quests/trials/`
+## Decision 1: Canonical root is `.pi/quests/evals/`
 
-**Decision:** The only live optimization root is `.pi/quests/trials/`.
+**Decision:** The only live optimization root is `.pi/quests/evals/`.
 
 **Rationale:**
 
-- Trials already belongs to the Quest extension.
-- The codebase was previously split between `.pi/quests/lab`, `.pi/quests/meta-harness`, and `.pi/quests/trials`.
+- The eval optimizer belongs to the Quest extension.
 - Frontier operation needs one canonical state root for status, candidates, community stats, and eval splits.
 
 **Consequences:**
 
-- `.pi/quests/lab` and `.pi/quests/meta-harness` are migration inputs only.
-- New runtime state never depends on those legacy roots.
+- New runtime state depends only on `.pi/quests/evals/`.
+- Unsupported pre-cutover state fails loudly and must be recreated explicitly.
 
 ## Decision 2: Pi-native community traces stay raw
 
@@ -32,17 +31,17 @@ The design keeps raw Pi session JSONL as the source of truth, uses native local 
 **Consequences:**
 
 - The analyzer filters by the first record being `type: "session"`.
-- Canonical community stats are written to `.pi/quests/trials/community-stats.json`.
+- Canonical community stats are written to `.pi/quests/evals/community-stats.json`.
 - Non-Pi or non-session files are excluded from canonical per-source stats.
 
 ## Decision 3: Candidate-centric filesystem
 
-**Decision:** Trials archives every evaluated candidate under `candidates/NNN/`.
+**Decision:** The optimizer archives every evaluated candidate under `candidates/NNN/`.
 
 **Filesystem layout:**
 
 ```text
-.pi/quests/trials/
+.pi/quests/evals/
 ├── state.json
 ├── current/
 │   └── profile.json
@@ -91,7 +90,7 @@ The design keeps raw Pi session JSONL as the source of truth, uses native local 
 
 ## Decision 5: Proposer is the optimization agent
 
-**Decision:** Candidate generation runs through the `proposer` role, not the legacy `trial` role.
+**Decision:** Candidate generation runs through the `proposer` role.
 
 **Rationale:**
 

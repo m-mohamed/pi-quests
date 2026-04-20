@@ -1,9 +1,9 @@
 import { DynamicBorder, type Theme } from "@mariozechner/pi-coding-agent";
 import { type Component, Container, Spacer, Text, type TUI } from "@mariozechner/pi-tui";
-import type { LiveRunSnapshot, QuestTrialState, QuestTrialStatus } from "./types.js";
+import type { LiveRunSnapshot, QuestOptimizerState, QuestOptimizerStatus } from "./types.js";
 import { truncate } from "./utils.js";
 
-function trialsStatusColor(status: QuestTrialStatus): TrialsWidgetModel["statusColor"] {
+function evalsStatusColor(status: QuestOptimizerStatus): EvalsWidgetModel["statusColor"] {
 	switch (status) {
 		case "running":
 			return "accent";
@@ -17,10 +17,10 @@ function trialsStatusColor(status: QuestTrialStatus): TrialsWidgetModel["statusC
 	}
 }
 
-export interface TrialsWidgetModel {
+export interface EvalsWidgetModel {
 	target: string;
 	profileId: string;
-	status: QuestTrialState["status"];
+	status: QuestOptimizerState["status"];
 	statusColor: "accent" | "success" | "warning" | "error" | "muted";
 	contextLabel?: string;
 	runLabel: string;
@@ -30,27 +30,27 @@ export interface TrialsWidgetModel {
 	progress: string;
 }
 
-export interface TrialsControlItem {
+export interface EvalsControlItem {
 	value: string;
 	label: string;
 	description?: string;
 	detailMarkdown: string;
 }
 
-export type TrialsWidgetFactory = (tui: TUI, theme: Theme) => Component;
+export type EvalsWidgetFactory = (tui: TUI, theme: Theme) => Component;
 
-function evalLabel(state: QuestTrialState): string {
+function evalLabel(state: QuestOptimizerState): string {
 	if (!state.evalFamily) return "not prepared";
 	return `${state.evalFamily}${state.evalDataset ? ` · ${state.evalDataset}` : ""}`;
 }
 
-function activeCandidateLabel(state: QuestTrialState): string {
+function activeCandidateLabel(state: QuestOptimizerState): string {
 	return state.activeRun?.candidateId ?? state.currentCandidateId ?? "none";
 }
 
-function summaryDetailMarkdown(state: QuestTrialState, profileId: string, liveRun: LiveRunSnapshot | null): string {
+function summaryDetailMarkdown(state: QuestOptimizerState, profileId: string, liveRun: LiveRunSnapshot | null): string {
 	return [
-		"# Quest Trials",
+		"# Quest Evals",
 		"",
 		`- Status: ${state.status}`,
 		`- Target: ${state.target}`,
@@ -62,11 +62,11 @@ function summaryDetailMarkdown(state: QuestTrialState, profileId: string, liveRu
 		`- Updated: ${new Date(state.updatedAt).toLocaleString()}`,
 		"",
 		"## Latest Summary",
-		state.lastSummary ?? "Trials are idle.",
+		state.lastSummary ?? "Evals are idle.",
 	].join("\n");
 }
 
-function evalDetailMarkdown(state: QuestTrialState): string {
+function evalDetailMarkdown(state: QuestOptimizerState): string {
 	return [
 		"# Eval",
 		"",
@@ -77,7 +77,7 @@ function evalDetailMarkdown(state: QuestTrialState): string {
 	].join("\n");
 }
 
-function candidateDetailMarkdown(state: QuestTrialState): string {
+function candidateDetailMarkdown(state: QuestOptimizerState): string {
 	return [
 		"# Frontier Candidate",
 		"",
@@ -90,9 +90,9 @@ function candidateDetailMarkdown(state: QuestTrialState): string {
 	].join("\n");
 }
 
-function liveRunDetailMarkdown(state: QuestTrialState, liveRun: LiveRunSnapshot): string {
+function liveRunDetailMarkdown(state: QuestOptimizerState, liveRun: LiveRunSnapshot): string {
 	return [
-		"# Live Trials Run",
+		"# Live Optimizer Run",
 		"",
 		`- Role: ${liveRun.role}`,
 		`- Phase: ${liveRun.phase}`,
@@ -102,12 +102,12 @@ function liveRunDetailMarkdown(state: QuestTrialState, liveRun: LiveRunSnapshot)
 	].join("\n");
 }
 
-export function buildTrialsWidgetModel(
-	state: QuestTrialState,
+export function buildEvalsWidgetModel(
+	state: QuestOptimizerState,
 	profileId: string,
 	liveRun: LiveRunSnapshot | null,
 	contextLabel?: string | null,
-): TrialsWidgetModel {
+): EvalsWidgetModel {
 	const runLabel = liveRun
 		? `${liveRun.role}/${liveRun.phase}${liveRun.latestToolName ? ` → ${liveRun.latestToolName}` : ""}`
 		: "idle";
@@ -117,18 +117,18 @@ export function buildTrialsWidgetModel(
 		target: state.target,
 		profileId,
 		status: state.status,
-		statusColor: trialsStatusColor(state.status),
+		statusColor: evalsStatusColor(state.status),
 		contextLabel: contextLabel ?? undefined,
 		runLabel,
 		runStatus,
 		iterationLabel: state.activeRun?.candidateId ? `cand ${state.activeRun.candidateId}` : state.currentCandidateId ? `cand ${state.currentCandidateId}` : "no candidate",
-		summary: truncate(state.lastSummary ?? "trials idle", 96),
+		summary: truncate(state.lastSummary ?? "evals idle", 96),
 		progress: state.status === "running" ? "∫ running" : state.status === "blocked" ? "⊘ blocked" : "○ idle",
 	};
 }
 
-export function buildTrialsControlItems(state: QuestTrialState, profileId: string, liveRun: LiveRunSnapshot | null): TrialsControlItem[] {
-	const items: TrialsControlItem[] = [
+export function buildEvalsControlItems(state: QuestOptimizerState, profileId: string, liveRun: LiveRunSnapshot | null): EvalsControlItem[] {
+	const items: EvalsControlItem[] = [
 		{
 			value: "summary",
 			label: "Summary",
@@ -159,27 +159,27 @@ export function buildTrialsControlItems(state: QuestTrialState, profileId: strin
 	return items;
 }
 
-export function renderTrialsWidgetLines(model: TrialsWidgetModel): string[] {
+export function renderEvalsWidgetLines(model: EvalsWidgetModel): string[] {
 	return [
-		`TRIALS // target ${model.target}`,
+		`EVALS // target ${model.target}`,
 		`Status ${model.status}  |  Profile ${model.profileId}${model.contextLabel ? `  |  ${model.contextLabel}` : ""}  |  Run ${model.runLabel}`,
 		`Summary ${model.summary}`,
 	];
 }
 
-export function renderTrialsActionLines(): string[] {
+export function renderEvalsActionLines(): string[] {
 	return [
-		"Actions /quest trials status  |  /quest trials prepare-eval  |  /quest trials analyze-community  |  /quest trials baseline  |  /quest trials run",
+		"Actions /quest evals status  |  /quest evals prepare  |  /quest evals analyze-community  |  /quest evals baseline  |  /quest evals run",
 	];
 }
 
-export function createTrialsWidgetComponent(model: TrialsWidgetModel): TrialsWidgetFactory {
-	const lines = renderTrialsWidgetLines(model);
-	const actionLines = renderTrialsActionLines();
+export function createEvalsWidgetComponent(model: EvalsWidgetModel): EvalsWidgetFactory {
+	const lines = renderEvalsWidgetLines(model);
+	const actionLines = renderEvalsActionLines();
 	return (_tui, theme) => {
 		const container = new Container();
 		container.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
-		container.addChild(new Text(theme.bold(theme.fg(model.statusColor, lines[0] ?? "TRIALS")), 1, 0));
+		container.addChild(new Text(theme.bold(theme.fg(model.statusColor, lines[0] ?? "EVALS")), 1, 0));
 		for (const line of lines.slice(1)) {
 			container.addChild(new Text(theme.fg("text", line), 1, 0));
 		}

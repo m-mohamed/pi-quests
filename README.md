@@ -16,7 +16,7 @@ Pi core stays upstream. Quest is your package. That means:
 
 ## Installation
 
-Pi Quests now targets the current Pi package line: `@mariozechner/pi-*` `0.66.1+`.
+Pi Quests now targets the current Pi package line: `@mariozechner/pi-*` `0.68.0+`.
 
 Install from a local checkout:
 

@@ -44,7 +44,7 @@ test("formatContextUsageLabel renders a compact Pi-native context meter", () => 
 	assert.equal(formatContextUsageLabel({ tokens: 18450, percent: 9.225, contextWindow: 200000 }), "ctx 9% · 18.4k/200k");
 });
 
-test("buildQuestShellEnvironment exports active quest and trial metadata for agent bash calls", () => {
+test("buildQuestShellEnvironment exports active quest and optimizer metadata for agent bash calls", () => {
 	const env = buildQuestShellEnvironment(
 		"/tmp/pi-quests",
 		{ id: "quest-123", cwd: "/tmp/pi-quests", status: "running" },
@@ -58,9 +58,9 @@ test("buildQuestShellEnvironment exports active quest and trial metadata for age
 	assert.equal(env.PI_QUESTS_ACTIVE_QUEST_ID, "quest-123");
 	assert.equal(env.PI_QUESTS_ACTIVE_QUEST_STATUS, "running");
 	assert.equal(env.PI_QUESTS_ACTIVE_QUEST_ROOT, "/tmp/pi-quests/.pi/quests/quest-123");
-	assert.equal(env.PI_QUESTS_TRIAL_PROFILE_ID, "repo-project-ui");
-	assert.equal(env.PI_QUESTS_TRIAL_EVAL, "frontierswe");
-	assert.equal(env.PI_QUESTS_TRIAL_SUITE, "frontierswe-sample@v1");
+	assert.equal(env.PI_QUESTS_OPTIMIZER_PROFILE_ID, "repo-project-ui");
+	assert.equal(env.PI_QUESTS_EVAL_FAMILY, "frontierswe");
+	assert.equal(env.PI_QUESTS_EVAL_SUITE, "frontierswe-sample@v1");
 });
 
 test("prefixQuestShellCommand prepends shell-safe exports without changing empty env commands", () => {

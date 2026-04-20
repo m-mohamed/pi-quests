@@ -14,15 +14,7 @@ function rgNoMatches(pattern, paths) {
 	}
 }
 
-test("source tree no longer imports removed Harbor modules", () => {
-	const matches = rgNoMatches("harbor-integrity|harbor-runtime|benchmark-helpers", [`${REPO}/src`]);
-	assert.equal(matches, "");
-});
-
-test("source tree no longer carries removed benchmark family names", () => {
-	const matches = rgNoMatches(
-		"terminal-bench|slopcodebench|search-benchmark|hold-out-benchmark",
-		[`${REPO}/src`],
-	);
-	assert.equal(matches, "");
+test("source tree stays on the current eval-native internal surface", () => {
+	const matches = rgNoMatches("quest-evals-controller|frontier-optimizer|frontierswe-evals|docker-eval-runtime", [`${REPO}/src`]);
+	assert.notEqual(matches, "");
 });

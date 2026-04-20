@@ -1,12 +1,12 @@
 # Community Trace Analyzer Specification
 
 > Status: Implemented in `src/trace-analyzer.ts`
-> Canonical output: `.pi/quests/trials/community-stats.json`
-> Canonical input: `.pi/quests/trials/community-traces/`
+> Canonical output: `.pi/quests/evals/community-stats.json`
+> Canonical input: `.pi/quests/evals/community-traces/`
 
 ## Purpose
 
-The analyzer turns raw Pi session `.jsonl` files into filesystem-readable community statistics for the frontier Trials loop.
+The analyzer turns raw Pi session `.jsonl` files into filesystem-readable community statistics for the frontier eval optimizer loop.
 It exists so the `proposer` role can reason over real community failure patterns instead of fabricated summaries.
 
 ## Verified corpus facts
@@ -38,7 +38,7 @@ The analyzer depends on the real Pi wire shape:
 
 ## File-discovery rules
 
-1. Discover `.jsonl` files recursively under `.pi/quests/trials/community-traces/`.
+1. Discover `.jsonl` files recursively under `.pi/quests/evals/community-traces/`.
 2. Read the first non-empty line.
 3. Parse the first record as JSON.
 4. Count the file as a canonical Pi session only if the first record is `type: "session"`.
@@ -87,19 +87,19 @@ These are heuristic tags derived from message content, tool behavior, errors, an
 
 The analyzer is integrated into the frontier runtime:
 
-- `/quest trials analyze-community` forces regeneration of canonical stats
-- `/quest trials run` ensures community stats exist before proposer iterations
-- the `proposer` role reads `.pi/quests/trials/community-stats.json` alongside:
-  - `.pi/quests/trials/search-set.json`
-  - `.pi/quests/trials/hold-out-set.json`
-  - `.pi/quests/trials/frontier.json`
-  - `.pi/quests/trials/candidates/`
+- `/quest evals analyze-community` forces regeneration of canonical stats
+- `/quest evals run` ensures community stats exist before proposer iterations
+- the `proposer` role reads `.pi/quests/evals/community-stats.json` alongside:
+  - `.pi/quests/evals/search-set.json`
+  - `.pi/quests/evals/hold-out-set.json`
+  - `.pi/quests/evals/frontier.json`
+  - `.pi/quests/evals/candidates/`
 
 ## Non-goals
 
 This analyzer does not:
 
-- convert Pi traces into legacy Quest trace bundles
+- convert Pi traces into a separate compatibility format
 - synthesize session files when the corpus is missing
 - infer Quest-specific validator/worker role boundaries from generic Pi sessions
-- act as a separate optimization runtime outside `.pi/quests/trials/`
+- act as a separate optimization runtime outside `.pi/quests/evals/`

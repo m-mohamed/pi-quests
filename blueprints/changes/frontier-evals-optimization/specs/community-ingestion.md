@@ -2,20 +2,20 @@
 
 ## Purpose
 
-Define how Quest ingests raw community Pi traces into the frontier Trials runtime.
+Define how Quest ingests raw community Pi traces into the frontier eval optimizer runtime.
 
 ## Requirements
 
 ### Requirement: Canonical community root
 
-The system SHALL use `.pi/quests/trials/community-traces/` as the canonical community-trace root.
+The system SHALL use `.pi/quests/evals/community-traces/` as the canonical community-trace root.
 
 #### Scenario: Resolve community traces
 
-- GIVEN community traces downloaded under `.pi/quests/trials/community-traces/`
-- WHEN the system initializes Trials community analysis
+- GIVEN community traces downloaded under `.pi/quests/evals/community-traces/`
+- WHEN the system initializes eval community analysis
 - THEN it reads that directory directly
-- AND it does not depend on `.pi/quests/meta-harness/` symlinks
+- AND it does not depend on sibling roots or symlink indirection
 
 ### Requirement: Session-only filtering
 
@@ -49,7 +49,7 @@ The system SHALL aggregate statistics from community traces for proposer consump
 - GIVEN validated Pi session files
 - WHEN the system aggregates statistics
 - THEN it writes totals, per-source counts, model/provider distributions, failure tags, and usage metrics
-- AND it writes the output to `.pi/quests/trials/community-stats.json`
+- AND it writes the output to `.pi/quests/evals/community-stats.json`
 
 ### Requirement: No silent missing-data fallback
 
@@ -57,7 +57,7 @@ The system SHALL fail loudly when a command requires community traces but the co
 
 #### Scenario: Missing community traces
 
-- GIVEN `.pi/quests/trials/community-traces/` does not exist
+- GIVEN `.pi/quests/evals/community-traces/` does not exist
 - WHEN the system attempts to run community analysis
 - THEN it fails with a clear error message
 - AND it does not proceed with empty statistics

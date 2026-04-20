@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { handleQuestTrialsCommand, openQuestTrialsControl } from "../src/quest-trials-controller.js";
+import { handleQuestEvalsCommand, openQuestEvalsControl } from "../src/quest-evals-controller.js";
 
 function makeProfile(overrides = {}) {
 	return {
@@ -20,12 +20,12 @@ function makeProfile(overrides = {}) {
 	};
 }
 
-function makeTrialState(status = "idle", overrides = {}) {
+function makeOptimizerState(status = "idle", overrides = {}) {
 	return {
 		projectId: "repo-project",
 		target: "repo",
 		activeProfileId: "repo-test",
-		storageVersion: 3,
+		storageVersion: 4,
 		frontierCandidateIds: [],
 		status,
 		updatedAt: Date.now(),
@@ -35,20 +35,20 @@ function makeTrialState(status = "idle", overrides = {}) {
 
 function createDeps(trials, options = {}) {
 	let currentQuest = options.currentQuest ?? null;
-	let currentTrialState = options.currentTrialState ?? makeTrialState();
+	let currentOptimizerState = options.currentOptimizerState ?? makeOptimizerState();
 	let currentProfile = options.currentProfile ?? makeProfile();
-	let trialLiveRun = options.trialLiveRun ?? null;
-	let activeTrialPid = options.activeTrialPid;
+	let optimizerLiveRun = options.optimizerLiveRun ?? null;
+	let activeOptimizerPid = options.activeOptimizerPid;
 	const notes = [];
 	let uiCalls = 0;
 
 	return {
 		notes,
-		get currentTrialState() {
-			return currentTrialState;
+		get currentOptimizerState() {
+			return currentOptimizerState;
 		},
-		get trialLiveRun() {
-			return trialLiveRun;
+		get optimizerLiveRun() {
+			return optimizerLiveRun;
 		},
 		get uiCalls() {
 			return uiCalls;
@@ -66,21 +66,21 @@ function createDeps(trials, options = {}) {
 				model: null,
 			},
 			getCurrentQuest: () => currentQuest,
-			getCurrentTrialState: () => currentTrialState,
+			getCurrentOptimizerState: () => currentOptimizerState,
 			getCurrentProfile: () => currentProfile,
-			getTrialLiveRun: () => trialLiveRun,
-			getActiveTrialPid: () => activeTrialPid,
-			setCurrentTrialState: (state) => {
-				currentTrialState = state;
+			getOptimizerLiveRun: () => optimizerLiveRun,
+			getActiveOptimizerPid: () => activeOptimizerPid,
+			setCurrentOptimizerState: (state) => {
+				currentOptimizerState = state;
 			},
 			setCurrentProfile: (profile) => {
 				currentProfile = profile;
 			},
-			setTrialLiveRun: (snapshot) => {
-				trialLiveRun = snapshot;
+			setOptimizerLiveRun: (snapshot) => {
+				optimizerLiveRun = snapshot;
 			},
-			setActiveTrialPid: (pid) => {
-				activeTrialPid = pid;
+			setActiveOptimizerPid: (pid) => {
+				activeOptimizerPid = pid;
 			},
 			emitNote: async (content) => {
 				notes.push(content);
@@ -89,24 +89,24 @@ function createDeps(trials, options = {}) {
 				uiCalls += 1;
 			},
 			internalModeEnabled: true,
-			loadFrontierTrials: async () => trials,
+			loadFrontierOptimizer: async () => trials,
 		},
 	};
 }
 
-test("openQuestTrialsControl summarizes the live trial state instead of stale snapshots", async () => {
+test("openQuestEvalsControl summarizes the live optimizer state instead of stale snapshots", async () => {
 	const profile = makeProfile();
 	const { deps, notes } = createDeps(
 		{
-			collectFrontierTrialStatus: async () => ({
-				state: makeTrialState("idle"),
+			collectFrontierOptimizerStatus: async () => ({
+				state: makeOptimizerState("idle"),
 				profile,
 			}),
-			summarizeTrialStatus: () => "idle summary",
+			summarizeOptimizerStatus: () => "idle summary",
 		},
 		{
-			trialLiveRun: {
-				role: "trial",
+			optimizerLiveRun: {
+				role: "optimizer",
 				phase: "baseline-search",
 				latestToolName: "bash",
 				updatedAt: Date.now(),
@@ -114,54 +114,54 @@ test("openQuestTrialsControl summarizes the live trial state instead of stale sn
 		},
 	);
 
-	await openQuestTrialsControl(deps);
+	await openQuestEvalsControl(deps);
 
 	assert.equal(notes.length, 1);
 	assert.match(notes[0], /idle summary/);
-	assert.match(notes[0], /Active trial run:\s+idle/);
+	assert.match(notes[0], /Active optimizer run:\s+idle/);
 });
 
-test("handleQuestTrialsCommand uses refreshed trial status instead of captured running state", async () => {
+test("handleQuestEvalsCommand uses refreshed optimizer status instead of captured running state", async () => {
 	let optimizationRuns = 0;
 	const profile = makeProfile();
 	const { deps, notes } = createDeps(
 		{
-			collectFrontierTrialStatus: async () => ({
-				state: makeTrialState("idle"),
+			collectFrontierOptimizerStatus: async () => ({
+				state: makeOptimizerState("idle"),
 				profile,
 			}),
-			summarizeTrialStatus: () => "idle summary",
-			runTrialOptimization: async () => {
+			summarizeOptimizerStatus: () => "idle summary",
+			runOptimizerOptimization: async () => {
 				optimizationRuns += 1;
 				return {
-					state: makeTrialState("idle"),
+					state: makeOptimizerState("idle"),
 					profile,
 					summary: "optimization complete",
 				};
 			},
 		},
 		{
-			currentTrialState: makeTrialState("running"),
+			currentOptimizerState: makeOptimizerState("running"),
 		},
 	);
 
-	await handleQuestTrialsCommand("run", deps);
+	await handleQuestEvalsCommand("run", deps);
 
 	assert.equal(optimizationRuns, 1);
-	assert.equal(notes.includes("Trials are already running."), false);
+	assert.equal(notes.includes("Evals are already running."), false);
 	assert.ok(notes.some((note) => note.includes("optimization complete")));
 });
 
-test("handleQuestTrialsCommand refreshes the Quest UI after prepare-eval", async () => {
+test("handleQuestEvalsCommand refreshes the Quest UI after prepare", async () => {
 	const profile = makeProfile();
 	const harness = createDeps({
-		collectFrontierTrialStatus: async () => ({
-			state: makeTrialState("idle"),
+		collectFrontierOptimizerStatus: async () => ({
+			state: makeOptimizerState("idle"),
 			profile,
 		}),
-		summarizeTrialStatus: () => "idle summary",
-		prepareTrialEval: async () => ({
-			state: makeTrialState("idle", {
+		summarizeOptimizerStatus: () => "idle summary",
+		prepareOptimizerEval: async () => ({
+			state: makeOptimizerState("idle", {
 				evalFamily: "frontierswe",
 				evalDataset: "frontierswe-sample@v1",
 			}),
@@ -174,9 +174,9 @@ test("handleQuestTrialsCommand refreshes the Quest UI after prepare-eval", async
 		}),
 	});
 
-	await handleQuestTrialsCommand("prepare-eval --eval frontierswe --suite frontierswe-sample@v1", harness.deps);
+	await handleQuestEvalsCommand("prepare --eval frontierswe --suite frontierswe-sample@v1", harness.deps);
 
-	assert.equal(harness.currentTrialState.evalFamily, "frontierswe");
+	assert.equal(harness.currentOptimizerState.evalFamily, "frontierswe");
 	assert.equal(harness.uiCalls, 1);
 	assert.ok(harness.notes.some((note) => note.includes("Prepared frontierswe:frontierswe-sample@v1")));
 });

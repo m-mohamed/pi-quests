@@ -7,15 +7,15 @@ import {
 	createQuestWidgetComponent,
 } from "./ui-core.js";
 import type { InternalUiModule } from "./quest-internal-loader.js";
-import type { LiveRunSnapshot, QuestState, QuestTrialState } from "./types.js";
+import type { LiveRunSnapshot, QuestState, QuestOptimizerState } from "./types.js";
 
 export function applyTransientUiState(
 	ctx: ExtensionContext,
 	quest: QuestState | null,
 	state: {
-		currentTrialState: QuestTrialState | null;
+		currentOptimizerState: QuestOptimizerState | null;
 		liveRun: LiveRunSnapshot | null;
-		trialLiveRun: LiveRunSnapshot | null;
+		optimizerLiveRun: LiveRunSnapshot | null;
 	},
 ) {
 	if (!ctx.hasUI) return;
@@ -25,10 +25,10 @@ export function applyTransientUiState(
 		ctx.ui.setHiddenThinkingLabel(`quest:${state.liveRun.role}`);
 		return;
 	}
-	if (!quest && state.currentTrialState?.status === "running" && state.trialLiveRun) {
-		const working = `Trials ${state.trialLiveRun.phase}${state.trialLiveRun.latestToolName ? ` · ${state.trialLiveRun.latestToolName}` : ""}`;
+	if (!quest && state.currentOptimizerState?.status === "running" && state.optimizerLiveRun) {
+		const working = `Evals ${state.optimizerLiveRun.phase}${state.optimizerLiveRun.latestToolName ? ` · ${state.optimizerLiveRun.latestToolName}` : ""}`;
 		ctx.ui.setWorkingMessage(working);
-		ctx.ui.setHiddenThinkingLabel("quest:trials");
+		ctx.ui.setHiddenThinkingLabel("quest:evals");
 		return;
 	}
 	ctx.ui.setWorkingMessage();
@@ -43,32 +43,32 @@ export async function applyQuestUi(
 		widgetKey: string;
 		questModeEnabled: boolean;
 		lastContextUsage: ContextUsage | null;
-		currentTrialState: QuestTrialState | null;
+		currentOptimizerState: QuestOptimizerState | null;
 		liveRun: LiveRunSnapshot | null;
-		trialLiveRun: LiveRunSnapshot | null;
+		optimizerLiveRun: LiveRunSnapshot | null;
 		loadInternalUi: () => Promise<InternalUiModule>;
 	},
 ) {
 	if (!ctx.hasUI) return;
 	const contextLabel = formatContextUsageLabel(options.lastContextUsage);
 	applyTransientUiState(ctx, quest, {
-		currentTrialState: options.currentTrialState,
+		currentOptimizerState: options.currentOptimizerState,
 		liveRun: options.liveRun,
-		trialLiveRun: options.trialLiveRun,
+		optimizerLiveRun: options.optimizerLiveRun,
 	});
 	if (!quest) {
 		if (options.questModeEnabled) {
 			ctx.ui.setStatus(options.statusKey, ctx.ui.theme.fg("accent", `quest:mode${contextLabel ? ` · ${contextLabel}` : ""}`));
 			ctx.ui.setWidget(options.widgetKey, createQuestModeWidgetComponent(contextLabel));
-		} else if (internalModeEnabled() && options.currentTrialState?.status === "running") {
-			const trialState = options.currentTrialState;
+		} else if (internalModeEnabled() && options.currentOptimizerState?.status === "running") {
+			const optimizerState = options.currentOptimizerState;
 			try {
 				const internalUi = await options.loadInternalUi();
-				ctx.ui.setStatus(options.statusKey, ctx.ui.theme.fg("accent", `trials:${trialState.status}${contextLabel ? ` · ${contextLabel}` : ""}`));
+				ctx.ui.setStatus(options.statusKey, ctx.ui.theme.fg("accent", `evals:${optimizerState.status}${contextLabel ? ` · ${contextLabel}` : ""}`));
 				ctx.ui.setWidget(
 					options.widgetKey,
-					internalUi.createTrialsWidgetComponent(
-						internalUi.buildTrialsWidgetModel(trialState, trialState.activeProfileId, options.trialLiveRun, contextLabel),
+					internalUi.createEvalsWidgetComponent(
+						internalUi.buildEvalsWidgetModel(optimizerState, optimizerState.activeProfileId, options.optimizerLiveRun, contextLabel),
 					),
 				);
 			} catch {
@@ -89,15 +89,15 @@ export async function applyQuestUi(
 	);
 }
 
-export function summarizeTrials(summary: string, trialLiveRun: LiveRunSnapshot | null): string {
-	return `# Trials
+export function summarizeEvals(summary: string, optimizerLiveRun: LiveRunSnapshot | null): string {
+	return `# Evals
 
 ${summary}
 
-Active trial run:
+Active optimizer run:
 ${
-		trialLiveRun
-			? `${trialLiveRun.role}/${trialLiveRun.phase}${trialLiveRun.latestToolName ? ` · ${trialLiveRun.latestToolName}` : ""}${trialLiveRun.latestMessage ? ` · ${trialLiveRun.latestMessage.slice(0, 80)}` : ""}`
+		optimizerLiveRun
+			? `${optimizerLiveRun.role}/${optimizerLiveRun.phase}${optimizerLiveRun.latestToolName ? ` · ${optimizerLiveRun.latestToolName}` : ""}${optimizerLiveRun.latestMessage ? ` · ${optimizerLiveRun.latestMessage.slice(0, 80)}` : ""}`
 			: "idle"
 	}`;
 }

@@ -4,14 +4,8 @@ import type { Message } from "@mariozechner/pi-ai";
 import {
 	DefaultResourceLoader,
 	SessionManager,
-	bashTool,
 	createAgentSession,
-	editTool,
-	findTool,
-	grepTool,
-	lsTool,
-	readTool,
-	writeTool,
+	getAgentDir,
 } from "@mariozechner/pi-coding-agent";
 import { registerAgentRun, unregisterAgentRun } from "./agent-process-registry.js";
 import { applyAgentEventToSnapshot, createLiveRunSnapshot } from "./telemetry-core.js";
@@ -75,7 +69,6 @@ const DEFAULT_USAGE: UsageStats = {
 	turns: 0,
 };
 
-const BUILTIN_TOOLS = [readTool, bashTool, editTool, writeTool, grepTool, findTool, lsTool];
 const RUNTIME_SESSION_DIR = join(".pi", "quests", "runtime-sessions");
 
 export async function runAgentTask(options: RunAgentTaskOptions): Promise<RunAgentTaskResult> {
@@ -83,6 +76,7 @@ export async function runAgentTask(options: RunAgentTaskOptions): Promise<RunAge
 	await mkdir(sessionDir, { recursive: true });
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: options.cwd,
+		agentDir: getAgentDir(),
 		appendSystemPromptOverride: (base) => (options.systemPrompt ? [...base, options.systemPrompt] : base),
 	});
 	await resourceLoader.reload();
@@ -91,7 +85,7 @@ export async function runAgentTask(options: RunAgentTaskOptions): Promise<RunAge
 		cwd: options.cwd,
 		resourceLoader,
 		sessionManager: SessionManager.create(options.cwd, sessionDir),
-		tools: BUILTIN_TOOLS,
+		tools: options.tools,
 	});
 
 	const resolvedModel = session.modelRegistry.find(options.modelChoice.provider, options.modelChoice.model);
@@ -102,7 +96,6 @@ export async function runAgentTask(options: RunAgentTaskOptions): Promise<RunAge
 
 	await session.setModel(resolvedModel);
 	session.setThinkingLevel(options.modelChoice.thinkingLevel);
-	session.setActiveToolsByName(options.tools);
 
 	const result: RunAgentTaskResult = {
 		exitCode: 1,

@@ -6,12 +6,12 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	EvalRunInterruptedError,
-	collectFrontierTrialStatus,
-	prepareTrialEval,
-	runTrialBaseline,
-	runTrialOptimization,
-} from "../src/frontier-trials.js";
-import { getQuestTrialPaths, loadQuestTrialState, saveQuestTrialState } from "../src/state-core.js";
+	collectFrontierOptimizerStatus,
+	prepareOptimizerEval,
+	runOptimizerBaseline,
+	runOptimizerOptimization,
+} from "../src/frontier-optimizer.js";
+import { getQuestOptimizerPaths, loadQuestOptimizerState, saveQuestOptimizerState } from "../src/state-core.js";
 
 const MODEL = {
 	provider: "openai-codex",
@@ -80,11 +80,11 @@ function makeScorecard(split, candidateId, meanScore, dataset = "frontierswe-sam
 	};
 }
 
-test("prepareTrialEval discovers the vendored FrontierSWE sample suite", async () => {
+test("prepareOptimizerEval discovers the vendored FrontierSWE sample suite", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-prepare-"));
 	try {
-		const prepared = await prepareTrialEval(cwd, { eval: "frontierswe", suite: "frontierswe-sample@v1" });
-		const state = await loadQuestTrialState(cwd, { ensure: true });
+		const prepared = await prepareOptimizerEval(cwd, { eval: "frontierswe", suite: "frontierswe-sample@v1" });
+		const state = await loadQuestOptimizerState(cwd, { ensure: true });
 
 		assert.equal(prepared.manifest.family, "frontierswe");
 		assert.equal(prepared.manifest.dataset, "frontierswe-sample@v1");
@@ -99,10 +99,10 @@ test("prepareTrialEval discovers the vendored FrontierSWE sample suite", async (
 	}
 });
 
-test("runTrialBaseline materializes a partial candidate when an eval run is interrupted", async () => {
+test("runOptimizerBaseline materializes a partial candidate when an eval run is interrupted", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-interrupt-"));
 	try {
-		const result = await runTrialBaseline(
+		const result = await runOptimizerBaseline(
 			cwd,
 			MODEL,
 			{ eval: "frontierswe", suite: "frontierswe-sample@v1" },
@@ -116,16 +116,16 @@ test("runTrialBaseline materializes a partial candidate when an eval run is inte
 		assert.equal(result.state.status, "stopped");
 		assert.equal(result.candidate.status, "partial");
 		assert.match(result.summary, /Baseline candidate 000 stopped/);
-		assert.equal(existsSync(join(getQuestTrialPaths(cwd).candidatesDir, "000", "summary.json")), true);
+		assert.equal(existsSync(join(getQuestOptimizerPaths(cwd).candidatesDir, "000", "summary.json")), true);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
 });
 
-test("collectFrontierTrialStatus self-heals stale running trial state", async () => {
+test("collectFrontierOptimizerStatus self-heals stale running optimizer state", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-recover-"));
 	try {
-		const state = await loadQuestTrialState(cwd, { ensure: true });
+		const state = await loadQuestOptimizerState(cwd, { ensure: true });
 		state.evalFamily = "frontierswe";
 		state.evalDataset = "frontierswe-sample@v1";
 		state.status = "running";
@@ -137,10 +137,10 @@ test("collectFrontierTrialStatus self-heals stale running trial state", async ()
 			split: "search",
 			startedAt: Date.now() - 5000,
 		};
-		await saveQuestTrialState(cwd, state);
+		await saveQuestOptimizerState(cwd, state);
 
-		const status = await collectFrontierTrialStatus(cwd);
-		const summary = JSON.parse(await readFile(join(getQuestTrialPaths(cwd).candidatesDir, "000", "summary.json"), "utf-8"));
+		const status = await collectFrontierOptimizerStatus(cwd);
+		const summary = JSON.parse(await readFile(join(getQuestOptimizerPaths(cwd).candidatesDir, "000", "summary.json"), "utf-8"));
 
 		assert.equal(status.state.status, "stopped");
 		assert.equal(status.state.activeRun, undefined);
@@ -151,10 +151,10 @@ test("collectFrontierTrialStatus self-heals stale running trial state", async ()
 	}
 });
 
-test("runTrialOptimization promotes the stronger FrontierSWE candidate into the frontier", async () => {
+test("runOptimizerOptimization promotes the stronger FrontierSWE candidate into the frontier", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-quests-frontier-opt-"));
 	try {
-		const result = await runTrialOptimization(
+		const result = await runOptimizerOptimization(
 			cwd,
 			MODEL,
 			{ eval: "frontierswe", suite: "frontierswe-sample@v1", iterations: 1 },

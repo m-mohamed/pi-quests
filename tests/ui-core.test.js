@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildQuestControlItems, buildQuestWidgetModel, createQuestModeWidgetComponent, createQuestWidgetComponent, renderQuestActionLines, renderQuestWidgetLines } from "../src/ui-core.js";
-import { buildTrialsControlItems, buildTrialsWidgetModel, createTrialsWidgetComponent, renderTrialsActionLines, renderTrialsWidgetLines } from "../src/internal-ui.js";
+import { buildEvalsControlItems, buildEvalsWidgetModel, createEvalsWidgetComponent, renderEvalsActionLines, renderEvalsWidgetLines } from "../src/internal-ui.js";
 
 function themeStub() {
 	return {
@@ -143,8 +143,8 @@ test("quest mode widget factory renders the Pi-native ready panel", () => {
 	assert.match(output, /Actions \/quest new <goal>  \|  \/quests/);
 });
 
-test("trials widget model renders the trial panel", () => {
-	const model = buildTrialsWidgetModel(
+test("evals widget model renders the optimizer panel", () => {
+	const model = buildEvalsWidgetModel(
 		{
 			projectId: "project-ui",
 			target: "repo",
@@ -157,22 +157,22 @@ test("trials widget model renders the trial panel", () => {
 			updatedAt: Date.now(),
 		},
 		"repo-project-ui",
-		{ role: "trial", phase: "search-eval", updatedAt: Date.now(), latestToolName: "quest_trials_set_profile" },
+		{ role: "optimizer", phase: "search-eval", updatedAt: Date.now(), latestToolName: "quest_optimizer_set_profile" },
 		"ctx 12% · 24.0k/200k",
 	);
-	const lines = renderTrialsWidgetLines(model);
+	const lines = renderEvalsWidgetLines(model);
 
-	assert.equal(lines[0], "TRIALS // target repo");
+	assert.equal(lines[0], "EVALS // target repo");
 	assert.match(lines[1], /Status running/);
 	assert.match(lines[1], /Profile repo-project-ui/);
 	assert.match(lines[1], /ctx 12%/);
 	assert.match(lines[2], /Candidate 001 archived/);
-	assert.deepEqual(renderTrialsActionLines(), [
-		"Actions /quest trials status  |  /quest trials prepare-eval  |  /quest trials analyze-community  |  /quest trials baseline  |  /quest trials run",
+	assert.deepEqual(renderEvalsActionLines(), [
+		"Actions /quest evals status  |  /quest evals prepare  |  /quest evals analyze-community  |  /quest evals baseline  |  /quest evals run",
 	]);
 });
 
-test("trials control items expose summary, eval, candidate, and live run details", () => {
+test("evals control items expose summary, eval, candidate, and live run details", () => {
 	const state = {
 		projectId: "project-ui",
 		target: "repo",
@@ -186,23 +186,23 @@ test("trials control items expose summary, eval, candidate, and live run details
 		updatedAt: 1712780000000,
 	};
 
-	const items = buildTrialsControlItems(state, "repo-project-ui", {
-		role: "trial",
+	const items = buildEvalsControlItems(state, "repo-project-ui", {
+		role: "optimizer",
 		phase: "search-eval",
 		updatedAt: Date.now(),
-		latestToolName: "quest_trials_set_profile",
+		latestToolName: "quest_optimizer_set_profile",
 		latestMessage: "Eval prep complete.",
 	});
 
 	assert.deepEqual(items.map((item) => item.value), ["summary", "eval", "candidate", "live-run"]);
-	assert.match(items[0].detailMarkdown, /# Quest Trials/);
+	assert.match(items[0].detailMarkdown, /# Quest Evals/);
 	assert.match(items[1].detailMarkdown, /# Eval/);
 	assert.match(items[2].detailMarkdown, /Frontier ids: 001, 002/);
-	assert.match(items[3].detailMarkdown, /# Live Trials Run/);
+	assert.match(items[3].detailMarkdown, /# Live Optimizer Run/);
 });
 
-test("trials widget factory renders a single native widget with actions", () => {
-	const model = buildTrialsWidgetModel(
+test("evals widget factory renders a single native widget with actions", () => {
+	const model = buildEvalsWidgetModel(
 		{
 			projectId: "project-ui",
 			target: "repo",
@@ -217,10 +217,10 @@ test("trials widget factory renders a single native widget with actions", () => 
 		"repo-project-ui",
 		null,
 	);
-	const component = createTrialsWidgetComponent(model)({}, themeStub());
+	const component = createEvalsWidgetComponent(model)({}, themeStub());
 	const output = component.render(120).join("\n");
 
-	assert.match(output, /TRIALS \/\/ target repo/);
+	assert.match(output, /EVALS \/\/ target repo/);
 	assert.match(output, /Status running/);
-	assert.match(output, /Actions \/quest trials status/);
+	assert.match(output, /Actions \/quest evals status/);
 });

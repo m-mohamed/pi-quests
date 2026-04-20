@@ -1,35 +1,33 @@
 # Tasks: Frontier Evals Optimization
 
 > Status date: 2026-04-18
-> Canonical optimization root: `.pi/quests/trials/`
-> Goal: reach the first reproducible FrontierSWE baseline through the frontier Trials loop without depending on removed legacy adapters.
+> Canonical optimization root: `.pi/quests/evals/`
+> Goal: reach the first reproducible FrontierSWE baseline through the frontier eval optimizer loop.
 
 ## Outcome
 
 The core frontier infrastructure is now implemented in the Quest extension:
 
 - Pi-native community trace ingestion is live.
-- Canonical Trials storage is candidate-centric under `.pi/quests/trials/`.
+- Canonical eval optimizer storage is candidate-centric under `.pi/quests/evals/`.
 - The `proposer` role drives profile patch generation.
 - Search and hold-out splits are explicit eval artifacts.
 - Candidate archiving, hold-out gating, Pareto frontier selection, and deterministic leader promotion are implemented.
-- Legacy `.pi/quests/lab` and `.pi/quests/meta-harness` roots are migration inputs only.
 - Native Docker FrontierSWE runs replace prior external harness integrations in the live runtime.
 
 ## Implemented
 
-### 1. Canonical Trials root
+### 1. Canonical eval root
 
-- [x] Extend `QuestTrialPaths` to support `current/`, `candidates/`, `search-set.json`, `hold-out-set.json`, `frontier.json`, `community-traces/`, and `community-stats.json`
-- [x] Persist the active leader profile to `.pi/quests/trials/current/profile.json`
+- [x] Extend `QuestOptimizerPaths` to support `current/`, `candidates/`, `search-set.json`, `hold-out-set.json`, `frontier.json`, `community-traces/`, and `community-stats.json`
+- [x] Persist the active leader profile to `.pi/quests/evals/current/profile.json`
 - [x] Archive each candidate under `candidates/NNN/`
 
-### 2. Migration and legacy retirement
+### 2. Hard break and cleanup
 
-- [x] Import active profile and state from `.pi/quests/lab` when `.pi/quests/trials/state.json` is missing
-- [x] Import only valid split/community artifacts from `.pi/quests/meta-harness`
-- [x] Ignore broken symlinks and inconsistent split metadata
-- [x] Stop using legacy roots in the live runtime after migration
+- [x] Stop reading sibling legacy roots in the live runtime
+- [x] Require `.pi/quests/evals/` as the only supported optimizer root
+- [x] Fail loudly on unsupported pre-cutover state
 
 ### 3. Pi-native trace analysis
 
@@ -43,14 +41,14 @@ The core frontier infrastructure is now implemented in the Quest extension:
 - [x] Implement `src/trace-analyzer.ts`
 - [x] Count only files whose first record is `type: "session"`
 - [x] Exclude non-Pi/non-session files from canonical per-source stats
-- [x] Write canonical aggregate stats to `.pi/quests/trials/community-stats.json`
+- [x] Write canonical aggregate stats to `.pi/quests/evals/community-stats.json`
 
 ### 4. Frontier runtime
 
 - [x] Vendor `frontierswe-sample@v1`
 - [x] Implement deterministic search/hold-out preparation with seed `42`
 - [x] Implement baseline candidate `000`
-- [x] Replace the legacy trial-agent optimization path with the `proposer` role
+- [x] Drive candidate generation through the `proposer` role
 - [x] Score candidates on:
   - mean score
   - total cost
@@ -61,13 +59,13 @@ The core frontier infrastructure is now implemented in the Quest extension:
 
 ### 5. CLI integration
 
-- [x] Add `/quest trials prepare-eval`
-- [x] Add `/quest trials analyze-community`
-- [x] Add `/quest trials baseline`
-- [x] Add `/quest trials run`
-- [x] Add `/quest trials status`
-- [x] Keep `/quest trials profile` and `/quest trials stop`
-- [x] Remove the live dependency on replay-era trial subcommands from the frontier runtime
+- [x] Add `/quest evals prepare`
+- [x] Add `/quest evals analyze-community`
+- [x] Add `/quest evals baseline`
+- [x] Add `/quest evals run`
+- [x] Add `/quest evals status`
+- [x] Keep `/quest evals profile` and `/quest evals stop`
+- [x] Remove compatibility aliases from the frontier runtime
 
 ### 6. Verification
 
@@ -78,10 +76,9 @@ The core frontier infrastructure is now implemented in the Quest extension:
   - unknown events
   - per-source aggregation
   - manifest/non-session exclusion
-- [x] Migration tests cover:
-  - lab import
+- [x] State-break tests cover:
+  - unsupported old optimizer state rejection
   - inconsistent split rejection
-  - broken symlink ignore
 - [x] Frontier tests cover:
   - deterministic eval split
   - baseline candidate `000`
@@ -111,12 +108,12 @@ The core frontier infrastructure is now implemented in the Quest extension:
 
 ### 1. Full-corpus FrontierSWE baseline
 
-- [ ] Run `/quest trials baseline` against a real `frontierswe@public-v1` checkout and archive candidate `000` with full eval artifacts
+- [ ] Run `/quest evals baseline` against a real `frontierswe@public-v1` checkout and archive candidate `000` with full eval artifacts
 - [ ] Record the resulting eval metrics in `docs/internal/baseline-results.md`
 
 ### 2. First real optimization iteration
 
-- [ ] Run `/quest trials run --iterations 1` on FrontierSWE
+- [ ] Run `/quest evals run --iterations 1` on FrontierSWE
 - [ ] Inspect proposer rationale and candidate artifacts under `candidates/001/`
 - [ ] Confirm the promoted frontier leader is justified by real search and hold-out scores
 

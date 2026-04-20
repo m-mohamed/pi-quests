@@ -47,7 +47,7 @@ Eval tasks are split into search and hold-out sets.
 #### Scenario: Task sets are isolated
 
 - GIVEN eval task IDs
-- WHEN Trials initializes the frontier split
+- WHEN the optimizer initializes the frontier split
 - THEN 70% of tasks are in search-set.json
 - AND 30% of tasks are in hold-out-set.json
 - AND there is no overlap between sets

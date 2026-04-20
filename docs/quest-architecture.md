@@ -22,7 +22,7 @@ That maps cleanly onto `pi-quests`:
 - orchestrator = quest planner and fix-loop owner
 - worker = single-feature implementer
 - validator = fresh, read-only checker
-- internal trials and benchmarks = downstream measurement and tuning layer
+- internal trials and evals = downstream measurement and tuning layer
 
 ## What We Adopted
 
@@ -36,7 +36,7 @@ The primary loop is quest work inside Pi:
 /quest accept
 ```
 
-Benchmarks are downstream instrumentation for us. They help measure and tune the runtime, but they are not the community-facing product surface.
+Evals are downstream instrumentation for us. They help measure and tune the runtime, but they are not the community-facing product surface.
 
 ### Validation contract first
 
@@ -78,8 +78,8 @@ Use the chain-safe runtime hooks the same way: `before_provider_request` for con
 Use this repo in two layers:
 
 1. Real quest work generates the real traces.
-2. Internal trials and benchmark runs analyze those traces and tune prompt/runtime behavior.
+2. Internal trials and eval runs analyze those traces and tune prompt/runtime behavior.
 
 Internal maintainer material lives under `docs/internal/`.
 
-Do not invert that relationship. If benchmarking starts driving the public package surface, the system will optimize for the harness instead of the long-running coding loop it is supposed to improve.
+Do not invert that relationship. If eval harnesses start driving the public package surface, the system will optimize for the harness instead of the long-running coding loop it is supposed to improve.

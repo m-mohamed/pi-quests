@@ -197,7 +197,7 @@ npm run pack:check
 node --import tsx scripts/evals.ts --suite offline-core
 ```
 
-Maintainer-only optimization, benchmark, and trace-mining workflows also live in this repo, but they are intentionally outside the main package story. They are documented under `docs/internal/`.
+Maintainer-only optimization, eval, and trace-mining workflows also live in this repo, but they are intentionally outside the main package story. They are documented under `docs/internal/`.
 
 ## Release Workflow
 
@@ -215,4 +215,4 @@ This repo now keeps its forward plan in a Quest-native planning workspace:
 
 The active roadmap change is:
 
-- `blueprints/changes/meta-harness-optimization/`
+- `blueprints/changes/frontier-evals-optimization/`

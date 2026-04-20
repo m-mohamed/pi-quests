@@ -1,4 +1,4 @@
-# Proposal: Meta-Harness Optimization
+# Proposal: Frontier Evals Optimization
 
 ## Why
 
@@ -6,7 +6,7 @@ Current baselines are weak. Meta-Harness showed that agents with **full trace ac
 
 We're Pi-native. The Pi community shares raw session traces, and Quest already has a Trials layer. We can learn from both without introducing a separate legacy runtime.
 
-**The gap:** Quest trace bundles are derived summaries. Community traces are raw Pi sessions. We need Pi-native trace processing, canonical Trials storage, and a proposer-driven frontier loop on real Harbor benchmarks.
+**The gap:** Quest trace bundles are derived summaries. Community traces are raw Pi sessions. We need Pi-native trace processing, canonical Trials storage, and a proposer-driven frontier loop on real long-horizon evals.
 
 ## What changes
 
@@ -14,12 +14,12 @@ We're Pi-native. The Pi community shares raw session traces, and Quest already h
 2. **Canonical Trials filesystem** — Store candidates, scores, frontier state, splits, and community stats under `.pi/quests/trials/`
 3. **Community trace ingestion** — Analyze raw Pi sessions into canonical aggregate stats
 4. **Proposer agent** — Quest extension role that reads frontier artifacts and proposes profile patches
-5. **Search/hold-out split** — 70% search, 30% validation, Pareto frontier selection on official Terminal-Bench datasets
+5. **Search/hold-out split** — 70% search, 30% validation, Pareto frontier selection on FrontierSWE and local eval datasets
 
 ## Expected outcome
 
-- First reproducible baseline on `terminal-bench-sample@2.0`
-- Measurable improvement on Terminal-Bench within repeated proposer iterations
+- First reproducible baseline on `frontierswe-sample@v1`
+- Measurable improvement on FrontierSWE within repeated proposer iterations
 - Profile improvements that transfer across model upgrades
 - Community traces improve failure tag derivation
 

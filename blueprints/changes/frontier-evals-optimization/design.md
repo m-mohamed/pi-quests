@@ -1,9 +1,9 @@
-# Design: Meta-Harness Optimization
+# Design: Frontier Evals Optimization
 
 ## Summary
 
 Quest now implements the optimization loop as a Pi-native frontier system rooted in `.pi/quests/trials/`.
-The design keeps raw Pi session JSONL as the source of truth, uses Harbor-backed Terminal-Bench evaluation for objective scoring, and promotes only non-dominated candidates that also pass hold-out validation.
+The design keeps raw Pi session JSONL as the source of truth, uses native local and FrontierSWE evals for objective scoring, and promotes only non-dominated candidates that also pass hold-out validation.
 
 ## Decision 1: Canonical root is `.pi/quests/trials/`
 
@@ -13,7 +13,7 @@ The design keeps raw Pi session JSONL as the source of truth, uses Harbor-backed
 
 - Trials already belongs to the Quest extension.
 - The codebase was previously split between `.pi/quests/lab`, `.pi/quests/meta-harness`, and `.pi/quests/trials`.
-- Frontier operation needs one canonical state root for status, candidates, community stats, and benchmark splits.
+- Frontier operation needs one canonical state root for status, candidates, community stats, and eval splits.
 
 **Consequences:**
 
@@ -37,7 +37,7 @@ The design keeps raw Pi session JSONL as the source of truth, uses Harbor-backed
 
 ## Decision 3: Candidate-centric filesystem
 
-**Decision:** Trials archives every benchmarked candidate under `candidates/NNN/`.
+**Decision:** Trials archives every evaluated candidate under `candidates/NNN/`.
 
 **Filesystem layout:**
 
@@ -55,7 +55,7 @@ The design keeps raw Pi session JSONL as the source of truth, uses Harbor-backed
 │   │   ├── scores.json
 │   │   ├── hold-out.json
 │   │   ├── summary.json
-│   │   └── traces/<task-name>/...
+│   │   └── evals/<split>/<task-id>/...
 │   └── 001/
 ├── search-set.json
 ├── hold-out-set.json
@@ -67,7 +67,7 @@ The design keeps raw Pi session JSONL as the source of truth, uses Harbor-backed
 **Consequences:**
 
 - Candidate `000` is always the archived baseline.
-- Search and hold-out benchmark artifacts are kept with the candidate that produced them.
+- Search and hold-out eval artifacts are kept with the candidate that produced them.
 - The proposer reads a stable filesystem instead of relying on prompt-only summaries.
 
 ## Decision 4: Search/hold-out scoring with Pareto frontier selection
@@ -77,7 +77,7 @@ The design keeps raw Pi session JSONL as the source of truth, uses Harbor-backed
 **Rationale:**
 
 - Accuracy-only promotion overfits.
-- Cost and duration matter for practical benchmark progress.
+- Cost and duration matter for practical eval progress.
 - Hold-out must stay isolated from candidate generation.
 
 **Consequences:**
@@ -103,16 +103,16 @@ The design keeps raw Pi session JSONL as the source of truth, uses Harbor-backed
 - The proposer reads `community-stats.json`, `search-set.json`, `hold-out-set.json`, `frontier.json`, and prior candidate artifacts.
 - The proposer cannot mutate runtime code. It only emits profile patches.
 
-## Decision 6: Default benchmark target is the official sample dataset
+## Decision 6: Default eval target is the FrontierSWE sample suite
 
-**Decision:** The default benchmark target is `terminal-bench-sample@2.0`.
+**Decision:** The default external eval target is `frontierswe-sample@v1`.
 
 **Rationale:**
 
-- It is the smallest official Harbor-backed dataset that exercises the real pipeline.
-- The same runtime can then be promoted to `terminal-bench@2.0` without architectural changes.
+- It is the smallest vendored long-horizon suite that exercises the real Docker agent/verifier pipeline.
+- The same runtime can then be promoted to `frontierswe@public-v1` without architectural changes.
 
 **Consequences:**
 
-- The vendored sample manifest contains 10 official tasks.
-- The deterministic default split is 7 search / 3 hold-out with seed `42`.
+- The vendored sample suite stays small enough for fast local iteration.
+- The deterministic default split remains seeded and reproducible.

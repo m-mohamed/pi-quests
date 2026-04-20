@@ -19,7 +19,7 @@ The system SHALL use `.pi/quests/trials/` as the live optimization root.
 
 ### Requirement: Candidate directory structure
 
-The system SHALL archive each benchmarked candidate with a consistent layout.
+The system SHALL archive each evaluated candidate with a consistent layout.
 
 #### Scenario: Create candidate
 
@@ -31,17 +31,17 @@ The system SHALL archive each benchmarked candidate with a consistent layout.
   - `scores.json`
   - `hold-out.json`
   - `summary.json`
-  - `traces/<task-name>/...`
+  - `evals/<split>/<task-id>/...`
 - AND it uses sequential numbering (`000`, `001`, `002`, ...)
 
 ### Requirement: Search and hold-out artifacts
 
 The system SHALL materialize explicit task splits on disk.
 
-#### Scenario: Prepare benchmark split
+#### Scenario: Prepare eval split
 
-- GIVEN a benchmark dataset manifest
-- WHEN Trials prepares the benchmark
+- GIVEN an eval dataset manifest
+- WHEN Trials prepares the eval
 - THEN it writes `search-set.json`
 - AND it writes `hold-out-set.json`
 - AND those files contain explicit task lists with no overlap

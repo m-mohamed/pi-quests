@@ -656,9 +656,7 @@ export async function loadQuestTrialState(cwd: string, options: { ensure?: boole
 									: defaults.updatedAt,
 						}
 					: undefined,
-				lastSummary: usedLegacyEvalKeys
-					? `Reset legacy benchmark trials state to ${defaults.evalFamily}:${defaults.evalDataset}.`
-					: parsed.lastSummary,
+				lastSummary: usedLegacyEvalKeys ? `Reset legacy trials state to ${defaults.evalFamily}:${defaults.evalDataset}.` : parsed.lastSummary,
 			};
 		if (options.ensure && JSON.stringify(parsed) !== JSON.stringify(normalized)) {
 			await writeFile(paths.stateFile, `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");

@@ -78,7 +78,7 @@ test("loadQuestTrialState resets legacy benchmark keys to the default eval suite
 		assert.deepEqual(state.frontierCandidateIds, []);
 		assert.equal(state.activeRun, undefined);
 		assert.equal(state.status, "idle");
-		assert.match(state.lastSummary ?? "", /Reset legacy benchmark trials state/);
+		assert.match(state.lastSummary ?? "", /Reset legacy trials state/);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

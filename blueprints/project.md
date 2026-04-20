@@ -8,9 +8,9 @@ validation-first orchestration. Trials adds evals-and-traces optimization.
 
 ## North Star
 
-Build a benchmarkable, reproducible, validation-first coding agent stack that
-can improve itself through bounded profile iteration instead of ad hoc prompt
-tweaks.
+Build a reproducible, validation-first coding agent stack for long-running
+autonomous coding that improves itself through bounded profile iteration and
+high-signal evals instead of ad hoc prompt tweaks.
 
 ## Guardrails
 
@@ -19,23 +19,21 @@ tweaks.
 - Trials may tune bounded profile surfaces, but must not auto-publish,
   auto-tag, auto-release, auto-commit, or mutate arbitrary runtime code during
   task execution.
-- Public benchmark claims must come from official runner paths.
+- Reproducible eval claims must come from supported runner paths.
 - Human QA remains an explicit final boundary before shipping.
 
 ## Verified State
 
 - Package gate is green via `npm run check`.
-- Harbor smoke succeeds, but the integrity gate still fails closed and blocks trusted Terminal-Bench score claims.
-- Official SlopCodeBench runner path works with Quest overlay.
-- Multiple models tested: minimax-m2.5, glm-5, kimi-k2.5 all produce real output.
-- All models return 0.0 reward on chess task (agent quality gap, not plumbing).
+- Native Docker FrontierSWE sample runs complete end to end.
+- Legacy external harness integration code is removed from the live runtime.
 - Canonical community-trace counts live in `.pi/quests/trials/community-stats.json`.
-- Canonical benchmark status and baseline interpretation live in `docs/internal/baseline-results.md`.
+- Canonical eval status and baseline interpretation live in `docs/internal/baseline-results.md`.
 
 ## Working Agreement
 
 - Capability docs in `blueprints/capabilities/` describe the current intended
   system behavior.
 - Change docs in `blueprints/changes/` describe the next planned deltas.
-- Benchmark improvement work starts from the latest verified baseline and keeps
+- Eval improvement work starts from the latest verified baseline and keeps
   replayable traces attached to any claimed improvement.

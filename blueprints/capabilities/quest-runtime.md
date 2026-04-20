@@ -29,16 +29,16 @@ The system keeps execution gated by explicit validation state.
 - THEN the quest remains blocked or corrective
 - AND the next milestone does not start automatically
 
-### Headless benchmark contract
+### Headless eval contract
 
 The system supports a machine-readable headless run contract.
 
-#### Scenario: Headless run emits benchmark-safe output
+#### Scenario: Headless run emits eval-safe output
 
 - GIVEN Quest runs through `quest-headless`
 - WHEN the run reaches a terminal or blocked outcome
 - THEN the system writes machine-readable result artifacts
-- AND preserves benchmark provenance and trace references
+- AND preserves eval provenance and trace references
 
 ### Human QA handoff
 

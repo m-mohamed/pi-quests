@@ -1,8 +1,8 @@
-# Tasks: Meta-Harness Optimization
+# Tasks: Frontier Evals Optimization
 
-> Status date: 2026-04-07
+> Status date: 2026-04-18
 > Canonical optimization root: `.pi/quests/trials/`
-> Goal: reach the first reproducible Terminal-Bench baseline through the frontier Trials loop without depending on legacy lab or meta-harness runtime paths.
+> Goal: reach the first reproducible FrontierSWE baseline through the frontier Trials loop without depending on removed legacy adapters.
 
 ## Outcome
 
@@ -11,9 +11,10 @@ The core frontier infrastructure is now implemented in the Quest extension:
 - Pi-native community trace ingestion is live.
 - Canonical Trials storage is candidate-centric under `.pi/quests/trials/`.
 - The `proposer` role drives profile patch generation.
-- Search and hold-out splits are explicit benchmark artifacts.
+- Search and hold-out splits are explicit eval artifacts.
 - Candidate archiving, hold-out gating, Pareto frontier selection, and deterministic leader promotion are implemented.
 - Legacy `.pi/quests/lab` and `.pi/quests/meta-harness` roots are migration inputs only.
+- Native Docker FrontierSWE runs replace prior external harness integrations in the live runtime.
 
 ## Implemented
 
@@ -46,8 +47,8 @@ The core frontier infrastructure is now implemented in the Quest extension:
 
 ### 4. Frontier runtime
 
-- [x] Vendor the official `terminal-bench-sample@2.0` 10-task manifest
-- [x] Implement deterministic 7/3 search/hold-out preparation with seed `42`
+- [x] Vendor `frontierswe-sample@v1`
+- [x] Implement deterministic search/hold-out preparation with seed `42`
 - [x] Implement baseline candidate `000`
 - [x] Replace the legacy trial-agent optimization path with the `proposer` role
 - [x] Score candidates on:
@@ -56,10 +57,11 @@ The core frontier infrastructure is now implemented in the Quest extension:
   - total duration
 - [x] Reject hold-out regressions
 - [x] Recompute the Pareto frontier and promote the deterministic leader
+- [x] Run FrontierSWE natively with isolated agent and verifier Docker phases
 
 ### 5. CLI integration
 
-- [x] Add `/quest trials prepare-benchmark`
+- [x] Add `/quest trials prepare-eval`
 - [x] Add `/quest trials analyze-community`
 - [x] Add `/quest trials baseline`
 - [x] Add `/quest trials run`
@@ -81,20 +83,20 @@ The core frontier infrastructure is now implemented in the Quest extension:
   - inconsistent split rejection
   - broken symlink ignore
 - [x] Frontier tests cover:
-  - deterministic benchmark split
+  - deterministic eval split
   - baseline candidate `000`
   - proposer candidate `001`
   - Pareto leader promotion
   - hold-out regression rejection
 - [x] `npm run typecheck`
 - [x] `npm run test`
-- [x] `npm run internal:benchmark:tbench:preflight`
+- [x] `npm run internal:eval:frontierswe:sample`
 
 ## Verified facts
 
-- [x] `terminal-bench-sample@2.0` contains 10 tasks
-- [x] `terminal-bench@2.0` remains the full-dataset identifier
-- [x] Current sample split is 7 search / 3 hold-out
+- [x] `frontierswe-sample@v1` is the default external eval dataset
+- [x] `frontierswe@public-v1` remains the full-corpus identifier
+- [x] Current split preparation is deterministic from a fixed seed
 - [x] Current corpus contains 777 `.jsonl` files
 - [x] Current canonical Pi session count is 768 valid session files
 - [x] Current canonical per-source counts are:
@@ -107,18 +109,18 @@ The core frontier infrastructure is now implemented in the Quest extension:
 
 ## Remaining work
 
-### 1. First official Harbor baseline
+### 1. Full-corpus FrontierSWE baseline
 
-- [ ] Run `/quest trials baseline` against the real sample split and archive candidate `000` with real Harbor artifacts
-- [ ] Record the resulting benchmark metrics in `docs/internal/baseline-results.md`
+- [ ] Run `/quest trials baseline` against a real `frontierswe@public-v1` checkout and archive candidate `000` with full eval artifacts
+- [ ] Record the resulting eval metrics in `docs/internal/baseline-results.md`
 
 ### 2. First real optimization iteration
 
-- [ ] Run `/quest trials run --iterations 1` with real benchmark credits
+- [ ] Run `/quest trials run --iterations 1` on FrontierSWE
 - [ ] Inspect proposer rationale and candidate artifacts under `candidates/001/`
 - [ ] Confirm the promoted frontier leader is justified by real search and hold-out scores
 
-### 3. Full-dataset promotion
+### 3. Long-horizon runtime improvement loop
 
-- [ ] Run the same pipeline against `terminal-bench@2.0`
-- [ ] Record the first full-dataset frontier baseline
+- [ ] Feed FrontierSWE failures back into profile-owned prompt/runtime surfaces
+- [ ] Track whether improvements transfer to local eval suites and future model upgrades

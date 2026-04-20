@@ -39,14 +39,14 @@ Trials accept both Quest trace bundles and raw Pi session files.
 - THEN it derives model choice, duration, and failure signals
 - AND it can use those signals for profile optimization
 
-### Meta-harness filesystem
+### Frontier filesystem
 
 Trials maintain a filesystem of candidates for counterfactual reasoning.
 
 #### Scenario: Proposer reads prior candidates
 
 - GIVEN multiple candidates have been evaluated
-- WHEN a proposer reads the meta-harness filesystem
+- WHEN a proposer reads the frontier filesystem
 - THEN it can access all prior profile patches
 - AND it can read all prior scores and traces
 - AND it can perform counterfactual diagnosis across candidates
@@ -58,7 +58,7 @@ held-out or core behavior.
 
 #### Scenario: Hold-out regression blocks adoption
 
-- GIVEN a candidate improves benchmark replay slice
+- GIVEN a candidate improves an eval search slice
 - WHEN it regresses hold-out or core datasets
 - THEN Trials reject the candidate
 - AND preserves the baseline profile

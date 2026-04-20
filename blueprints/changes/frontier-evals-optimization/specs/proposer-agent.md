@@ -23,11 +23,11 @@ The proposer SHALL have read access to the full frontier history under `.pi/ques
   - `candidates/*/scores.json`
   - `candidates/*/hold-out.json`
   - `candidates/*/summary.json`
-  - `candidates/*/traces/<task-name>/...`
+  - `candidates/*/evals/<split>/<task-id>/...`
 
 ### Requirement: Counterfactual diagnosis
 
-The proposer SHALL trace benchmark failures back to profile-owned decisions.
+The proposer SHALL trace eval failures back to profile-owned decisions.
 
 #### Scenario: Diagnose a failed task
 
@@ -57,7 +57,7 @@ The proposer SHALL remain read-only with respect to the repository and Trials ar
 - WHEN it uses tools
 - THEN read-oriented tools are allowed
 - AND mutating edits are forbidden
-- AND benchmark execution remains the responsibility of the evaluation loop, not the proposer
+- AND eval execution remains the responsibility of the evaluation loop, not the proposer
 
 ### Requirement: Structured candidate output
 

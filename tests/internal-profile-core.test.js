@@ -18,7 +18,7 @@ test("internal proposer candidates parse and patch internal profile-owned surfac
 	const profile = defaultInternalQuestProfile("project-123");
 	const candidate = parseQuestExperimentCandidate(`{
   "summary": "Tighten worker policy",
-  "rationale": "Improve generalization on benchmark search tasks.",
+  "rationale": "Improve generalization on eval search tasks.",
   "generalizationNote": "Targets repeated failures instead of a single trace.",
   "targetedTags": ["weak_validation"],
   "targetedCaseIds": [],

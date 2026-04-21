@@ -1,0 +1,58 @@
+{
+  "name": "@m-mohamed/pi-quests-evals",
+  "version": "0.8.0",
+  "private": true,
+  "description": "Maintainer-only eval and optimizer package for pi-quests",
+  "type": "module",
+  "files": [
+    "docs/internal",
+    "evals",
+    "src",
+    "README.md",
+    "bin"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "quests",
+    "frontierswe"
+  ],
+  "license": "MIT",
+  "bin": {
+    "quest-eval-headless": "./bin/quest-eval-headless.mjs"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "test": "node --import tsx --test tests/*.test.js",
+    "pack:check": "npm pack --dry-run",
+    "internal:eval:local": "node --import tsx evals/local/run.ts",
+    "internal:eval:frontierswe:sample": "node --import tsx evals/frontierswe/run.ts --dataset frontierswe-sample@v1",
+    "internal:eval:frontierswe:full": "node --import tsx evals/frontierswe/run.ts --dataset frontierswe@public-v1",
+    "check": "npm run typecheck && npm run test && npm run pack:check"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "dependencies": {
+    "@m-mohamed/pi-quests-core": "0.8.0",
+    "smol-toml": "^1.6.1",
+    "tsx": "^4.20.3"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-ai": "^0.68.0",
+    "@mariozechner/pi-coding-agent": "^0.68.0",
+    "@mariozechner/pi-tui": "^0.68.0",
+    "@sinclair/typebox": "^0.34.49",
+    "@types/node": "^24.3.0",
+    "typescript": "^5.7.3"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}

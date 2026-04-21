@@ -1,63 +1,20 @@
 {
-  "name": "@m-mohamed/pi-quests",
-  "version": "0.8.0",
-  "description": "Structured quest orchestration for long-running coding work in Pi",
+  "name": "pi-quests-workspace",
+  "private": true,
   "type": "module",
-  "files": [
-    "bin",
-    "evals",
-    "docs/quest-architecture.md",
-    "docs/quest-control.png",
-    "docs/tutorial.md",
-    "src",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE"
+  "workspaces": [
+    "packages/pi-quests-core",
+    "packages/pi-quests",
+    "packages/pi-quests-evals"
   ],
-  "keywords": [
-    "pi-package",
-    "pi-extension",
-    "pi",
-    "quests",
-    "pi-coding-agent"
-  ],
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/m-mohamed/pi-quests.git"
-  },
-  "homepage": "https://github.com/m-mohamed/pi-quests#readme",
-  "bugs": {
-    "url": "https://github.com/m-mohamed/pi-quests/issues"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "engines": {
-    "node": ">=20.6.0"
-  },
-  "bin": {
-    "quest-headless": "./bin/quest-headless.mjs"
-  },
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
-    "test": "node --import tsx --test tests/*.test.js",
-    "pack:check": "npm pack --dry-run",
-    "internal:eval:local": "PI_QUESTS_INTERNAL=1 node --import tsx evals/local/run.ts",
-    "internal:eval:frontierswe:sample": "PI_QUESTS_INTERNAL=1 node --import tsx evals/frontierswe/run.ts --dataset frontierswe-sample@v1",
-    "internal:eval:frontierswe:full": "PI_QUESTS_INTERNAL=1 node --import tsx evals/frontierswe/run.ts --dataset frontierswe@public-v1",
-    "check": "npm run typecheck && npm run test && npm run pack:check",
-    "prepublishOnly": "npm run check"
-  },
-  "peerDependencies": {
-    "@mariozechner/pi-ai": "^0.68.0",
-    "@mariozechner/pi-coding-agent": "^0.68.0",
-    "@mariozechner/pi-tui": "^0.68.0",
-    "@sinclair/typebox": "^0.34.49"
-  },
-  "dependencies": {
-    "smol-toml": "^1.6.1",
-    "tsx": "^4.20.3"
+    "typecheck": "npm run typecheck -w @m-mohamed/pi-quests-core && npm run typecheck -w @m-mohamed/pi-quests && npm run typecheck -w @m-mohamed/pi-quests-evals",
+    "test": "npm run test -w @m-mohamed/pi-quests-core && npm run test -w @m-mohamed/pi-quests && npm run test -w @m-mohamed/pi-quests-evals",
+    "pack:check": "npm run pack:check -w @m-mohamed/pi-quests && npm run pack:check -w @m-mohamed/pi-quests-evals",
+    "check": "npm run check -w @m-mohamed/pi-quests-core && npm run check -w @m-mohamed/pi-quests && npm run check -w @m-mohamed/pi-quests-evals",
+    "internal:eval:local": "npm run internal:eval:local -w @m-mohamed/pi-quests-evals",
+    "internal:eval:frontierswe:sample": "npm run internal:eval:frontierswe:sample -w @m-mohamed/pi-quests-evals",
+    "internal:eval:frontierswe:full": "npm run internal:eval:frontierswe:full -w @m-mohamed/pi-quests-evals"
   },
   "devDependencies": {
     "@mariozechner/pi-ai": "^0.68.0",
@@ -65,12 +22,7 @@
     "@mariozechner/pi-tui": "^0.68.0",
     "@sinclair/typebox": "^0.34.49",
     "@types/node": "^24.3.0",
+    "tsx": "^4.20.3",
     "typescript": "^5.7.3"
-  },
-  "pi": {
-    "extensions": [
-      "./src/index.ts"
-    ],
-    "image": "https://raw.githubusercontent.com/m-mohamed/pi-quests/main/docs/quest-control.png"
   }
 }

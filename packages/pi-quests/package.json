@@ -1,0 +1,77 @@
+{
+  "name": "@m-mohamed/pi-quests",
+  "version": "0.8.0",
+  "description": "Structured quest orchestration for long-running coding work in Pi",
+  "type": "module",
+  "files": [
+    "bin",
+    "docs/quest-architecture.md",
+    "docs/quest-control.png",
+    "docs/tutorial.md",
+    "src",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "quests",
+    "pi-coding-agent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/m-mohamed/pi-quests.git"
+  },
+  "homepage": "https://github.com/m-mohamed/pi-quests#readme",
+  "bugs": {
+    "url": "https://github.com/m-mohamed/pi-quests/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "bin": {
+    "quest-headless": "./bin/quest-headless.mjs"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./quest-headless": "./src/quest-headless.ts",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "test": "node --import tsx --test tests/*.test.js",
+    "pack:check": "npm pack --dry-run",
+    "check": "npm run typecheck && npm run test && npm run pack:check",
+    "prepublishOnly": "npm run check"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "dependencies": {
+    "@m-mohamed/pi-quests-core": "0.8.0",
+    "tsx": "^4.20.3"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-ai": "^0.68.0",
+    "@mariozechner/pi-coding-agent": "^0.68.0",
+    "@mariozechner/pi-tui": "^0.68.0",
+    "@sinclair/typebox": "^0.34.49",
+    "@types/node": "^24.3.0",
+    "typescript": "^5.7.3"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "image": "https://raw.githubusercontent.com/m-mohamed/pi-quests/main/docs/quest-control.png"
+  }
+}

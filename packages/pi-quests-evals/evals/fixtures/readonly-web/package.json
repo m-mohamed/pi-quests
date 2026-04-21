@@ -1,0 +1,8 @@
+{
+  "name": "readonly-web-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "echo readonly-web-test-ok"
+  }
+}

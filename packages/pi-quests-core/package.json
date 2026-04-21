@@ -1,0 +1,25 @@
+{
+  "name": "@m-mohamed/pi-quests-core",
+  "version": "0.8.0",
+  "description": "Shared quest runtime for pi-quests packages",
+  "type": "module",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "test": "node --import tsx --test tests/*.test.js",
+    "check": "npm run typecheck && npm run test"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  }
+}

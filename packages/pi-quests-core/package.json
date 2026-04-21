@@ -1,6 +1,7 @@
 {
   "name": "@m-mohamed/pi-quests-core",
   "version": "0.8.0",
+  "private": true,
   "description": "Shared quest runtime for pi-quests packages",
   "type": "module",
   "files": [
@@ -9,7 +10,20 @@
   ],
   "exports": {
     ".": "./src/index.ts",
-    "./*": "./src/*.ts"
+    "./control-panel": "./src/control-panel.ts",
+    "./headless-core": "./src/headless-core.ts",
+    "./headless-runner-core": "./src/headless-runner-core.ts",
+    "./plan-core": "./src/plan-core.ts",
+    "./profile-core": "./src/profile-core.ts",
+    "./quest-runtime-helpers": "./src/quest-runtime-helpers.ts",
+    "./quest-subcommands": "./src/quest-subcommands.ts",
+    "./runtime-core": "./src/runtime-core.ts",
+    "./state-core": "./src/state-core.ts",
+    "./telemetry-core": "./src/telemetry-core.ts",
+    "./types": "./src/types.ts",
+    "./utils": "./src/utils.ts",
+    "./workers": "./src/workers.ts",
+    "./package.json": "./package.json"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",

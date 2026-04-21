@@ -2,17 +2,15 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { getQuestPaths, loadQuestProfile, loadQuestOptimizerState, saveQuest, saveQuestProfile } from "./state-core.js";
-import type { QuestProfile, QuestState, ValidationSurfaceStatus } from "./types.js";
+import { getQuestPaths, saveQuest } from "./state-core.js";
+import type { QuestState, ValidationSurfaceStatus } from "./types.js";
 
 interface QuestToolRegistrationDeps {
 	resolveQuestForTool: (ctx: ExtensionContext, questId?: string) => Promise<QuestState | null>;
 	applyQuestUi: (ctx: ExtensionContext, quest: QuestState | null) => Promise<void>;
 	setCurrentQuest: (quest: QuestState) => void;
-	setCurrentProfile: (profile: QuestProfile) => void;
 	proposalReady: (quest: QuestState) => boolean;
 	synthesizeAssertionsForQuestPlan: (quest: QuestState) => void;
-	internalModeEnabled: boolean;
 }
 
 export function registerQuestTools(pi: ExtensionAPI, deps: QuestToolRegistrationDeps): void {
@@ -340,74 +338,6 @@ export function registerQuestTools(pi: ExtensionAPI, deps: QuestToolRegistration
 			return {
 				content: [{ type: "text", text: `Updated quest state to ${quest.status}.` }],
 				details: { questId: quest.id, status: quest.status },
-			};
-		},
-	});
-
-	if (!deps.internalModeEnabled) return;
-
-	pi.registerTool({
-		name: "quest_optimizer_set_profile",
-		label: "quest_optimizer_set_profile",
-		description: "Persist the active eval optimizer profile and its editable surfaces.",
-		promptSnippet: "Persist an eval optimizer profile surface update",
-		parameters: Type.Object({
-			profileId: Type.Optional(Type.String()),
-			target: Type.Optional(Type.Union([Type.Literal("repo"), Type.Literal("quest-core")])),
-			title: Type.Optional(Type.String()),
-			adoptedChange: Type.Optional(Type.String()),
-			promptSurfaces: Type.Optional(
-				Type.Object({
-					planningPolicy: Type.Optional(Type.String()),
-					workerPolicy: Type.Optional(Type.String()),
-					validatorCodeReviewPolicy: Type.Optional(Type.String()),
-					validatorUserSurfacePolicy: Type.Optional(Type.String()),
-					readinessPolicy: Type.Optional(Type.String()),
-					revisionPolicy: Type.Optional(Type.String()),
-				}),
-			),
-			modelPolicy: Type.Optional(
-				Type.Object({
-					preferSameModelFamily: Type.Optional(Type.Boolean()),
-					preferValidatorDivergence: Type.Optional(Type.Boolean()),
-				}),
-			),
-			verificationBudget: Type.Optional(
-				Type.Object({
-					workerAttempts: Type.Optional(Type.Number()),
-					validatorAttempts: Type.Optional(Type.Number()),
-					correctiveFeatureBudget: Type.Optional(Type.Number()),
-				}),
-			),
-			contextPolicy: Type.Optional(
-				Type.Object({
-					spillThresholdChars: Type.Optional(Type.Number()),
-					spillLongOutputsToReports: Type.Optional(Type.Boolean()),
-					maxInlineEvidenceLines: Type.Optional(Type.Number()),
-				}),
-			),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const optimizerState = await loadQuestOptimizerState(ctx.cwd, { ensure: true });
-			const profile = await loadQuestProfile(ctx.cwd, params.profileId ?? optimizerState.activeProfileId, {
-				ensure: true,
-				target: params.target ?? optimizerState.target,
-			});
-			const { applyQuestProfilePatch } = await import("./internal-profile-core.js");
-			const next = applyQuestProfilePatch(profile, {
-				promptSurfaces: params.promptSurfaces,
-				modelPolicy: params.modelPolicy,
-				verificationBudget: params.verificationBudget,
-				contextPolicy: params.contextPolicy,
-				adoptedChange: params.adoptedChange,
-			});
-			if (params.title) next.title = params.title;
-			if (params.target) next.target = params.target;
-			await saveQuestProfile(ctx.cwd, next);
-			deps.setCurrentProfile(next);
-			return {
-				content: [{ type: "text", text: `Updated eval profile ${next.id}.` }],
-				details: { profileId: next.id, target: next.target },
 			};
 		},
 	});

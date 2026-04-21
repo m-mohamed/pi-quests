@@ -18,6 +18,8 @@ import type {
 	QuestPlan,
 	QuestPlanRevisionRequest,
 	QuestProfile,
+	QuestProfilePatch,
+	QuestPromptSurfaceId,
 	QuestState,
 	ValidationAssertion,
 	ValidationReadiness,
@@ -102,8 +104,33 @@ type RunPiTaskResult = RunAgentTaskResult;
 type ValidatorPass = "code_review" | "user_surface";
 
 async function parseInternalQuestExperimentCandidate(text: string): Promise<QuestExperimentCandidate | null> {
-	const internalProfiles = await import("./internal-profile-core.js");
-	return internalProfiles.parseQuestExperimentCandidate(text);
+	const fenced = text.match(/```json\s*([\s\S]*?)```/i);
+	const candidateText = fenced ? fenced[1] : text;
+	try {
+		const parsed = JSON.parse(candidateText) as {
+			summary?: string;
+			rationale?: string;
+			generalizationNote?: string;
+			targetedTags?: QuestExperimentCandidate["targetedTags"];
+			targetedCaseIds?: string[];
+			promptSurfaceIds?: QuestPromptSurfaceId[];
+			patch?: QuestProfilePatch;
+		};
+		if (!parsed.summary || !parsed.rationale || !parsed.generalizationNote || !parsed.patch) return null;
+		return {
+			id: randomUUID(),
+			source: "agent",
+			summary: parsed.summary,
+			rationale: parsed.rationale,
+			generalizationNote: parsed.generalizationNote,
+			targetedTags: parsed.targetedTags ?? [],
+			targetedCaseIds: parsed.targetedCaseIds ?? [],
+			patch: parsed.patch,
+			promptSurfaceIds: parsed.promptSurfaceIds ?? [],
+		};
+	} catch {
+		return null;
+	}
 }
 
 function getFinalAssistantText(messages: Message[]): string {

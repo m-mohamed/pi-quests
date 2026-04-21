@@ -28,7 +28,7 @@ high-signal evals instead of ad hoc prompt tweaks.
 - Native Docker FrontierSWE sample runs complete end to end.
 - Legacy external harness integration code is removed from the live runtime.
 - Canonical community-trace counts live in `.pi/quests/evals/community-stats.json`.
-- Canonical eval status and baseline interpretation live in `docs/internal/baseline-results.md`.
+- Canonical eval status and baseline interpretation live in `packages/pi-quests-evals/docs/internal/baseline-results.md`.
 
 ## Working Agreement
 

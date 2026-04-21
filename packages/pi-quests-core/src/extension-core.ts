@@ -1,7 +1,7 @@
 import type { ContextUsage } from "@mariozechner/pi-coding-agent";
 import { resolve } from "node:path";
 import { getQuestPaths } from "./state-core.js";
-import type { QuestOptimizerState, QuestState } from "./types.js";
+import type { QuestState } from "./types.js";
 
 const PROTECTED_QUEST_FILES = new Set([
 	"active.json",
@@ -64,7 +64,6 @@ function shellSingleQuote(value: string): string {
 export function buildQuestShellEnvironment(
 	cwd: string,
 	quest: Pick<QuestState, "id" | "cwd" | "status"> | null,
-	optimizerState: Pick<QuestOptimizerState, "status" | "activeProfileId" | "evalFamily" | "evalDataset"> | null,
 ): Record<string, string> {
 	const env: Record<string, string> = {};
 	if (quest && quest.cwd === cwd) {
@@ -72,12 +71,6 @@ export function buildQuestShellEnvironment(
 		env.PI_QUESTS_ACTIVE_QUEST_ID = quest.id;
 		env.PI_QUESTS_ACTIVE_QUEST_STATUS = quest.status;
 		env.PI_QUESTS_ACTIVE_QUEST_ROOT = paths.questDir;
-	}
-	if (optimizerState) {
-		env.PI_QUESTS_OPTIMIZER_STATUS = optimizerState.status;
-		env.PI_QUESTS_OPTIMIZER_PROFILE_ID = optimizerState.activeProfileId;
-		if (optimizerState.evalFamily) env.PI_QUESTS_EVAL_FAMILY = optimizerState.evalFamily;
-		if (optimizerState.evalDataset) env.PI_QUESTS_EVAL_SUITE = optimizerState.evalDataset;
 	}
 	return env;
 }

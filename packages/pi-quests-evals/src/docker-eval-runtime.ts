@@ -17,6 +17,11 @@ interface RootPackageJson {
 	dependencies?: Record<string, string>;
 }
 
+interface RuntimeDependency {
+	name: string;
+	version: string;
+}
+
 function bundledPiVersion(): string {
 	const explicit = process.env.PI_QUESTS_PI_VERSION?.trim();
 	if (explicit) return explicit;
@@ -111,13 +116,28 @@ async function ensureBundledLinuxNodeRuntime(arch: LinuxNodeArch): Promise<strin
 	return runtimeDir;
 }
 
-async function loadRuntimeDependencies(): Promise<string[]> {
+async function loadRuntimeDependencies(): Promise<RuntimeDependency[]> {
 	const packageJson = JSON.parse(
 		await readFile(join(PACKAGE_ROOT, "package.json"), "utf-8"),
 	) as RootPackageJson;
 	return Object.entries(packageJson.dependencies ?? {})
 		.filter(([name]) => name !== "tsx")
-		.map(([name, version]) => `${name}@${version}`);
+		.map(([name, version]) => ({ name, version }));
+}
+
+function packWorkspacePackage(packageDir: string, outputDir: string): string {
+	const filename = execSync(`npm pack --pack-destination ${JSON.stringify(outputDir)}`, {
+		cwd: packageDir,
+		encoding: "utf-8",
+		stdio: ["ignore", "pipe", "pipe"],
+	})
+		.trim()
+		.split("\n")
+		.pop();
+	if (!filename) {
+		throw new Error(`Failed to pack workspace package at ${packageDir}.`);
+	}
+	return join(outputDir, filename);
 }
 
 export function detectLinuxNodeArch(): LinuxNodeArch {
@@ -181,9 +201,25 @@ export async function materializeQuestBundle(rootDir = PACKAGE_ROOT): Promise<Ma
 	await runCommand("npx", ["tsc", "-p", tsconfigPath], rootDir);
 
 	const runtimeDeps = await loadRuntimeDependencies();
+	const bundledDependencyArgs = runtimeDeps.map(({ name, version }) => {
+		if (name === "@m-mohamed/pi-quests-core") {
+			const corePackageDir = resolve(PACKAGE_ROOT, "..", "pi-quests-core");
+			return packWorkspacePackage(corePackageDir, outputDir);
+		}
+		return `${name}@${version}`;
+	});
 	await runCommand(
 		"npm",
-		["install", "--prefix", bundlePath, "--omit=dev", "--no-fund", "--no-audit", `@mariozechner/pi-coding-agent@${piVersion}`, ...runtimeDeps],
+		[
+			"install",
+			"--prefix",
+			bundlePath,
+			"--omit=dev",
+			"--no-fund",
+			"--no-audit",
+			`@mariozechner/pi-coding-agent@${piVersion}`,
+			...bundledDependencyArgs,
+		],
 		rootDir,
 	);
 

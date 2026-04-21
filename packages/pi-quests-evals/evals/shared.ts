@@ -46,6 +46,14 @@ export function defaultEvalModel(): string {
 	return readPiDefaultModel() ?? DEFAULT_MODEL;
 }
 
+export function resolveEvalWorkingDirectory(): string {
+	const explicit = process.env.QUEST_EVAL_CWD?.trim();
+	if (explicit) return resolve(explicit);
+	const initCwd = process.env.INIT_CWD?.trim();
+	if (initCwd) return resolve(initCwd);
+	return process.cwd();
+}
+
 export function parseModelChoice(modelSpec: string, thinkingLevel = "high"): ModelChoice {
 	const splitAt = modelSpec.indexOf("/");
 	if (splitAt <= 0 || splitAt === modelSpec.length - 1) {

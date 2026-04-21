@@ -52,14 +52,6 @@ const STALE_OPTIMIZER_DIRS = ["datasets", "experiments", "baselines", "reports"]
 const PRUNE_LOG_AGE_MS = 1000 * 60 * 60 * 24 * 14;
 const TERMINAL_STATUSES = new Set<QuestStatus>(["completed", "aborted"]);
 
-async function loadInternalProfileCore(): Promise<null | typeof import("./internal-profile-core.js")> {
-	try {
-		return await import("./internal-profile-core.js");
-	} catch {
-		return null;
-	}
-}
-
 export function projectIdFor(cwd: string): string {
 	const hash = createHash("sha1").update(cwd).digest("hex").slice(0, 10);
 	const name = basename(cwd).replace(/[^a-zA-Z0-9._-]+/g, "-") || "project";
@@ -676,10 +668,7 @@ export async function loadQuestProfile(
 	const state = await loadQuestOptimizerState(cwd, { ensure: options.ensure });
 	const resolvedProfileId = profileId ?? state.activeProfileId;
 	const resolvedTarget = options.target ?? state.target;
-	const internalProfiles = await loadInternalProfileCore();
-	const defaults = internalProfiles
-		? internalProfiles.defaultInternalQuestProfile(projectIdFor(cwd), resolvedTarget)
-		: defaultQuestProfile(projectIdFor(cwd), resolvedTarget);
+	const defaults = defaultQuestProfile(projectIdFor(cwd), resolvedTarget);
 	defaults.id = resolvedProfileId;
 	const paths = getQuestOptimizerPaths(cwd);
 	const file = resolvedProfileId === state.activeProfileId ? paths.currentProfileFile : profileFile(paths, resolvedProfileId);
@@ -695,9 +684,7 @@ export async function loadQuestProfile(
 	}
 	try {
 		const raw = await readFile(file, "utf-8");
-		return internalProfiles
-			? internalProfiles.normalizeInternalQuestProfile(JSON.parse(raw) as Partial<QuestProfile>, projectIdFor(cwd), resolvedTarget)
-			: normalizeQuestProfile(JSON.parse(raw) as Partial<QuestProfile>, projectIdFor(cwd), resolvedTarget);
+		return normalizeQuestProfile(JSON.parse(raw) as Partial<QuestProfile>, projectIdFor(cwd), resolvedTarget);
 	} catch {
 		return defaults;
 	}
@@ -705,10 +692,7 @@ export async function loadQuestProfile(
 
 export async function saveQuestProfile(cwd: string, profile: QuestProfile): Promise<void> {
 	const paths = await ensureOptimizerRoot(cwd);
-	const internalProfiles = await loadInternalProfileCore();
-	const normalized = internalProfiles
-		? internalProfiles.normalizeInternalQuestProfile(profile, projectIdFor(cwd), profile.target)
-		: normalizeQuestProfile(profile, projectIdFor(cwd), profile.target);
+	const normalized = normalizeQuestProfile(profile, projectIdFor(cwd), profile.target);
 	normalized.updatedAt = Date.now();
 	await writeAtomicFile(profileFile(paths, normalized.id), `${JSON.stringify(normalized, null, 2)}\n`);
 	await writeAtomicFile(paths.currentProfileFile, `${JSON.stringify(normalized, null, 2)}\n`);
@@ -721,7 +705,6 @@ export async function saveQuestProfile(cwd: string, profile: QuestProfile): Prom
 export async function listQuestProfiles(cwd: string): Promise<QuestProfile[]> {
 	const paths = getQuestOptimizerPaths(cwd);
 	if (!existsSync(paths.profilesDir)) return [];
-	const internalProfiles = await loadInternalProfileCore();
 	const entries = await readdir(paths.profilesDir);
 	const profiles: QuestProfile[] = [];
 	for (const entry of entries) {
@@ -729,9 +712,7 @@ export async function listQuestProfiles(cwd: string): Promise<QuestProfile[]> {
 		try {
 			const raw = await readFile(join(paths.profilesDir, entry), "utf-8");
 			profiles.push(
-				internalProfiles
-					? internalProfiles.normalizeInternalQuestProfile(JSON.parse(raw) as Partial<QuestProfile>, projectIdFor(cwd))
-					: normalizeQuestProfile(JSON.parse(raw) as Partial<QuestProfile>, projectIdFor(cwd)),
+				normalizeQuestProfile(JSON.parse(raw) as Partial<QuestProfile>, projectIdFor(cwd)),
 			);
 		} catch {
 			continue;

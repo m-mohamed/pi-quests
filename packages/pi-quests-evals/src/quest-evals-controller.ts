@@ -24,7 +24,6 @@ interface QuestEvalsControllerDeps extends MutableOptimizerState {
 	ctx: ExtensionContext;
 	emitNote: (content: string, level?: "info" | "warning" | "error") => Promise<void>;
 	applyQuestUi: () => Promise<void>;
-	internalModeEnabled: boolean;
 	loadFrontierOptimizer?: typeof loadFrontierOptimizer;
 	loadInternalUi?: typeof loadInternalUi;
 }
@@ -39,10 +38,6 @@ function syncOptimizerStatus(state: MutableOptimizerState, optimizerState: Quest
 }
 
 export async function openQuestEvalsControl(deps: QuestEvalsControllerDeps): Promise<void> {
-	if (!deps.internalModeEnabled) {
-		await deps.emitNote("Quest evals are maintainer-only and not part of the public package surface.", "warning");
-		return;
-	}
 	let optimizer;
 	try {
 		optimizer = await (deps.loadFrontierOptimizer ?? loadFrontierOptimizer)();
@@ -96,10 +91,6 @@ export async function openQuestEvalsControl(deps: QuestEvalsControllerDeps): Pro
 }
 
 export async function handleQuestEvalsCommand(args: string, deps: QuestEvalsControllerDeps): Promise<void> {
-	if (!deps.internalModeEnabled) {
-		await deps.emitNote("Quest evals are maintainer-only and not part of the public package surface.", "warning");
-		return;
-	}
 	let optimizer;
 	try {
 		optimizer = await (deps.loadFrontierOptimizer ?? loadFrontierOptimizer)();

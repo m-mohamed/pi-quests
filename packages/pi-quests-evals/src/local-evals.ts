@@ -86,7 +86,7 @@ export async function discoverLocalEvalManifest(dataset = LOCAL_DATASET, runMode
 		sourceFingerprint: `local:${dataset}:${items.map((item) => item.id).join(",")}`,
 		items,
 		tagSummary: summarizeTags(items),
-		notes: ["Quest-native local eval suites from src/evals-core.ts."],
+		notes: ["Quest-native local eval suites from packages/pi-quests-evals/src/evals-core.ts."],
 	};
 }
 
@@ -140,7 +140,7 @@ export async function runLocalEvalSplit(
 	}
 
 	const totalScore = results.reduce((total, result) => total + result.score, 0);
-	const maxScore = results.reduce((total, result) => total + result.maxScore, 0);
+	const maxScore = results.reduce((total, result) => total + (result.maxScore ?? 0), 0);
 	const totalCost = results.reduce((total, result) => total + result.totalCost, 0);
 	const totalDurationMs = results.reduce((total, result) => total + result.durationMs, 0);
 	const passed = results.filter((result) => result.status === "passed").length;

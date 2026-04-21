@@ -1,6 +1,6 @@
 # Community Trace Analyzer Specification
 
-> Status: Implemented in `src/trace-analyzer.ts`
+> Status: Implemented in `packages/pi-quests-evals/src/trace-analyzer.ts`
 > Canonical output: `.pi/quests/evals/community-stats.json`
 > Canonical input: `.pi/quests/evals/community-traces/`
 

@@ -404,7 +404,7 @@ async function runAgentPhase(input: {
 		args.push("-e", `${entry.name}=${entry.value}`);
 	}
 	const headlessCommand = [
-		"/opt/quest-node/bin/node /opt/quest-package/dist/quest-headless.js run",
+		"/opt/quest-node/bin/node /opt/quest-package/dist/quest-eval-headless.js run",
 		"--instruction-file /opt/frontierswe/instruction.md",
 		"--cwd /app",
 		`--model ${input.modelChoice.provider}/${input.modelChoice.model}`,
@@ -422,7 +422,6 @@ async function runAgentPhase(input: {
 		[
 			"export PATH=/opt/quest-node/bin:$PATH",
 			"export NODE_PATH=/opt/quest-package/node_modules",
-			"export PI_QUESTS_INTERNAL=1",
 			headlessCommand,
 		].join(" && "),
 	);
@@ -433,9 +432,9 @@ async function runAgentPhase(input: {
 		timeoutMs: input.task.timeoutSec * 1000,
 		onProcessStart: input.onProcessStart,
 	});
-	const stdoutFile = await writeArtifact(join(input.logDir, "quest-headless.stdout"), result.stdout);
-	const stderrFile = await writeArtifact(join(input.logDir, "quest-headless.stderr"), result.stderr);
-	const outputFile = await writeArtifact(join(input.logDir, "quest-headless-output.json"), result.stdout);
+	const stdoutFile = await writeArtifact(join(input.logDir, "quest-eval-headless.stdout"), result.stdout);
+	const stderrFile = await writeArtifact(join(input.logDir, "quest-eval-headless.stderr"), result.stderr);
+	const outputFile = await writeArtifact(join(input.logDir, "quest-eval-headless-output.json"), result.stdout);
 	let parsed: QuestHeadlessEnvelope | null = null;
 	try {
 		parsed = JSON.parse(result.stdout) as QuestHeadlessEnvelope;
@@ -572,12 +571,12 @@ export async function runFrontiersweSplit(options: {
 				modelChoice: `${options.modelChoice.provider}/${options.modelChoice.model}:${options.modelChoice.thinkingLevel}`,
 				evalDir,
 				questOutputFile: agent.outputFile,
-				artifactPaths: [
-					agent.outputFile,
-					join(evalDir, "agent", "quest-headless.stdout"),
-					join(evalDir, "agent", "quest-headless.stderr"),
-					join(evalDir, "verifier", "test.stdout"),
-					join(evalDir, "verifier", "test.stderr"),
+					artifactPaths: [
+						agent.outputFile,
+						join(evalDir, "agent", "quest-eval-headless.stdout"),
+						join(evalDir, "agent", "quest-eval-headless.stderr"),
+						join(evalDir, "verifier", "test.stdout"),
+						join(evalDir, "verifier", "test.stderr"),
 					join(evalDir, "verifier", "reward.json"),
 					join(evalDir, "verifier", "reward.txt"),
 				].filter((file) => existsSync(file)),
@@ -608,7 +607,7 @@ export async function runFrontiersweSplit(options: {
 	}
 
 	const totalScore = results.reduce((total, result) => total + result.score, 0);
-	const maxScore = results.reduce((total, result) => total + result.maxScore, 0);
+	const maxScore = results.reduce((total, result) => total + (result.maxScore ?? 0), 0);
 	const totalCost = results.reduce((total, result) => total + result.totalCost, 0);
 	const totalDurationMs = results.reduce((total, result) => total + result.durationMs, 0);
 	const passed = results.filter((result) => result.status === "passed").length;

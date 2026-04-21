@@ -6,7 +6,7 @@
 npm run internal:eval:local
 ```
 
-This runs the built-in suites from `src/evals-core.ts`.
+This runs the built-in suites from `packages/pi-quests-evals/src/evals-core.ts`.
 
 ## FrontierSWE Sample
 
@@ -27,7 +27,7 @@ Use a local checkout of the upstream FrontierSWE repository for `frontierswe@pub
 ## Quest Headless Internal Eval Mode
 
 ```bash
-PI_QUESTS_INTERNAL=1 node --import tsx src/quest-headless.ts run \
+quest-eval-headless run \
   --instruction "Finish the eval task" \
   --eval frontierswe \
   --suite frontierswe-sample@v1 \

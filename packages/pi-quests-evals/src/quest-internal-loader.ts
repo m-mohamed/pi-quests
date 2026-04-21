@@ -1,4 +1,3 @@
-import { internalModeEnabled } from "./internal-mode.js";
 import { defaultQuestProfile } from "./profile-core.js";
 import { loadQuestProfile, loadQuestOptimizerState, projectIdFor } from "./state-core.js";
 import type { QuestProfile, QuestOptimizerState } from "./types.js";
@@ -28,12 +27,6 @@ export async function loadRuntimeProfile(
 	cwd: string,
 	options?: { ensure?: boolean; profileId?: string; target?: QuestOptimizerState["target"] },
 ): Promise<{ optimizerState: QuestOptimizerState | null; profile: QuestProfile }> {
-	if (!internalModeEnabled()) {
-		return {
-			optimizerState: null,
-			profile: defaultQuestProfile(projectIdFor(cwd), options?.target ?? "repo"),
-		};
-	}
 	const optimizerState = await loadQuestOptimizerState(cwd, options?.ensure ? { ensure: true } : undefined);
 	const profile =
 		(await loadQuestProfile(cwd, options?.profileId ?? optimizerState.activeProfileId, {

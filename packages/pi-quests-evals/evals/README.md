@@ -22,7 +22,7 @@ The eval posture is intentionally split into three layers:
 
 4. Scenario evals
    - slower
-   - exercise live Pi subprocesses and fixture repos
+   - exercise live Pi SDK sessions and fixture repos
    - cover compatibility, proposal capture, weak validation warnings, abort/recovery, and validator-triggered replans
 
 ## Commands

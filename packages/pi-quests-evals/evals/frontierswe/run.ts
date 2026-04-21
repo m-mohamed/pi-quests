@@ -1,4 +1,4 @@
-import { credentialsAvailableForModel, defaultEvalModel, parseModelChoice } from "../shared.js";
+import { credentialsAvailableForModel, defaultEvalModel, parseModelChoice, resolveEvalWorkingDirectory } from "../shared.js";
 import { defaultFrontiersweDataset, discoverFrontiersweManifest, resolveFrontiersweRunMode, runFrontiersweSplit } from "../../src/frontierswe-evals.js";
 import type { QuestEvalWorkItem } from "../../src/types.js";
 
@@ -41,8 +41,9 @@ async function main(argv: string[]): Promise<void> {
 	if (items.length === 0) {
 		throw new Error(taskId ? `FrontierSWE task not found: ${taskId}` : "No FrontierSWE tasks discovered.");
 	}
+	const cwd = resolveEvalWorkingDirectory();
 	const scorecard = await runFrontiersweSplit({
-		cwd: process.cwd(),
+		cwd,
 		modelChoice: parseModelChoice(model, thinking),
 		profileId,
 		split: {

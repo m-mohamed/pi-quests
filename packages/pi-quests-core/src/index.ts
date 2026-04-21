@@ -24,13 +24,8 @@ import {
 	protectedQuestArtifactReason,
 	questToolResultGuidance,
 } from "./extension-core.js";
-import { internalModeEnabled } from "./internal-mode.js";
 import { traceBundleFromPlanningSession, traceBundleFromWorkerRun } from "./profile-core.js";
 import { mergeRemainingPlan, parseQuestPlanText, planningInstructions } from "./plan-core.js";
-import {
-	loadInternalUi,
-	loadRuntimeProfile,
-} from "./quest-internal-loader.js";
 import {
 	activeProfileFor,
 	appendCorrectiveFeatures,
@@ -50,7 +45,7 @@ import {
 	syncQuestConfig,
 	synthesizeAssertionsForQuestPlan,
 } from "./quest-runtime-helpers.js";
-import { handleQuestEvalsCommand as runQuestEvalsCommand, openQuestEvalsControl as showQuestEvalsControl } from "./quest-evals-controller.js";
+import { getQuestSubcommand, listQuestSubcommands } from "./quest-subcommands.js";
 import { applyQuestUi as renderQuestUi } from "./quest-ui-controller.js";
 import { registerQuestTools } from "./quest-tools.js";
 import { describeActiveRun, markQuestAborted, prepareQuestForResume, terminateQuestProcess } from "./runtime-core.js";
@@ -63,11 +58,8 @@ import {
 	listProjectQuests,
 	loadActiveQuest,
 	loadLearnedWorkflows,
-	loadQuestOptimizerState,
 	loadQuest,
 	pruneQuestStorage,
-	saveQuestOptimizerState,
-	saveQuestProfile,
 	saveLearnedWorkflows,
 	saveQuest,
 	switchActiveQuest,
@@ -82,7 +74,6 @@ import type {
 	LiveRunSnapshot,
 	ModelChoice,
 	QuestFeature,
-	QuestOptimizerState,
 	QuestMilestone,
 	QuestProfile,
 	QuestRole,
@@ -120,15 +111,12 @@ export default function questExtension(pi: ExtensionAPI) {
 	let currentQuest: QuestState | null = null;
 	let currentWorkflows: LearnedWorkflow[] = [];
 	let currentProfile: QuestProfile | null = null;
-	let currentOptimizerState: QuestOptimizerState | null = null;
 	let liveRun: LiveRunSnapshot | null = null;
-	let optimizerLiveRun: LiveRunSnapshot | null = null;
 	let lastContextUsage: ContextUsage | null = null;
 	let planningEvents: WorkerEventRecord[] = [];
 	let planningStartedAt = 0;
 	let questModeEnabled = false;
 	let planningTurnActive = false;
-	let activeOptimizerPid: number | undefined;
 	let pendingQuestControlOpen = false;
 
 	function persistQuestMode() {
@@ -141,10 +129,7 @@ export default function questExtension(pi: ExtensionAPI) {
 			widgetKey: WIDGET_KEY,
 			questModeEnabled,
 			lastContextUsage,
-			currentOptimizerState,
 			liveRun,
-			optimizerLiveRun,
-			loadInternalUi,
 		});
 	}
 
@@ -170,9 +155,7 @@ export default function questExtension(pi: ExtensionAPI) {
 	async function loadQuestForContext(ctx: ExtensionContext) {
 		currentQuest = await loadActiveQuest(ctx.cwd);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
-		const runtimeProfile = await loadRuntimeProfile(ctx.cwd);
-		currentOptimizerState = runtimeProfile.optimizerState;
-		currentProfile = runtimeProfile.profile;
+		currentProfile = activeProfileFor(ctx.cwd, null);
 		if (!currentQuest || currentQuest.status !== "planning") {
 			liveRun = null;
 			planningEvents = [];
@@ -190,9 +173,7 @@ export default function questExtension(pi: ExtensionAPI) {
 	async function ensureCurrentQuest(ctx: ExtensionContext): Promise<QuestState | null> {
 		currentQuest = await loadActiveQuest(ctx.cwd);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
-		const runtimeProfile = await loadRuntimeProfile(ctx.cwd);
-		currentOptimizerState = runtimeProfile.optimizerState;
-		currentProfile = runtimeProfile.profile;
+		currentProfile = activeProfileFor(ctx.cwd, null);
 		if (!currentQuest) {
 			await emitNote(pi, ctx, "No active quest in this repo. Use `/quest new <goal>` first.", "warning");
 			return null;
@@ -204,10 +185,7 @@ export default function questExtension(pi: ExtensionAPI) {
 		const modelChoice = createDefaultModelChoice(ctx.model ?? null, pi.getThinkingLevel() as ThinkingLevel);
 		currentQuest = await createQuest(ctx.cwd, goal, modelChoice);
 		currentWorkflows = await loadLearnedWorkflows(ctx.cwd);
-		const runtimeProfile = await loadRuntimeProfile(ctx.cwd, { ensure: internalModeEnabled() });
-		currentOptimizerState = runtimeProfile.optimizerState;
-		currentProfile = runtimeProfile.profile;
-		if (internalModeEnabled()) await saveQuestProfile(ctx.cwd, currentProfile);
+		currentProfile = activeProfileFor(ctx.cwd, null);
 		await pruneQuestStorage(ctx.cwd);
 		await setQuestMode(ctx, true);
 		await emitNote(pi, ctx, `Quest created: ${goal}`);
@@ -319,60 +297,6 @@ export default function questExtension(pi: ExtensionAPI) {
 		await emitNote(pi, ctx, `Active quest set to "${selectedQuest.title}".`);
 	}
 
-	async function openQuestEvalsControl(ctx: ExtensionContext) {
-		await showQuestEvalsControl({
-			pi,
-			ctx,
-			getCurrentQuest: () => currentQuest,
-			getCurrentOptimizerState: () => currentOptimizerState,
-			getCurrentProfile: () => currentProfile,
-			getOptimizerLiveRun: () => optimizerLiveRun,
-			getActiveOptimizerPid: () => activeOptimizerPid,
-			setCurrentOptimizerState: (state) => {
-				currentOptimizerState = state;
-			},
-			setCurrentProfile: (profile) => {
-				currentProfile = profile;
-			},
-			setOptimizerLiveRun: (snapshot) => {
-				optimizerLiveRun = snapshot;
-			},
-			setActiveOptimizerPid: (pid) => {
-				activeOptimizerPid = pid;
-			},
-			emitNote: async (content, level = "info") => emitNote(pi, ctx, content, level),
-			applyQuestUi: async () => applyQuestUi(ctx, currentQuest),
-			internalModeEnabled: internalModeEnabled(),
-		});
-	}
-
-	async function handleQuestEvalsCommand(args: string, ctx: ExtensionContext) {
-		await runQuestEvalsCommand(args, {
-			pi,
-			ctx,
-			getCurrentQuest: () => currentQuest,
-			getCurrentOptimizerState: () => currentOptimizerState,
-			getCurrentProfile: () => currentProfile,
-			getOptimizerLiveRun: () => optimizerLiveRun,
-			getActiveOptimizerPid: () => activeOptimizerPid,
-			setCurrentOptimizerState: (state) => {
-				currentOptimizerState = state;
-			},
-			setCurrentProfile: (profile) => {
-				currentProfile = profile;
-			},
-			setOptimizerLiveRun: (snapshot) => {
-				optimizerLiveRun = snapshot;
-			},
-			setActiveOptimizerPid: (pid) => {
-				activeOptimizerPid = pid;
-			},
-			emitNote: async (content, level = "info") => emitNote(pi, ctx, content, level),
-			applyQuestUi: async () => applyQuestUi(ctx, currentQuest),
-			internalModeEnabled: internalModeEnabled(),
-		});
-	}
-
 	async function queueSteeringNote(ctx: ExtensionContext, quest: QuestState, note: string, source: "command" | "quest-mode"): Promise<QuestState> {
 		const originalStatus = quest.status;
 		quest.steeringNotes.push(note);
@@ -443,7 +367,7 @@ export default function questExtension(pi: ExtensionAPI) {
 			requests,
 			currentOrDefaultModel(quest, "orchestrator"),
 			currentWorkflows,
-			activeProfileFor(quest.cwd, currentProfile, currentOptimizerState?.target),
+			activeProfileFor(quest.cwd, currentProfile),
 			undefined,
 			async (snapshot) => {
 				liveRun = snapshot;
@@ -461,7 +385,7 @@ export default function questExtension(pi: ExtensionAPI) {
 			},
 		);
 		await writeWorkerRun(quest.cwd, quest.id, run);
-		await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, run, activeProfileFor(quest.cwd, currentProfile, currentOptimizerState?.target)));
+		await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, run, activeProfileFor(quest.cwd, currentProfile)));
 		quest.recentRuns = trimRecentRuns([run, ...quest.recentRuns]);
 		liveRun = null;
 		await persistLearnedWorkflows(run);
@@ -521,7 +445,7 @@ export default function questExtension(pi: ExtensionAPI) {
 			currentOrDefaultModel(quest, "validator"),
 			currentWorkflows,
 			pass,
-			activeProfileFor(quest.cwd, currentProfile, currentOptimizerState?.target),
+			activeProfileFor(quest.cwd, currentProfile),
 			undefined,
 			async (snapshot) => {
 				liveRun = snapshot;
@@ -540,7 +464,7 @@ export default function questExtension(pi: ExtensionAPI) {
 		);
 		liveRun = null;
 		await writeWorkerRun(quest.cwd, quest.id, validator);
-		await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, validator, activeProfileFor(quest.cwd, currentProfile, currentOptimizerState?.target)));
+		await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, validator, activeProfileFor(quest.cwd, currentProfile)));
 		quest.recentRuns = trimRecentRuns([validator, ...quest.recentRuns]);
 		await persistLearnedWorkflows(validator);
 		quest.activeRun = undefined;
@@ -595,7 +519,7 @@ export default function questExtension(pi: ExtensionAPI) {
 					milestone,
 					currentOrDefaultModel(quest, "worker"),
 					currentWorkflows,
-					activeProfileFor(quest.cwd, currentProfile, currentOptimizerState?.target),
+					activeProfileFor(quest.cwd, currentProfile),
 					undefined,
 					async (snapshot) => {
 						liveRun = snapshot;
@@ -614,7 +538,7 @@ export default function questExtension(pi: ExtensionAPI) {
 				);
 				liveRun = null;
 				await writeWorkerRun(quest.cwd, quest.id, run);
-				await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, run, activeProfileFor(quest.cwd, currentProfile, currentOptimizerState?.target)));
+				await writeQuestTraceBundle(quest.cwd, traceBundleFromWorkerRun(quest, run, activeProfileFor(quest.cwd, currentProfile)));
 				quest.recentRuns = trimRecentRuns([run, ...quest.recentRuns]);
 				await persistLearnedWorkflows(run);
 				quest.activeRun = undefined;
@@ -725,17 +649,17 @@ export default function questExtension(pi: ExtensionAPI) {
 
 		const [subcommand, ...rest] = trimmed.split(/\s+/);
 		const remainder = rest.join(" ").trim();
+		const registeredSubcommand = getQuestSubcommand(subcommand);
+		if (registeredSubcommand) {
+			await registeredSubcommand.handler(remainder, {
+				pi,
+				ctx,
+				emitNote: async (content, level = "info") => emitNote(pi, ctx, content, level),
+			});
+			return;
+		}
 
 		switch (subcommand) {
-			case "evals": {
-				if (!internalModeEnabled()) {
-					await emitNote(pi, ctx, "Quest evals are maintainer-only and not part of the public package surface.", "warning");
-					return;
-				}
-				await handleQuestEvalsCommand(remainder, ctx);
-				return;
-			}
-
 			case "new": {
 				if (!remainder) {
 					await emitNote(pi, ctx, "Usage: /quest new <goal>", "warning");
@@ -884,10 +808,12 @@ export default function questExtension(pi: ExtensionAPI) {
 			}
 
 			default: {
+				const registered = listQuestSubcommands().map((provider) => `/quest ${provider.name}`);
+				const extra = registered.length > 0 ? `, ${registered.join(", ")}` : "";
 				await emitNote(
 					pi,
 					ctx,
-					"Unknown /quest subcommand. Use /quest, /quest new <goal>, /quest enter, /quest exit, /quest accept, /quest pause, /quest resume, /quest abort, or /quest model <role> <provider/model[:thinking]>.",
+					`Unknown /quest subcommand. Use /quest, /quest new <goal>, /quest enter, /quest exit, /quest accept, /quest pause, /quest resume, /quest abort, or /quest model <role> <provider/model[:thinking]>${extra}.`,
 					"warning",
 				);
 			}
@@ -917,19 +843,21 @@ export default function questExtension(pi: ExtensionAPI) {
 		setCurrentQuest: (quest) => {
 			currentQuest = quest;
 		},
-		setCurrentProfile: (profile) => {
-			currentProfile = profile;
-		},
 		proposalReady,
 		synthesizeAssertionsForQuestPlan,
-		internalModeEnabled: internalModeEnabled(),
 	});
 
 	pi.registerCommand("quest", {
 		description: "Open Quest Control or operate on the active quest",
 		getArgumentCompletions: (prefix) => {
 			const options = ["new", "enter", "exit", "accept", "pause", "resume", "abort", "model"];
-			return options.filter((item) => item.startsWith(prefix)).map((item) => ({ value: item, label: item }));
+			const dynamic = listQuestSubcommands()
+				.filter((provider) => provider.name.startsWith(prefix))
+				.map((provider) => ({ value: provider.name, label: provider.description }));
+			return [
+				...options.filter((item) => item.startsWith(prefix)).map((item) => ({ value: item, label: item })),
+				...dynamic,
+			];
 		},
 		handler: handleQuestCommand,
 	});
@@ -956,15 +884,6 @@ export default function questExtension(pi: ExtensionAPI) {
 			await showQuestList(ctx);
 		},
 	});
-
-	if (internalModeEnabled()) {
-		pi.registerShortcut(Key.ctrlAlt("t"), {
-			description: "Open Quest Evals",
-			handler: async (ctx) => {
-				await openQuestEvalsControl(ctx);
-			},
-		});
-	}
 
 	pi.on("resources_discover", async (_event, ctx) => {
 		const activeQuest = await loadActiveQuest(ctx.cwd);
@@ -994,8 +913,7 @@ export default function questExtension(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (isToolCallEventType("bash", event)) {
 			const quest = currentQuest ?? (await loadActiveQuest(ctx.cwd));
-			const optimizerState = currentOptimizerState ?? (internalModeEnabled() ? await loadQuestOptimizerState(ctx.cwd, { ensure: true }) : null);
-			const env = buildQuestShellEnvironment(ctx.cwd, quest, optimizerState);
+			const env = buildQuestShellEnvironment(ctx.cwd, quest);
 			if (Object.keys(env).length > 0) {
 				event.input.command = prefixQuestShellCommand(event.input.command, env);
 			}
@@ -1068,7 +986,7 @@ export default function questExtension(pi: ExtensionAPI) {
 		return {
 			message: {
 				customType: "pi-quest-planning",
-				content: planningInstructions(currentQuest, currentWorkflows, activeProfileFor(ctx.cwd, currentProfile, currentOptimizerState?.target)),
+				content: planningInstructions(currentQuest, currentWorkflows, activeProfileFor(ctx.cwd, currentProfile)),
 				display: false,
 			},
 		};
@@ -1104,7 +1022,7 @@ export default function questExtension(pi: ExtensionAPI) {
 		if (text && currentQuest.status === "planning") {
 			await markPlanReadyFromText(ctx, currentQuest, text);
 		}
-		const planningProfile = activeProfileFor(ctx.cwd, currentProfile, currentOptimizerState?.target);
+		const planningProfile = activeProfileFor(ctx.cwd, currentProfile);
 		await writeQuestTraceBundle(
 			ctx.cwd,
 			traceBundleFromPlanningSession(

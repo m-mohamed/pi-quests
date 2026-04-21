@@ -13,8 +13,8 @@
     "pack:check": "npm run pack:check -w @m-mohamed/pi-quests && npm run pack:check -w @m-mohamed/pi-quests-evals",
     "check": "npm run check -w @m-mohamed/pi-quests-core && npm run check -w @m-mohamed/pi-quests && npm run check -w @m-mohamed/pi-quests-evals",
     "internal:eval:local": "npm run internal:eval:local -w @m-mohamed/pi-quests-evals",
-    "internal:eval:frontierswe:sample": "npm run internal:eval:frontierswe:sample -w @m-mohamed/pi-quests-evals",
-    "internal:eval:frontierswe:full": "npm run internal:eval:frontierswe:full -w @m-mohamed/pi-quests-evals"
+    "internal:eval:frontierswe:sample": "npm run internal:eval:frontierswe:sample -w @m-mohamed/pi-quests-evals --",
+    "internal:eval:frontierswe:full": "npm run internal:eval:frontierswe:full -w @m-mohamed/pi-quests-evals --"
   },
   "devDependencies": {
     "@mariozechner/pi-ai": "^0.68.0",

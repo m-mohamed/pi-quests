@@ -1,4 +1,3 @@
-import { assertInternalMode } from "./internal-mode.js";
 import { defaultInternalQuestProfile } from "./internal-profile-core.js";
 import { loadQuestProfile, loadQuestOptimizerState } from "./state-core.js";
 import {
@@ -22,7 +21,6 @@ export async function runInternalQuestHeadless(
 	input: QuestInternalHeadlessRunInput,
 	executors: QuestHeadlessExecutors = DEFAULT_HEADLESS_EXECUTORS,
 ): Promise<QuestInternalHeadlessRunResult> {
-	assertInternalMode("Internal Quest headless surfaces");
 	return runQuestHeadlessExecution(
 		input,
 		{

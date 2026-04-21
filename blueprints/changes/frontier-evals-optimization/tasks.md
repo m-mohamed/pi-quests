@@ -38,7 +38,7 @@ The core frontier infrastructure is now implemented in the Quest extension:
   - `session_info.name`
   - real compaction payloads
   - unknown event passthrough
-- [x] Implement `src/trace-analyzer.ts`
+- [x] Implement `packages/pi-quests-evals/src/trace-analyzer.ts`
 - [x] Count only files whose first record is `type: "session"`
 - [x] Exclude non-Pi/non-session files from canonical per-source stats
 - [x] Write canonical aggregate stats to `.pi/quests/evals/community-stats.json`
@@ -109,7 +109,7 @@ The core frontier infrastructure is now implemented in the Quest extension:
 ### 1. Full-corpus FrontierSWE baseline
 
 - [ ] Run `/quest evals baseline` against a real `frontierswe@public-v1` checkout and archive candidate `000` with full eval artifacts
-- [ ] Record the resulting eval metrics in `docs/internal/baseline-results.md`
+- [ ] Record the resulting eval metrics in `packages/pi-quests-evals/docs/internal/baseline-results.md`
 
 ### 2. First real optimization iteration
 

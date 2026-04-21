@@ -1,4 +1,4 @@
-import { defaultEvalModel, parseModelChoice } from "../shared.js";
+import { defaultEvalModel, parseModelChoice, resolveEvalWorkingDirectory } from "../shared.js";
 import { defaultLocalEvalDataset, discoverLocalEvalManifest, resolveLocalEvalRunMode, runLocalEvalSplit } from "../../src/local-evals.js";
 
 function usage(): string {
@@ -17,8 +17,9 @@ async function main(argv: string[]): Promise<void> {
 	const modelChoice = parseModelChoice(model, thinking);
 	const runMode = resolveLocalEvalRunMode(dataset);
 	const manifest = await discoverLocalEvalManifest(dataset, runMode);
+	const cwd = resolveEvalWorkingDirectory();
 	const scorecard = await runLocalEvalSplit(
-		process.cwd(),
+		cwd,
 		modelChoice,
 		{
 			id: `${dataset}-search`,

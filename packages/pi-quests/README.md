@@ -12,7 +12,7 @@ Pi core stays upstream. Quest is your package. That means:
 
 ## Preview
 
-![Quest Control](https://raw.githubusercontent.com/m-mohamed/pi-quests/main/docs/quest-control.png)
+![Quest Control](https://raw.githubusercontent.com/m-mohamed/pi-quests/main/packages/pi-quests/docs/quest-control.png)
 
 ## Installation
 
@@ -21,7 +21,7 @@ Pi Quests now targets the current Pi package line: `@mariozechner/pi-*` `0.68.0+
 Install from a local checkout:
 
 ```bash
-pi install /Users/mohamedmohamed/research/pi-quests
+pi install /Users/mohamedmohamed/research/pi-quests/packages/pi-quests
 ```
 
 Install from git:
@@ -39,7 +39,7 @@ pi install npm:@m-mohamed/pi-quests
 Install it project-locally so the repo auto-loads Quest for everyone using that checkout:
 
 ```bash
-pi install -l /Users/mohamedmohamed/research/pi-quests
+pi install -l /Users/mohamedmohamed/research/pi-quests/packages/pi-quests
 ```
 
 Or declare it directly in `.pi/settings.json`:
@@ -127,7 +127,7 @@ Quest is a structured execution loop for substantial coding work:
 2. the orchestrator runs a dry-run validation readiness probe before proposal approval
 3. the orchestrator defines the validation contract before the feature list, then writes both to disk for review
 4. `/quest accept` starts execution
-5. workers run one bounded feature at a time in isolated `pi --mode json --no-session` subprocesses
+5. workers run one bounded feature at a time through in-process Pi SDK sessions
 6. fresh validators run milestone checks and surface issues; the orchestrator turns those into targeted fix features before work continues
 7. completion always ends with an explicit human QA checklist and a limited-coverage summary
 
@@ -194,10 +194,9 @@ npm run typecheck
 npm run test
 npm run check
 npm run pack:check
-node --import tsx scripts/evals.ts --suite offline-core
 ```
 
-Maintainer-only optimization, eval, and trace-mining workflows also live in this repo, but they are intentionally outside the main package story. They are documented under `docs/internal/`.
+Maintainer-only optimization, eval, and trace-mining workflows also live in this repo, but they are intentionally outside the main package story. They are documented in the private eval package under `packages/pi-quests-evals/docs/internal/`.
 
 ## Release Workflow
 

@@ -1,13 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runQuestHeadless, type QuestHeadlessRunInput } from "@m-mohamed/pi-quests-core/headless-core";
-import type { ModelChoice, QuestState } from "@m-mohamed/pi-quests-core/types";
+import type { ModelChoice, QuestEvalName, QuestEvalProvenance, QuestEvalRunMode, QuestState } from "./types.js";
+import { runInternalQuestHeadless, type QuestInternalHeadlessRunInput } from "./internal-headless.js";
 
 export interface ParsedArgs {
 	command: "help" | "run";
 	json?: boolean;
-	input?: QuestHeadlessRunInput;
+	input?: QuestInternalHeadlessRunInput;
 }
 
 interface QuestHeadlessCliResult {
@@ -21,38 +21,35 @@ interface QuestHeadlessCliResult {
 	timeoutReason?: string;
 	failureCategory?: string;
 	artifactPaths: Record<string, string>;
+	evaluation?: QuestEvalProvenance;
 }
 
 function currentProgramName(): string {
 	const current = process.argv[1];
-	if (!current) return "quest-headless";
-	return basename(current).replace(/\.(mjs|cjs|js|ts)$/i, "") || "quest-headless";
+	if (!current) return "quest-eval-headless";
+	return basename(current).replace(/\.(mjs|cjs|js|ts)$/i, "") || "quest-eval-headless";
 }
 
 export function usage(programName = currentProgramName()): string {
 	return `Usage:
-  ${programName} run --instruction "Fix the failing task" [options]
-  ${programName} run --instruction-file ./task.txt [options]
-
-What it does:
-  Run a headless Quest and write result artifacts under .pi/quests/<quest-id>/.
+  ${programName} run --instruction "Solve the task" --eval frontierswe --suite frontierswe-sample@v1 --task-id task-001 [options]
+  ${programName} run --instruction-file ./task.txt --eval local --suite local@v1 --task-id suite-id [options]
 
 Options:
   --cwd <path>                     Working directory (default: current directory)
   --model <provider/model>         Model to use (default: zai/glm-5.1)
-  --thinking <level>               Thinking level (default: high)
+  --thinking <level>               Thinking level (default: run-mode dependent)
   --timeout-ms <ms>                Execution timeout budget in milliseconds
   --dry-run                        Stop after proposal generation
   --no-auto-accept                 Keep the quest at proposal_ready
-  --json                           Print machine-readable JSON to stdout
-
-Examples:
-  ${programName} run --instruction-file ./task.txt --json
-  ${programName} run --instruction "Implement the repo task" --cwd "$(pwd)"
-
-Notes:
-  Human mode prints a compact summary, the key artifact path, and the next command.
-  JSON mode preserves the machine-readable contract.`;
+  --profile <id>                   Eval profile id
+  --eval <local|frontierswe>       Eval family
+  --suite <name>                   Eval suite identifier
+  --task-id <id>                   Eval task identifier
+  --checkpoint-id <id>             Eval checkpoint identifier
+  --repo <path>                    FrontierSWE checkout for full-corpus discovery
+  --run-mode <local|sample|full|custom>
+  --json                           Print machine-readable JSON to stdout`;
 }
 
 export function parseModelChoice(modelSpec: string | undefined, thinkingLevel: string | undefined): ModelChoice {
@@ -77,10 +74,17 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 	let cwd = resolve(process.env.PWD ?? ".");
 	let modelSpec: string | undefined;
 	let thinkingLevel: string | undefined;
+	let profileId: string | undefined;
 	let timeoutMs: number | undefined;
 	let dryRun = false;
 	let autoAccept = true;
 	let json = false;
+	let evalName: QuestEvalName | undefined;
+	let suite: string | undefined;
+	let taskId: string | undefined;
+	let checkpointId: string | undefined;
+	let repo: string | undefined;
+	let runMode: QuestEvalRunMode = "custom";
 
 	for (let index = 1; index < argv.length; index++) {
 		const arg = argv[index];
@@ -100,6 +104,9 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 			case "--thinking":
 				thinkingLevel = argv[++index];
 				break;
+			case "--profile":
+				profileId = argv[++index];
+				break;
 			case "--timeout-ms":
 				timeoutMs = Number(argv[++index]);
 				break;
@@ -108,6 +115,24 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 				break;
 			case "--no-auto-accept":
 				autoAccept = false;
+				break;
+			case "--eval":
+				evalName = argv[++index] as QuestEvalName;
+				break;
+			case "--suite":
+				suite = argv[++index];
+				break;
+			case "--task-id":
+				taskId = argv[++index];
+				break;
+			case "--checkpoint-id":
+				checkpointId = argv[++index];
+				break;
+			case "--repo":
+				repo = resolve(argv[++index]);
+				break;
+			case "--run-mode":
+				runMode = argv[++index] as QuestEvalRunMode;
 				break;
 			case "--json":
 				json = true;
@@ -122,6 +147,9 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 
 	if (!instruction && instructionFile) instruction = await readFile(resolve(instructionFile), "utf-8");
 	if (!instruction?.trim()) throw new Error(`Missing instruction.\n\n${usage()}`);
+	if ((evalName || suite || taskId || checkpointId || repo) && (!evalName || !suite || !taskId)) {
+		throw new Error("Eval runs require --eval, --suite, and --task-id together.");
+	}
 
 	return {
 		command: "run",
@@ -129,46 +157,35 @@ export async function parseArgs(argv: string[]): Promise<ParsedArgs> {
 		input: {
 			cwd,
 			instruction: instruction.trim(),
-			modelChoice: parseModelChoice(modelSpec, thinkingLevel),
+			modelChoice: parseModelChoice(
+				modelSpec,
+				thinkingLevel ?? (evalName ? (runMode === "full" ? "medium" : "low") : undefined),
+			),
 			timeoutMs,
 			dryRun,
 			autoAccept,
+			profileId,
+			evaluation: evalName
+				? {
+						name: evalName,
+						dataset: suite!,
+						taskId: taskId!,
+						checkpointId,
+						runMode,
+						adapterVersion: repo ? `frontierswe-repo:${repo}` : `${suite}-adapter`,
+					}
+				: undefined,
 		},
 	};
-}
-
-function humanNextSteps(result: QuestHeadlessCliResult): string[] {
-	if (result.status === "blocked" || result.status === "timeout") {
-		const steps = [`bat ${result.artifactPaths.result}`];
-		if (result.artifactPaths.validationState) steps.push(`bat ${result.artifactPaths.validationState}`);
-		return steps;
-	}
-	return [];
 }
 
 function printHumanSummary(result: QuestHeadlessCliResult): void {
 	console.log(`Quest ${result.questId}`);
 	console.log(`Status: ${result.status}`);
 	console.log(`Summary: ${result.summary}`);
+	console.log(`Profile: ${result.profileId}`);
 	console.log(`Result artifact: ${result.artifactPaths.result}`);
-	if (result.status === "blocked" || result.status === "timeout") {
-		console.log(`Failure: ${result.timeoutReason ?? result.executionFindings[0] ?? result.validatorFindings[0] ?? result.summary}`);
-		if (result.failureCategory) console.log(`Failure category: ${result.failureCategory}`);
-	}
 	console.log(`Traces: ${result.traceBundleIds.join(", ") || "none"}`);
-	if (result.executionFindings.length > 0) {
-		console.log("Execution findings:");
-		for (const finding of result.executionFindings) console.log(`- ${finding}`);
-	}
-	if (result.validatorFindings.length > 0) {
-		console.log("Validator findings:");
-		for (const finding of result.validatorFindings) console.log(`- ${finding}`);
-	}
-	const nextSteps = humanNextSteps(result);
-	if (nextSteps.length > 0) {
-		console.log("Next:");
-		for (const step of nextSteps) console.log(`- ${step}`);
-	}
 }
 
 async function main() {
@@ -179,13 +196,13 @@ async function main() {
 			process.exitCode = 0;
 			return;
 		}
-		const result = await runQuestHeadless(parsed.input!);
+		const result = await runInternalQuestHeadless(parsed.input!);
 		if (parsed.json) {
 			console.log(JSON.stringify({ status: "ok", data: result, warnings: result.validatorFindings }, null, 2));
 		} else {
 			printHumanSummary(result);
 		}
-		process.exitCode = result.status === "blocked" || result.status === "timeout" ? 1 : 0;
+		process.exitCode = 0;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(message);

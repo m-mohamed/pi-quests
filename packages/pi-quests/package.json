@@ -72,6 +72,6 @@
     "extensions": [
       "./src/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/m-mohamed/pi-quests/main/docs/quest-control.png"
+    "image": "https://raw.githubusercontent.com/m-mohamed/pi-quests/main/packages/pi-quests/docs/quest-control.png"
   }
 }
